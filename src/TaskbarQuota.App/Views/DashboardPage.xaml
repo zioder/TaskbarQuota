@@ -1,0 +1,346 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="TaskbarQuota.Views.DashboardPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
+    xmlns:vm="using:TaskbarQuota.ViewModels"
+    mc:Ignorable="d"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    Background="Transparent">
+
+    <Page.Resources>
+        <DataTemplate x:Key="UsageLineTemplate" x:DataType="vm:BarViewModel">
+            <Grid RowSpacing="6">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0" ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0"
+                               Text="{x:Bind Label}"
+                               Style="{StaticResource BodyStrongTextBlockStyle}"
+                               VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="1"
+                               Text="{x:Bind PercentText}"
+                               Foreground="{x:Bind PercentForeground}"
+                               Style="{StaticResource BodyStrongTextBlockStyle}"
+                               VerticalAlignment="Center"/>
+                </Grid>
+
+                <ProgressBar Grid.Row="1"
+                             Value="{x:Bind Percent}"
+                             Maximum="100"
+                             Height="4"
+                             Foreground="{x:Bind BarBrush}"
+                             HorizontalAlignment="Stretch"/>
+
+                <TextBlock Grid.Row="2"
+                           Text="{x:Bind ResetText}"
+                           Visibility="{x:Bind ResetVisibility}"
+                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                           Style="{StaticResource CaptionTextBlockStyle}"/>
+            </Grid>
+        </DataTemplate>
+
+        <DataTemplate x:Key="TextMetricTemplate" x:DataType="vm:TextMetricViewModel">
+            <Grid MinHeight="24"
+                  ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0"
+                           Text="{x:Bind Label}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           Style="{StaticResource BodyTextBlockStyle}"
+                           VerticalAlignment="Center"/>
+                <TextBlock Grid.Column="1"
+                           Text="{x:Bind Value}"
+                           Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                           Style="{StaticResource BodyStrongTextBlockStyle}"
+                           TextAlignment="Right"
+                           VerticalAlignment="Center"/>
+            </Grid>
+        </DataTemplate>
+
+        <DataTemplate x:Key="ProviderCardDetailTemplate" x:DataType="vm:ProviderCardViewModel">
+            <StackPanel Spacing="16" HorizontalAlignment="Stretch">
+                <muxc:InfoBar Visibility="{x:Bind ErrorVisibility}"
+                              IsOpen="True"
+                              IsClosable="False"
+                              Severity="Informational"
+                              Message="{x:Bind Error}">
+                    <muxc:InfoBar.ActionButton>
+                        <HyperlinkButton Content="Fix"
+                                         Tag="{x:Bind ProviderId}"
+                                         Visibility="{x:Bind FixVisibility}"
+                                         AutomationProperties.Name="Fix credentials"
+                                         AutomationProperties.AutomationId="FixCredentialsButton"
+                                         Click="FixCredentials_Click"/>
+                    </muxc:InfoBar.ActionButton>
+                </muxc:InfoBar>
+
+                <Border Visibility="{x:Bind BarsVisibility}"
+                        HorizontalAlignment="Stretch"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="20,16">
+                    <muxc:ItemsRepeater ItemsSource="{x:Bind Bars}"
+                                        ItemTemplate="{StaticResource UsageLineTemplate}">
+                        <muxc:ItemsRepeater.Layout>
+                            <muxc:StackLayout Spacing="20"/>
+                        </muxc:ItemsRepeater.Layout>
+                    </muxc:ItemsRepeater>
+                </Border>
+
+                <Border Visibility="{x:Bind CreditVisibility}"
+                        HorizontalAlignment="Stretch"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="20,16">
+                    <Grid RowSpacing="8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0"
+                                   Text="Credits"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                        <ProgressBar Grid.Row="1"
+                                     Value="{x:Bind CreditPercent}"
+                                     Maximum="100"
+                                     Height="4"
+                                     Foreground="{x:Bind CreditBrush}"/>
+                        <Grid Grid.Row="2" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="{x:Bind CreditLeftText}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="1"
+                                       Text="{x:Bind CreditLimitText}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       VerticalAlignment="Center"/>
+                        </Grid>
+                    </Grid>
+                </Border>
+
+                <Border Visibility="{x:Bind AdditionalUsageVisibility}"
+                        HorizontalAlignment="Stretch"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="20,12">
+                    <StackPanel Spacing="4">
+                        <Grid MinHeight="24" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="Additional usage"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Style="{StaticResource BodyTextBlockStyle}"
+                                       VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="1"
+                                       Text="{x:Bind AdditionalUsageStatusText}"
+                                       Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       TextAlignment="Right"
+                                       VerticalAlignment="Center"/>
+                        </Grid>
+                        <Grid MinHeight="24" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="Spend"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Style="{StaticResource BodyTextBlockStyle}"
+                                       VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="1"
+                                       Text="{x:Bind AdditionalUsageSpendText}"
+                                       Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       TextAlignment="Right"
+                                       VerticalAlignment="Center"/>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <Border Visibility="{x:Bind TextMetricsVisibility}"
+                        HorizontalAlignment="Stretch"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="20,12">
+                    <muxc:ItemsRepeater ItemsSource="{x:Bind TextMetrics}"
+                                        ItemTemplate="{StaticResource TextMetricTemplate}">
+                        <muxc:ItemsRepeater.Layout>
+                            <muxc:StackLayout Spacing="4"/>
+                        </muxc:ItemsRepeater.Layout>
+                    </muxc:ItemsRepeater>
+                </Border>
+
+                <TextBlock Text="{x:Bind CostText}"
+                           Visibility="{x:Bind CostVisibility}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+            </StackPanel>
+        </DataTemplate>
+    </Page.Resources>
+
+    <Grid Background="Transparent"
+          HorizontalAlignment="Stretch"
+          VerticalAlignment="Stretch">
+        <ScrollViewer x:Name="MainScrollViewer"
+                      Padding="0,4,0,24"
+                      VerticalScrollBarVisibility="Hidden"
+                      VerticalScrollMode="Disabled"
+                      HorizontalScrollMode="Disabled"
+                      HorizontalAlignment="Stretch"
+                      HorizontalContentAlignment="Stretch"
+                      VerticalAlignment="Stretch"
+                      VerticalContentAlignment="Stretch">
+            <StackPanel x:Name="DashboardContent"
+                        Spacing="16"
+                        HorizontalAlignment="Stretch"
+                        VerticalAlignment="Top">
+                <Border x:Name="HeaderCard"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="20,16">
+                    <Grid x:Name="HeaderGrid" ColumnSpacing="12" RowSpacing="14">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel x:Name="TitlePanel" Grid.Row="0" Grid.Column="0" Spacing="6" VerticalAlignment="Center">
+                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                <TextBlock Text="{x:Bind ViewModel.SelectedCard.PageTitle, Mode=OneWay}"
+                                           Style="{StaticResource SubtitleTextBlockStyle}"
+                                           VerticalAlignment="Center"/>
+                                <TextBlock Text="{x:Bind ViewModel.SelectedCard.PageTitleAccent, Mode=OneWay}"
+                                           Visibility="{x:Bind ViewModel.SelectedCard.PageTitleAccentVisibility, Mode=OneWay}"
+                                           Style="{StaticResource SubtitleTextBlockStyle}"
+                                           FontWeight="Normal"
+                                           Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                           VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </StackPanel>
+
+                        <StackPanel x:Name="ActionsPanel"
+                                    Grid.Row="1"
+                                    Grid.Column="0"
+                                    Grid.ColumnSpan="2"
+                                    Orientation="Horizontal"
+                                    Spacing="4">
+                            <HyperlinkButton AutomationProperties.AutomationId="OpenUsageDashboardButton"
+                                             AutomationProperties.Name="Open usage dashboard"
+                                             Click="OpenUsageDashboard_Click"
+                                             Padding="4,2">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <TextBlock Text="Usage dashboard" Style="{StaticResource BodyTextBlockStyle}"/>
+                                    <FontIcon Glyph="&#xE8A7;" FontSize="12"/>
+                                </StackPanel>
+                            </HyperlinkButton>
+                        </StackPanel>
+
+                        <Button x:Name="RefreshButton"
+                                Grid.Row="0"
+                                Grid.Column="1"
+                                AutomationProperties.AutomationId="RefreshUsageHeaderButton"
+                                AutomationProperties.Name="Refresh usage"
+                                Command="{x:Bind ViewModel.RefreshCommand}"
+                                Style="{StaticResource AccentButtonStyle}"
+                                VerticalAlignment="Center">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE72C;" FontSize="14"/>
+                                <TextBlock Text="Refresh"/>
+                            </StackPanel>
+                        </Button>
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup>
+                                <VisualState>
+                                    <VisualState.StateTriggers>
+                                        <AdaptiveTrigger MinWindowWidth="0"/>
+                                    </VisualState.StateTriggers>
+                                    <VisualState.Setters>
+                                        <Setter Target="RefreshButton.(Grid.Row)" Value="2"/>
+                                        <Setter Target="RefreshButton.(Grid.Column)" Value="0"/>
+                                        <Setter Target="RefreshButton.HorizontalAlignment" Value="Left"/>
+                                        <Setter Target="ActionsPanel.Orientation" Value="Vertical"/>
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState>
+                                    <VisualState.StateTriggers>
+                                        <AdaptiveTrigger MinWindowWidth="520"/>
+                                    </VisualState.StateTriggers>
+                                    <VisualState.Setters>
+                                        <Setter Target="RefreshButton.(Grid.Row)" Value="0"/>
+                                        <Setter Target="RefreshButton.(Grid.Column)" Value="1"/>
+                                        <Setter Target="RefreshButton.HorizontalAlignment" Value="Stretch"/>
+                                        <Setter Target="ActionsPanel.Orientation" Value="Horizontal"/>
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </Grid>
+                </Border>
+
+                <ContentControl x:Name="SelectedDetailHost"
+                                HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Stretch"
+                                VerticalContentAlignment="Top"
+                                Content="{x:Bind ViewModel.SelectedCard, Mode=OneWay}"
+                                ContentTemplate="{StaticResource ProviderCardDetailTemplate}"/>
+
+                <Grid x:Name="StatusRow" Padding="0,8,0,0" ColumnSpacing="12" VerticalAlignment="Center">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0"
+                               Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="1"
+                               Text="{x:Bind ViewModel.SelectedCard.SourceText, Mode=OneWay}"
+                               Visibility="{x:Bind ViewModel.SelectedCard.SourceVisibility, Mode=OneWay}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               VerticalAlignment="Center"/>
+                </Grid>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Page>

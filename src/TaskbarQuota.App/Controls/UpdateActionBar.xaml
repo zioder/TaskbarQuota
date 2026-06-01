@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="TaskbarQuota.Controls.UpdateActionBar"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    HorizontalAlignment="Stretch">
+
+    <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            BorderThickness="1"
+            CornerRadius="8"
+            Padding="12,10"
+            HorizontalAlignment="Stretch">
+        <Grid RowSpacing="8" HorizontalAlignment="Stretch">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0" ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                    <TextBlock x:Name="StatusText"
+                               Text="Check for the latest release on GitHub."
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap"/>
+                    <TextBlock x:Name="DetailText"
+                               Visibility="Collapsed"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               TextWrapping="Wrap"/>
+                </StackPanel>
+
+                <ProgressRing x:Name="BusyRing"
+                              Grid.Column="1"
+                              Width="20"
+                              Height="20"
+                              IsActive="False"
+                              Visibility="Collapsed"
+                              VerticalAlignment="Center"/>
+
+                <Button x:Name="ActionButton"
+                        Grid.Column="1"
+                        MinWidth="120"
+                        VerticalAlignment="Center"
+                        Click="ActionButton_Click"
+                        AutomationProperties.AutomationId="UpdateActionButton"
+                        Content="Check for updates"/>
+            </Grid>
+
+            <ProgressBar x:Name="DownloadProgress"
+                         Grid.Row="1"
+                         Height="4"
+                         Minimum="0"
+                         Maximum="100"
+                         Visibility="Collapsed"/>
+        </Grid>
+    </Border>
+</UserControl>

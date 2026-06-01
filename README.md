@@ -1,0 +1,220 @@
+<p align="center"><img width="128" height="128" alt="TaskbarQuota" src="src/taskbarquota.png" /></p>
+
+<h1 align="center">TaskbarQuota</h1>
+
+<p align="center">
+  A native <b>Windows</b> taskbar companion that <b>automatically detects which AI tool you are using</b> — the focused desktop app <i>or</i> the agent running in your terminal — and shows live usage for <em>that</em> provider only.<br/>
+  Sessions, rate windows, cost or balance; compact widget beside the tray; full dashboard on demand; no cloud backend.
+</p>
+
+<p align="center">
+  <a href="https://github.com/zioder/TaskbarQuota/releases/latest">
+    <img src="https://img.shields.io/github/v/release/zioder/TaskbarQuota?label=Download%20from%20GitHub&logo=github&logoColor=white&color=24292f&labelColor=57606a" height="32" alt="Download from GitHub Releases" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://www.buymeacoffee.com/zioder"><img height="40" alt="Buy Me A Coffee" src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" /></a>
+</p>
+
+<!-- Demo video: upload to GitHub (drag into a comment or release) and paste the user-attachments URL below. -->
+<!-- Example: https://github.com/user-attachments/assets/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -->
+
+<p align="center">
+  <i>Demo video — replace this block with your uploaded asset URL.</i>
+</p>
+
+---
+
+TaskbarQuota is a **WinUI 3** desktop app that injects a small XAML island into the Windows taskbar (next to the notification area). You do **not** pick a provider from a list every time you switch tools — the app watches what you are actually doing on Windows and switches the widget, flyout, and active fetch to match.
+
+On first launch after upgrading from the internal **WinCheck** codename, settings and `credentials.json` are copied from `%LOCALAPPDATA%\WinCheck` when the TaskbarQuota folder does not already contain them.
+
+## Automatically follows your active tool
+
+TaskbarQuota answers one question: **“What am I using right now, and how much quota is left?”** It distinguishes two cases:
+
+| You are working in… | How TaskbarQuota decides |
+| ------------------- | ------------------------ |
+| **A desktop AI app** (Cursor, Antigravity, Codex, Claude, VS Code with Copilot, …) | The **foreground window** is matched to a provider. |
+| **A terminal** (Windows Terminal, PowerShell, Warp, WezTerm, …) | The focused shell is detected, then running processes are scanned for CLI agents (`claude`, `codex`, `cursor-agent`, `opencode`, `gh copilot`, …). The **most recently started** matching agent wins. |
+
+When you alt-tab from Cursor into a PowerShell session running Claude Code, the widget retargets to **Claude** within about half a second. When you leave all supported tools, the widget can fade until you return to one. If the foreground app is unrelated (browser, Slack, …), TaskbarQuota keeps showing the **last active** provider so the taskbar still has context.
+
+**Examples**
+
+- Cursor IDE focused → **Cursor** usage  
+- Windows Terminal + `claude` in the command line → **Claude** usage  
+- VS Code focused → **GitHub Copilot** usage  
+- OpenCode model switch (Zen vs Go) → provider updates without restarting TaskbarQuota  
+
+After detection, usage is fetched from **local credentials** or **provider APIs** (see [Supported providers](#supported-providers)). Click the widget for a flyout; open the full window for every provider at once, reset times, and manual credential fixes.
+
+## Features
+
+### Taskbar widget
+
+- **In-taskbar compact UI** — usage bars and/or percentages injected beside the system tray (reparents a layered WinUI island into `Shell_TrayWnd`).
+- **Follows taskbar layout** — recenters when the taskbar moves, centers, or when Widgets / tray geometry changes.
+- **Draggable placement** — drag to reposition; offset is saved under `%LOCALAPPDATA%\TaskbarQuota\`.
+- **Click for flyout** — quick provider strip and settings shortcut above the widget.
+- **Fades when idle** — widget can hide when no supported AI tool process is detected; returns when you focus a supported app or terminal session.
+
+### Active-tool detection (desktop app **or** terminal agent)
+
+This is the core behavior — everything else (widget, flyout, fetch cache) hangs off it.
+
+- **Desktop apps** — process name of the focused window: Cursor, Antigravity, Codex, Claude, VS Code / Insiders (Copilot), and similar.
+- **Terminal agents** — if a known terminal is focused, WMI/process scan looks at command lines for Claude Code, Codex, `cursor-agent`, OpenCode, `gh copilot`, Antigravity CLI, and related launchers (Windows Terminal, PowerShell, `pwsh`, WezTerm, Alacritty, …).
+- **Fast switching** — coordinator polls about every **500 ms**, so changing app or shell updates the active provider quickly; usage API calls are cached for **60 seconds** so providers are not spammed.
+- **OpenCode model switch** — watches OpenCode model state to move between OpenCode Zen and OpenCode Go without restarting the app.
+- **Sticky last provider** — unrelated foreground apps do not clear the widget; last detected tool stays until you focus a supported app or terminal again.
+- **Idle hide** — optional fade when no supported AI process is running; comes back when you focus a supported app or terminal session.
+
+### Supported providers
+
+| Provider | What you see | How usage is fetched |
+| -------- | ------------ | -------------------- |
+| **Codex** | Session and rate windows | OAuth token from `%USERPROFILE%\.codex\auth.json` (or `%CODEX_HOME%`) → ChatGPT usage API |
+| **GitHub Copilot** | Quota snapshots | `GITHUB_TOKEN` / `GH_TOKEN`, saved credentials, or `gh auth token` → GitHub Copilot internal API |
+| **Claude** | 5-hour, weekly, and model windows | `%USERPROFILE%\.claude\.credentials.json` or env override → Anthropic OAuth usage API |
+| **Antigravity** | Local status | Running `language_server` process → CSRF token and port → `127.0.0.1` status API |
+| **Cursor** | Usage summary | Cursor `state.vscdb`, browser cookies, or manual cookie header → Cursor / cursor.com APIs |
+| **OpenCode Zen** | Billing usage and balance | Browser cookies for `opencode.ai` or manual cookie → workspace billing pages |
+| **OpenCode Go** | Rolling, weekly, and monthly windows | Same cookie path as Zen → OpenCode server workspace APIs |
+
+Each provider card on the dashboard shows plan name, reset times, rate windows, and optional cost or balance when the API returns it. Use **Fix** on a card when auto-detection fails to paste tokens or cookie headers into `%LOCALAPPDATA%\TaskbarQuota\credentials.json`.
+
+### Dashboard & shell
+
+- **Full dashboard** — all registered providers at once with refresh, error states, and detail cards.
+- **System tray** — Open, show widget, and Exit.
+- **Run at startup** — optional Windows startup registration; can launch widget-only.
+- **Settings** — light / dark / system theme, widget layout (bars, percentages, or both), consumed vs remaining percentage display.
+
+### Privacy
+
+- **Local-only** — no TaskbarQuota backend; usage calls go directly from your PC to each provider (or localhost for Antigravity).
+- **No telemetry** — diagnostics log to `%TEMP%\taskbarquota.log` only.
+- **Cookie extraction is in-memory** — browser cookies are read to build a request header for the active fetch; they are not intentionally persisted (manual credentials in `credentials.json` are plain JSON today — keep that file on your PC only).
+
+## How it works
+
+```text
+ActiveAppDetector
+  ├─ foreground GUI app  → ProviderId
+  └─ focused terminal      → scan CLI processes → ProviderId
+        ↓
+UsageCoordinator (500 ms tick, picks active provider)
+        ↓
+UsageService (provider registry + 60 s success cache, shorter TTL on errors / 429)
+        ↓
+IUsageProvider implementations (HTTP / local API / SQLite / DPAPI)
+        ↓
+TaskBarManager → WidgetSummary (taskbar) + Dashboard + Flyout
+```
+
+1. **Detection** — `ActiveAppDetector` maps the foreground process (or CLI child of a known terminal) to a `ProviderId`.
+2. **Fetch** — the matching `IUsageProvider` loads tokens from CLI config files, environment variables, TaskbarQuota credentials, Cursor's local database, or `CookieExtractor` (Chromium / Firefox profiles, copied to `%TEMP%` for locked DBs).
+3. **Normalize** — results become a `UsageSnapshot` with `RateWindow` rows and optional `CostSnapshot`.
+4. **Display** — `UsageCoordinator` raises `StateChanged`; the taskbar widget and dashboard apply the snapshot. Fetches are cached so providers are not hammered on every tick.
+
+### Architecture at a glance
+
+| Path | Role |
+| ---- | ---- |
+| `src/TaskbarQuota.App/ActiveApp/` | Foreground and CLI provider detection |
+| `src/TaskbarQuota.App/Browser/` | Browser cookie discovery and Chromium decryption |
+| `src/TaskbarQuota.App/Taskbar/` | Widget host, tray icon, taskbar layout watcher |
+| `src/TaskbarQuota.App/Usage/Providers/` | Per-provider fetch logic |
+| `src/TaskbarQuota.App/Usage/UsageService.cs` | Registry and TTL cache |
+| `src/TaskbarQuota.App/UsageCoordinator.cs` | Timer-driven detect → fetch → UI update |
+| `src/TaskbarQuota.App/Views/` | Dashboard and settings |
+| `tests/TaskbarQuota.Tests/` | Unit tests |
+
+## Local development
+
+### Requirements
+
+- **Windows 10** 19041 or newer (Windows 11 recommended for taskbar behavior).
+- [.NET SDK](https://dotnet.microsoft.com/download) **10.0.x** (project targets `net10.0-windows10.0.19041.0`).
+- [Windows App SDK / WinUI 3](https://learn.microsoft.com/windows/apps/winui/winui3/) workload.
+
+You need working sign-in for the providers you test (local OAuth files, GitHub CLI, Cursor install, etc.). No separate server install.
+
+### Build & run
+
+From the repository root:
+
+```powershell
+# Build (Debug, x64)
+dotnet build src/TaskbarQuota.App/TaskbarQuota.App.csproj -c Debug -p:Platform=x64
+
+# Run
+dotnet run --project src/TaskbarQuota.App/TaskbarQuota.App.csproj
+
+# Tests
+dotnet test tests/TaskbarQuota.Tests/TaskbarQuota.Tests.csproj
+```
+
+Diagnostic log:
+
+```text
+%TEMP%\taskbarquota.log
+```
+
+### Manual credentials (optional)
+
+```text
+%LOCALAPPDATA%\TaskbarQuota\credentials.json
+```
+
+```json
+{
+  "cursor": {
+    "cookieHeader": "name=value; other=value"
+  },
+  "copilot": {
+    "apiKey": "github_pat_or_token"
+  },
+  "opencode": {
+    "cookieHeader": "name=value; other=value"
+  }
+}
+```
+
+## Release & distribution
+
+Download the latest installer from [GitHub Releases](https://github.com/zioder/TaskbarQuota/releases).
+
+| Download | CPU |
+| -------- | --- |
+| `TaskbarQuotaSetup-<version>-x64.exe` | Intel / AMD (most PCs) |
+| `TaskbarQuotaSetup-<version>-arm64.exe` | Windows on ARM |
+
+Run the matching `.exe`, then launch TaskbarQuota from the Start menu. Windows may show **SmartScreen** for unsigned builds — **More info** → **Run anyway**.
+
+## Project structure
+
+```text
+TaskbarQuota/
+├── .github/workflows/release.yml   # Tag builds → GitHub Release installers
+├── installer/TaskbarQuota.iss      # Inno Setup (x64 + arm64)
+├── src/
+│   ├── taskbarquota.png            # README / branding icon
+│   └── TaskbarQuota.App/           # WinUI 3 app
+├── tests/TaskbarQuota.Tests/       # Unit tests
+├── TaskbarQuota.slnx
+├── LICENSE
+└── README.md
+```
+
+## License
+
+TaskbarQuota is released under the [MIT License](LICENSE).
+
+## Support
+
+If TaskbarQuota is useful to you, consider supporting development:
+
+<a href="https://www.buymeacoffee.com/zioder"><img height="40" alt="Buy Me A Coffee" src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" /></a>

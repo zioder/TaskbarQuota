@@ -1,0 +1,43 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+artifacts/
+[Dd]ebug/
+[Rr]elease/
+x64/
+ARM64/
+*.dll
+*.exe
+!installer/
+*.pdb
+*.appx*
+*.msix*
+
+# IDE / tooling
+.vs/
+.idea/
+*.user
+*.suo
+*.sln.docstates
+*.rsuser
+TestResults/
+*.cache
+*.log
+
+# Secrets and signing
+credentials.json
+*.pfx
+*.p12
+*.snk
+
+# Local scratch / API probes (do not publish)
+tmp-*
+temp-*
+agent-tools-*
+scratch/
+*.local.json
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

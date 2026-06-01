@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="TaskbarQuota.FlyoutWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:TaskbarQuota.Controls">
+
+    <Grid x:Name="Root" CornerRadius="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Frame x:Name="ContentFrame"
+               Grid.Row="0"
+               Padding="16,12,16,8"
+               HorizontalAlignment="Stretch"
+               HorizontalContentAlignment="Stretch"
+               VerticalAlignment="Stretch"
+               VerticalContentAlignment="Stretch"/>
+
+        <controls:UpdateActionBar x:Name="UpdateBar"
+                                  Grid.Row="1"
+                                  Margin="12,0,12,8"/>
+
+        <StackPanel x:Name="BottomChrome"
+                    Grid.Row="2"
+                    Margin="12,0,12,12"
+                    Spacing="8"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Bottom">
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="4,0">
+                <StackPanel x:Name="ProviderStrip"
+                            MinHeight="48"
+                            Orientation="Horizontal"/>
+            </Border>
+
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8">
+                <Button x:Name="SettingsButton"
+                        Width="48"
+                        Height="48"
+                        MinWidth="0"
+                        MinHeight="0"
+                        Padding="0"
+                        BorderThickness="0"
+                        Background="Transparent"
+                        AutomationProperties.Name="Settings"
+                        AutomationProperties.AutomationId="FlyoutSettingsButton"
+                        Click="SettingsButton_Click"
+                        ToolTipService.ToolTip="Settings">
+                    <FontIcon Glyph="&#xE713;"
+                              FontSize="16"
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                </Button>
+            </Border>
+        </StackPanel>
+    </Grid>
+</Window>

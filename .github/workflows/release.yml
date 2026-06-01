@@ -1,0 +1,170 @@
+# Build TaskbarQuotaSetup-{version}-x64.exe and TaskbarQuotaSetup-{version}-arm64.exe on version tags.
+# GitHub automatically attaches Source code (zip) and Source code (tar.gz) from the tag.
+#
+# Usage:
+#   git tag v1.0.0
+#   git push origin v1.0.0
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  PROJECT: src/TaskbarQuota.App/TaskbarQuota.App.csproj
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Resolve version
+        id: version
+        run: |
+          if ($env:GITHUB_REF -match 'refs/tags/(v.+)$') {
+            $tag = $Matches[1]
+          } else {
+            $tag = "v$((Get-Date -Format 'yyyy.MM.dd'))-manual"
+          }
+
+          $semver = $tag.TrimStart('v')
+          $parts = $semver.Split('.', [StringSplitOptions]::RemoveEmptyEntries)
+          while ($parts.Count -lt 3) { $parts += '0' }
+
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "semver=$semver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+          Write-Host "Tag: $tag"
+          Write-Host "Semver: $semver"
+
+      - name: Restore
+        run: dotnet restore $env:PROJECT
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installers (x64 + arm64)
+        id: build
+        run: |
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found at $iscc" }
+
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          $semver = '${{ steps.version.outputs.semver }}'
+          $parts = $semver.Split('.', [StringSplitOptions]::RemoveEmptyEntries)
+          while ($parts.Count -lt 3) { $parts += '0' }
+          $assemblyVersion = "$($parts[0]).$($parts[1]).$($parts[2]).0"
+          $applicationVersion = [int]$parts[2]
+          $targets = @(
+            @{ Platform = 'x64'; Rid = 'win-x64'; Arch = 'x64' },
+            @{ Platform = 'ARM64'; Rid = 'win-arm64'; Arch = 'arm64' }
+          )
+
+          $hashes = @()
+
+          foreach ($target in $targets) {
+            Write-Host "=== Publishing $($target.Arch) ==="
+            dotnet publish $env:PROJECT `
+              -c Release `
+              -p:Platform=$($target.Platform) `
+              -p:WindowsPackageType=None `
+              -p:Version=$semver `
+              -p:AssemblyVersion=$assemblyVersion `
+              -p:FileVersion=$assemblyVersion `
+              -p:ApplicationDisplayVersion=$semver `
+              -p:ApplicationVersion=$applicationVersion `
+              -r $($target.Rid) `
+              --self-contained true
+
+            $candidates = @(
+              "src/TaskbarQuota.App/bin/$($target.Platform)/Release/net10.0-windows10.0.19041.0/$($target.Rid)/publish",
+              "src/TaskbarQuota.App/bin/Release/net10.0-windows10.0.19041.0/$($target.Rid)/publish"
+            )
+            $publishDirRel = $candidates | Where-Object { Test-Path (Join-Path $_ 'TaskbarQuota.exe') } | Select-Object -First 1
+            if (-not $publishDirRel) {
+              throw "Publish output not found for $($target.Arch)."
+            }
+
+            $publishDir = (Resolve-Path -LiteralPath $publishDirRel).Path
+            $outputDir = (Resolve-Path -LiteralPath artifacts).Path
+
+            Write-Host "Publish directory: $publishDir"
+            & $iscc installer/TaskbarQuota.iss `
+              "/DPublishDir=$publishDir" `
+              "/DMyAppVersion=$semver" `
+              "/DTargetArch=$($target.Arch)" `
+              "/DOutputDir=$outputDir"
+
+            $setupName = "TaskbarQuotaSetup-$semver-$($target.Arch).exe"
+            $built = Get-ChildItem artifacts -Filter $setupName -File | Select-Object -First 1
+            if (-not $built) {
+              throw "Expected $setupName in artifacts."
+            }
+
+            $hash = (Get-FileHash -LiteralPath $built.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $sizeMb = [math]::Round($built.Length / 1MB, 0)
+            $hashes += [pscustomobject]@{ Name = $setupName; Sha256 = $hash; SizeMb = $sizeMb }
+            Write-Host "$setupName — $sizeMb MB — sha256:$hash"
+          }
+
+          $body = @(
+            '## Windows',
+            '',
+            'Pick the installer for your PC:',
+            ''
+          )
+          foreach ($item in $hashes) {
+            $body += "**$($item.Name)**"
+            $body += "sha256:$($item.Sha256)"
+            $body += "$($item.SizeMb) MB"
+            $body += ''
+          }
+          $body += @(
+            'GitHub also provides **Source code (zip)** and **Source code (tar.gz)** for this tag.',
+            '',
+            '### Install',
+            '',
+            '1. Download the `.exe` matching your CPU (`x64` for most PCs, `arm64` for Snapdragon / ARM Windows).',
+            '2. Run the installer and launch TaskbarQuota from the Start menu.',
+            '3. Sign in to your AI tools as usual — TaskbarQuota reads local credentials and browser cookies where needed.',
+            '',
+            'SmartScreen may warn on unsigned builds — **More info** → **Run anyway**.'
+          )
+
+          $releaseBody = $body -join "`n"
+          Set-Content -Path artifacts/RELEASE_BODY.md -Value $releaseBody -Encoding utf8
+
+      - name: Upload workflow artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: taskbarquota-${{ steps.version.outputs.semver }}
+          path: artifacts/TaskbarQuotaSetup-*.exe
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: TaskbarQuota ${{ steps.version.outputs.semver }}
+          files: artifacts/TaskbarQuotaSetup-*.exe
+          generate_release_notes: false
+          body_path: artifacts/RELEASE_BODY.md

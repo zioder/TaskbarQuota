@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="TaskbarQuota.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
+    Title="TaskbarQuota">
+
+    <Grid x:Name="Root" Background="{ThemeResource LayerFillColorDefaultBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="40"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Custom, draggable title bar -->
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Padding="16,0">
+            <TextBlock Text="TaskbarQuota" VerticalAlignment="Center"
+                       Style="{StaticResource CaptionTextBlockStyle}"/>
+        </Grid>
+
+        <muxc:NavigationView x:Name="Nav" Grid.Row="1"
+                             Background="Transparent"
+                             IsBackButtonVisible="Collapsed"
+                             IsSettingsVisible="True"
+                             IsPaneToggleButtonVisible="True"
+                             IsPaneOpen="True"
+                             PaneDisplayMode="Left"
+                             OpenPaneLength="220"
+                             SelectionChanged="Nav_SelectionChanged">
+            <Frame x:Name="ContentFrame"
+                   Padding="24,16,24,0"
+                   HorizontalAlignment="Stretch"
+                   HorizontalContentAlignment="Stretch"
+                   VerticalAlignment="Stretch"
+                   VerticalContentAlignment="Stretch"/>
+        </muxc:NavigationView>
+    </Grid>
+</Window>
