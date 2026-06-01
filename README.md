@@ -17,12 +17,11 @@
   <a href="https://www.buymeacoffee.com/zioder"><img height="40" alt="Buy Me A Coffee" src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" /></a>
 </p>
 
-<!-- Demo video: upload to GitHub (drag into a comment or release) and paste the user-attachments URL below. -->
-<!-- Example: https://github.com/user-attachments/assets/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx -->
 
-<p align="center">
-  <i>Demo video — replace this block with your uploaded asset URL.</i>
-</p>
+
+https://github.com/user-attachments/assets/c339b79f-f3c6-4344-a6e6-bd6d60f75da2
+
+
 
 ---
 
