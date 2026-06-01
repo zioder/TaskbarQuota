@@ -18,6 +18,9 @@ namespace TaskbarQuota.Interop
         public static extern bool GetWindowRect([In] IntPtr hWnd, [Out] out RECT lpRect);
 
         [DllImport("user32.dll")]
+        public static extern bool IsWindow([In] IntPtr hWnd);
+
+        [DllImport("user32.dll")]
         public static extern IntPtr DefWindowProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam);
 
         [DllImport("user32.dll")]

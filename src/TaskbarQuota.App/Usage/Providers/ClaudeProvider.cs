@@ -64,6 +64,9 @@ namespace TaskbarQuota.Usage.Providers
             return new ProviderFetchResult(usage, "oauth");
         }
 
+        internal static ProviderFetchResult BuildResultForTesting(JsonElement json, Credentials creds)
+            => BuildResult(json, creds);
+
         private static string ResolvePlan(string? subscriptionType, string? rateLimitTier)
         {
             var subWords = NormalizedWords(subscriptionType);
@@ -105,7 +108,6 @@ namespace TaskbarQuota.Usage.Providers
             if (!w.TryGetProperty("utilization", out var ut) || ut.ValueKind != JsonValueKind.Number) return null;
 
             double util = ut.GetDouble();
-            if (util > 0 && util <= 1.0) util *= 100.0; // some payloads use 0..1
 
             DateTimeOffset? resetAt = null;
             string? resetDesc = null;

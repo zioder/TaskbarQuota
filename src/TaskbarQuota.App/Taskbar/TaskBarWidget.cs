@@ -60,6 +60,7 @@ namespace TaskbarQuota.Taskbar
         private bool disposedValue;
 
         public IntPtr Handle => hwnd != IntPtr.Zero ? hwnd : throw new InvalidOperationException("Widget not initialized.");
+        public bool IsAlive => hwnd != IntPtr.Zero && User32.IsWindow(hwnd);
         public WidgetSummary? Summary => widgetSummary;
         public event EventHandler? Destroying;
 
@@ -69,6 +70,9 @@ namespace TaskbarQuota.Taskbar
             hwndTrayNotify = User32.FindWindowEx(hwndShell, IntPtr.Zero, NotificationAreaClassName, null);
             hwndReBar = User32.FindWindowEx(hwndShell, IntPtr.Zero, ReBarWindow32ClassName, null);
             hwndStart = User32.FindWindowEx(hwndShell, IntPtr.Zero, "Start", null);
+
+            if (hwndShell == IntPtr.Zero || hwndTrayNotify == IntPtr.Zero || hwndReBar == IntPtr.Zero)
+                throw new InvalidOperationException("Windows taskbar is not ready.");
 
             var dpi = User32.GetDpiForWindow(hwndShell);
             dpiScale = dpi / 96d;
@@ -134,8 +138,8 @@ namespace TaskbarQuota.Taskbar
             int attempts = 0;
             while (attempts++ <= 3)
             {
-                var result = User32.SetParent(hwnd, hwndShell);
-                if (result != IntPtr.Zero)
+                var previousParent = User32.SetParent(hwnd, hwndShell);
+                if (previousParent != IntPtr.Zero || IsParentedToTaskbar())
                 {
                     Log.Information("Widget injected successfully");
                     return;
@@ -144,6 +148,9 @@ namespace TaskbarQuota.Taskbar
             Dispose();
             throw new InvalidOperationException("Could not inject the widget into the taskbar.");
         }
+
+        private bool IsParentedToTaskbar()
+            => User32.GetAncestor(hwnd, GetAncestorFlags.GA_PARENT) == hwndShell;
 
         private void AppWindow_Destroying(AppWindow sender, object args)
         {

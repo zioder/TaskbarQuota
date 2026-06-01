@@ -18,6 +18,9 @@ namespace TaskbarQuota.Taskbar
         private static FlyoutWindow? _flyout;
         private static DispatcherQueue? _dispatcher;
         private static Action? _showMainWindow;
+        private static DispatcherTimer? _widgetHealthTimer;
+        private static bool _initialized;
+        private static bool _isCreatingWidget;
 
         public static void Initialize(DispatcherQueue dispatcher, Action showMainWindow)
         {
@@ -25,13 +28,19 @@ namespace TaskbarQuota.Taskbar
             _showMainWindow = showMainWindow;
 
             CreateTrayIcon();
-            ShowWidget();
+            EnsureWidget();
 
-            UsageCoordinator.Instance.StateChanged += OnStateChanged;
-            UsageCoordinator.Instance.ActiveProviderChanged += OnActiveProviderChanged;
-            UsageCoordinator.Instance.ActiveToolPresenceChanged += OnActiveToolPresenceChanged;
+            if (!_initialized)
+            {
+                UsageCoordinator.Instance.StateChanged += OnStateChanged;
+                UsageCoordinator.Instance.ActiveProviderChanged += OnActiveProviderChanged;
+                UsageCoordinator.Instance.ActiveToolPresenceChanged += OnActiveToolPresenceChanged;
+                App.Quitting += OnQuitting;
+                _initialized = true;
+            }
+
+            StartWidgetHealthTimer();
             OnActiveToolPresenceChanged(UsageCoordinator.Instance.IsActiveToolPresent);
-            App.Quitting += OnQuitting;
         }
 
         private static void CreateTrayIcon()
@@ -70,9 +79,38 @@ namespace TaskbarQuota.Taskbar
             };
         }
 
+        private static void StartWidgetHealthTimer()
+        {
+            if (_widgetHealthTimer != null)
+                return;
+
+            _widgetHealthTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+            _widgetHealthTimer.Tick += (_, _) => EnsureWidget();
+            _widgetHealthTimer.Start();
+        }
+
+        private static void EnsureWidget()
+        {
+            if (_isCreatingWidget)
+                return;
+
+            if (_widget is { } widget)
+            {
+                if (widget.IsAlive)
+                    return;
+
+                Log.Warning("Taskbar widget window disappeared; recreating");
+                try { widget.Dispose(); } catch (Exception ex) { Log.Warning(ex, "Failed to dispose missing taskbar widget"); }
+                _widget = null;
+            }
+
+            ShowWidget();
+        }
+
         private static void ShowWidget()
         {
             if (_widget != null) return;
+            _isCreatingWidget = true;
             try
             {
                 var widget = new TaskBarWidget();
@@ -87,6 +125,10 @@ namespace TaskbarQuota.Taskbar
             catch (Exception ex)
             {
                 Log.Error(ex, "Failed to create taskbar widget");
+            }
+            finally
+            {
+                _isCreatingWidget = false;
             }
         }
 
@@ -157,6 +199,9 @@ namespace TaskbarQuota.Taskbar
             UsageCoordinator.Instance.StateChanged -= OnStateChanged;
             UsageCoordinator.Instance.ActiveProviderChanged -= OnActiveProviderChanged;
             UsageCoordinator.Instance.ActiveToolPresenceChanged -= OnActiveToolPresenceChanged;
+            _initialized = false;
+            _widgetHealthTimer?.Stop();
+            _widgetHealthTimer = null;
             if (_trayIcon != null) { _trayIcon.TryRemove(); _trayIcon.Dispose(); _trayIcon = null; }
             try { _flyout?.Close(); } catch { }
             _flyout = null;
