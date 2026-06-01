@@ -2,8 +2,8 @@
 # GitHub automatically attaches Source code (zip) and Source code (tar.gz) from the tag.
 #
 # Usage:
-#   git tag v1.0.2
-#   git push origin v1.0.2
+#   git tag v1.0.3
+#   git push origin v1.0.3
 
 name: Release
 

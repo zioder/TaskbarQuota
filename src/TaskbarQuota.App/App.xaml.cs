@@ -2,6 +2,7 @@ using System;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using TaskbarQuota.Diagnostics;
+using TaskbarQuota.Services;
 using TaskbarQuota.Taskbar;
 
 namespace TaskbarQuota
@@ -40,6 +41,14 @@ namespace TaskbarQuota
                 TaskBarManager.Initialize(Dispatcher, ShowMainWindow);
             };
             startupTimer.Start();
+
+            var updateTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) };
+            updateTimer.Tick += (_, _) =>
+            {
+                updateTimer.Stop();
+                _ = UpdateAvailabilityService.Instance.CheckSilentlyAsync();
+            };
+            updateTimer.Start();
 
             if (!IsWidgetStartup(args.Arguments))
             {

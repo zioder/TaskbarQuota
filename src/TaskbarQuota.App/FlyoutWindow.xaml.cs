@@ -12,6 +12,7 @@ using Windows.Foundation;
 using Windows.Graphics;
 using TaskbarQuota.Controls;
 using TaskbarQuota.Interop;
+using TaskbarQuota.Services;
 using TaskbarQuota.Usage;
 using TaskbarQuota.ViewModels;
 using TaskbarQuota.Views;
@@ -83,6 +84,8 @@ namespace TaskbarQuota
             GetAppWindow().Show();
             Activate();
             ApplyFlyoutBounds();
+
+            _ = UpdateAvailabilityService.Instance.CheckSilentlyAsync();
         }
 
         private void RegisterWindowSizeHooks()

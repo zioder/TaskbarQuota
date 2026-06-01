@@ -1,253 +1,228 @@
 using System;
-using System.Diagnostics;
-using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using TaskbarQuota.Helpers;
 using TaskbarQuota.Services;
 using Windows.System;
 
 namespace TaskbarQuota.Controls;
 
+public enum UpdateActionBarPlacement
+{
+  Flyout,
+  Settings,
+}
+
 public sealed partial class UpdateActionBar : UserControl
 {
-    private enum UpdateUiState
+  private static readonly DependencyProperty PlacementProperty =
+      DependencyProperty.Register(
+          nameof(Placement),
+          typeof(UpdateActionBarPlacement),
+          typeof(UpdateActionBar),
+          new PropertyMetadata(UpdateActionBarPlacement.Flyout, OnPlacementChanged));
+
+  private readonly UpdateAvailabilityService _updates = UpdateAvailabilityService.Instance;
+
+  public UpdateActionBarPlacement Placement
+  {
+    get => (UpdateActionBarPlacement)GetValue(PlacementProperty);
+    set => SetValue(PlacementProperty, value);
+  }
+
+  public UpdateActionBar()
+  {
+    InitializeComponent();
+    Visibility = Visibility.Collapsed;
+    Loaded += OnLoaded;
+    Unloaded += OnUnloaded;
+  }
+
+  private static void OnPlacementChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+  {
+    if (d is UpdateActionBar bar)
+      bar.ApplyAvailability();
+  }
+
+  private void OnLoaded(object sender, RoutedEventArgs e)
+  {
+    _updates.Changed += OnAvailabilityChanged;
+    ApplyAvailability();
+  }
+
+  private void OnUnloaded(object sender, RoutedEventArgs e)
+  {
+    _updates.Changed -= OnAvailabilityChanged;
+  }
+
+  private void OnAvailabilityChanged() =>
+      _ = DispatcherQueue.TryEnqueue(ApplyAvailability);
+
+  private bool IsSettingsMode => Placement == UpdateActionBarPlacement.Settings;
+
+  private void ApplyAvailability()
+  {
+    if (_updates.IsChecking)
     {
-        Idle,
-        Checking,
-        UpToDate,
-        UpdateAvailable,
-        Downloading,
-        ReadyToInstall,
-        Error,
+      if (IsSettingsMode)
+        ApplySettingsChecking();
+      else
+        Visibility = Visibility.Collapsed;
+
+      return;
     }
 
-    private readonly UpdateCheckerService _updateChecker = new();
-    private UpdateUiState _state = UpdateUiState.Idle;
-    private UpdateCheckResult? _pendingResult;
-    private DownloadedUpdate? _downloadedUpdate;
-    private CancellationTokenSource? _operationCts;
-
-    public UpdateActionBar()
+    if (!_updates.IsBannerVisible)
     {
-        InitializeComponent();
-        Loaded += (_, _) => SetState(UpdateUiState.Idle);
+      if (IsSettingsMode)
+      {
+        ApplySettingsIdle();
+        return;
+      }
+
+      Visibility = Visibility.Collapsed;
+      return;
     }
 
-    public async Task RunCheckAsync()
+    Visibility = Visibility.Visible;
+    ActionButton.ClearValue(StyleProperty);
+    ActionButton.Style = (Style)Application.Current.Resources["AccentButtonStyle"];
+
+    switch (_updates.UiState)
     {
-        if (_state is UpdateUiState.Checking or UpdateUiState.Downloading)
-            return;
-
-        await CheckForUpdatesAsync();
-    }
-
-    private async void ActionButton_Click(object sender, RoutedEventArgs e)
-    {
-        switch (_state)
-        {
-            case UpdateUiState.Idle:
-            case UpdateUiState.UpToDate:
-            case UpdateUiState.Error:
-                if (_pendingResult?.ReleaseUrl is { } releasePage
-                    && ActionButton.Content?.ToString() == "View release")
-                {
-                    _ = Launcher.LaunchUriAsync(releasePage);
-                }
-                else
-                {
-                    await CheckForUpdatesAsync();
-                }
-                break;
-            case UpdateUiState.UpdateAvailable:
-                await DownloadUpdateAsync();
-                break;
-            case UpdateUiState.ReadyToInstall:
-                LaunchInstallerAndQuit();
-                break;
-        }
-    }
-
-    private async Task CheckForUpdatesAsync()
-    {
-        CancelOperation();
-        _operationCts = new CancellationTokenSource();
-        var ct = _operationCts.Token;
-        _pendingResult = null;
-        _downloadedUpdate = null;
-
-        SetState(UpdateUiState.Checking);
-        try
-        {
-            var current = AppVersion.GetDisplayLabel();
-            var result = await _updateChecker.CheckAsync(current, ct);
-            _pendingResult = result;
-
-            if (result.Kind == UpdateCheckResultKind.UpToDate)
-            {
-                SetState(UpdateUiState.UpToDate, $"You are on v{current}.");
-                return;
-            }
-
-            if (result.DownloadUrl is null)
-            {
-                SetState(UpdateUiState.Error, "Update found but no installer asset is attached to the release.");
-                ActionButton.Content = "View release";
-                return;
-            }
-
-            SetState(UpdateUiState.UpdateAvailable, $"v{result.Version} is available (you have v{current}).");
-        }
-        catch (OperationCanceledException)
-        {
-            SetState(UpdateUiState.Idle);
-        }
-        catch (Exception ex)
-        {
-            SetState(UpdateUiState.Error, ex.Message);
-        }
-    }
-
-    private async Task DownloadUpdateAsync()
-    {
-        if (_pendingResult is not { Kind: UpdateCheckResultKind.UpdateAvailable } result)
-            return;
-
-        CancelOperation();
-        _operationCts = new CancellationTokenSource();
-        var ct = _operationCts.Token;
-
-        SetState(UpdateUiState.Downloading, $"Downloading v{result.Version}…");
-        try
-        {
-            var progress = new Progress<UpdateDownloadProgress>(report =>
-            {
-                _ = DispatcherQueue.TryEnqueue(() => ReportDownload(report));
-            });
-
-            _downloadedUpdate = await _updateChecker.DownloadAsync(result, progress, ct);
-            SetState(UpdateUiState.ReadyToInstall, $"Installer ready — v{_downloadedUpdate.Version}.");
-        }
-        catch (OperationCanceledException)
-        {
-            SetState(UpdateUiState.UpdateAvailable, $"v{result.Version} is available.");
-        }
-        catch (Exception ex)
-        {
-            SetState(UpdateUiState.UpdateAvailable, $"Download failed: {ex.Message}");
-            ActionButton.Content = "Retry download";
-        }
-    }
-
-    private void LaunchInstallerAndQuit()
-    {
-        if (_downloadedUpdate is null && _pendingResult?.DownloadUrl is { } releaseUrl)
-        {
-            _ = Launcher.LaunchUriAsync(releaseUrl);
-            return;
-        }
-
-        if (_downloadedUpdate is not { } update)
-            return;
-
-        Process.Start(new ProcessStartInfo(update.FilePath)
-        {
-            UseShellExecute = true,
-        });
-
-        App.Quit();
-    }
-
-    private void ReportDownload(UpdateDownloadProgress progress)
-    {
-        if (progress.TotalBytes is > 0)
-        {
-            DownloadProgress.IsIndeterminate = false;
-            DownloadProgress.Value = progress.Percent;
-            DetailText.Text =
-                $"{FormatByteSize(progress.BytesReceived)} / {FormatByteSize(progress.TotalBytes.Value)} ({progress.Percent:0}%)";
-            DetailText.Visibility = Visibility.Visible;
-        }
-        else
-        {
-            DownloadProgress.IsIndeterminate = true;
-            DetailText.Text = $"{FormatByteSize(progress.BytesReceived)} downloaded";
-            DetailText.Visibility = Visibility.Visible;
-        }
-    }
-
-    private void SetState(UpdateUiState state, string? message = null)
-    {
-        _state = state;
+      case UpdateAvailabilityUiState.UpdateAvailable:
+        StatusText.Text = _updates.StatusMessage ?? "New update available!";
+        DetailText.Visibility = Visibility.Collapsed;
         BusyRing.Visibility = Visibility.Collapsed;
         BusyRing.IsActive = false;
         DownloadProgress.Visibility = Visibility.Collapsed;
-        DownloadProgress.IsIndeterminate = false;
-        DownloadProgress.Value = 0;
-        DetailText.Visibility = Visibility.Collapsed;
+        ActionButton.Visibility = Visibility.Visible;
         ActionButton.IsEnabled = true;
+        ActionButton.Content = _updates.AvailableUpdate?.DownloadUrl is null
+            ? "View release"
+            : "Download update";
+        break;
 
-        switch (state)
+      case UpdateAvailabilityUiState.Downloading:
+        StatusText.Text = _updates.StatusMessage ?? "Downloading update…";
+        BusyRing.Visibility = Visibility.Collapsed;
+        ActionButton.Visibility = Visibility.Collapsed;
+        DownloadProgress.Visibility = Visibility.Visible;
+        DownloadProgress.IsIndeterminate = true;
+        break;
+
+      case UpdateAvailabilityUiState.ReadyToInstall:
+        StatusText.Text = _updates.StatusMessage ?? "New update available! Install now.";
+        DetailText.Visibility = Visibility.Collapsed;
+        BusyRing.Visibility = Visibility.Collapsed;
+        DownloadProgress.Visibility = Visibility.Collapsed;
+        ActionButton.Visibility = Visibility.Visible;
+        ActionButton.IsEnabled = true;
+        ActionButton.Content = "Install update";
+        break;
+
+      default:
+        if (IsSettingsMode)
+          ApplySettingsIdle();
+        else
+          Visibility = Visibility.Collapsed;
+
+        break;
+    }
+  }
+
+  private void ApplySettingsIdle()
+  {
+    Visibility = Visibility.Visible;
+    StatusText.Text = _updates.UpToDateSummary
+        ?? "Check for updates on GitHub when you are ready.";
+    DetailText.Visibility = Visibility.Collapsed;
+    BusyRing.Visibility = Visibility.Collapsed;
+    BusyRing.IsActive = false;
+    DownloadProgress.Visibility = Visibility.Collapsed;
+    ActionButton.Visibility = Visibility.Visible;
+    ActionButton.IsEnabled = true;
+    ActionButton.Content = "Check for updates";
+    ActionButton.ClearValue(StyleProperty);
+  }
+
+  private void ApplySettingsChecking()
+  {
+    Visibility = Visibility.Visible;
+    StatusText.Text = "Checking for updates…";
+    DetailText.Visibility = Visibility.Collapsed;
+    BusyRing.Visibility = Visibility.Visible;
+    BusyRing.IsActive = true;
+    DownloadProgress.Visibility = Visibility.Collapsed;
+    ActionButton.Visibility = Visibility.Collapsed;
+  }
+
+  private async void ActionButton_Click(object sender, RoutedEventArgs e)
+  {
+    if (IsSettingsMode && !_updates.IsBannerVisible && !_updates.IsChecking)
+    {
+      await _updates.CheckManuallyAsync();
+      return;
+    }
+
+    switch (_updates.UiState)
+    {
+      case UpdateAvailabilityUiState.UpdateAvailable:
+        if (_updates.AvailableUpdate?.DownloadUrl is null
+            && _updates.AvailableUpdate?.ReleaseUrl is { } releaseUrl)
         {
-            case UpdateUiState.Idle:
-                StatusText.Text = message ?? "Check for the latest release on GitHub.";
-                ActionButton.Content = "Check for updates";
-                ActionButton.Visibility = Visibility.Visible;
-                break;
-            case UpdateUiState.Checking:
-                StatusText.Text = message ?? "Checking for updates…";
-                BusyRing.Visibility = Visibility.Visible;
-                BusyRing.IsActive = true;
-                ActionButton.Visibility = Visibility.Collapsed;
-                ActionButton.IsEnabled = false;
-                break;
-            case UpdateUiState.UpToDate:
-                StatusText.Text = message ?? "You are up to date.";
-                ActionButton.Content = "Check again";
-                ActionButton.Visibility = Visibility.Visible;
-                break;
-            case UpdateUiState.UpdateAvailable:
-                StatusText.Text = message ?? "A new version is available.";
-                ActionButton.Content = "Download update";
-                ActionButton.Visibility = Visibility.Visible;
-                break;
-            case UpdateUiState.Downloading:
-                StatusText.Text = message ?? "Downloading update…";
-                DownloadProgress.Visibility = Visibility.Visible;
-                DownloadProgress.IsIndeterminate = true;
-                ActionButton.Visibility = Visibility.Collapsed;
-                ActionButton.IsEnabled = false;
-                break;
-            case UpdateUiState.ReadyToInstall:
-                StatusText.Text = message ?? "Update downloaded.";
-                ActionButton.Content = "Install update";
-                ActionButton.Visibility = Visibility.Visible;
-                break;
-            case UpdateUiState.Error:
-                StatusText.Text = message ?? "Could not check for updates.";
-                ActionButton.Content = "Check for updates";
-                ActionButton.Visibility = Visibility.Visible;
-                break;
+          _ = Launcher.LaunchUriAsync(releaseUrl);
         }
-    }
+        else
+        {
+          await DownloadAsync();
+        }
 
-    private void CancelOperation()
+        break;
+
+      case UpdateAvailabilityUiState.ReadyToInstall:
+        _updates.InstallAndQuit();
+        break;
+    }
+  }
+
+  private async Task DownloadAsync()
+  {
+    var progress = new Progress<UpdateDownloadProgress>(report =>
     {
-        _operationCts?.Cancel();
-        _operationCts?.Dispose();
-        _operationCts = null;
-    }
+      _ = DispatcherQueue.TryEnqueue(() => ReportDownload(report));
+    });
 
-    private static string FormatByteSize(long bytes)
+    await _updates.DownloadAsync(progress);
+  }
+
+  private void ReportDownload(UpdateDownloadProgress progress)
+  {
+    if (progress.TotalBytes is > 0)
     {
-        if (bytes < 1_024)
-            return $"{bytes} B";
-
-        var size = bytes / 1024.0;
-        if (size < 1_024)
-            return $"{size:0.#} KB";
-
-        return $"{size / 1024.0:0.#} MB";
+      DownloadProgress.IsIndeterminate = false;
+      DownloadProgress.Value = progress.Percent;
+      DetailText.Text =
+          $"{FormatByteSize(progress.BytesReceived)} / {FormatByteSize(progress.TotalBytes.Value)} ({progress.Percent:0}%)";
+      DetailText.Visibility = Visibility.Visible;
     }
+    else
+    {
+      DownloadProgress.IsIndeterminate = true;
+      DetailText.Text = $"{FormatByteSize(progress.BytesReceived)} downloaded";
+      DetailText.Visibility = Visibility.Visible;
+    }
+  }
+
+  private static string FormatByteSize(long bytes)
+  {
+    if (bytes < 1_024)
+      return $"{bytes} B";
+
+    var size = bytes / 1024.0;
+    if (size < 1_024)
+      return $"{size:0.#} KB";
+
+    return $"{size / 1024.0:0.#} MB";
+  }
 }

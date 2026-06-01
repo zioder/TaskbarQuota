@@ -28,8 +28,8 @@
 
                 <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                     <TextBlock x:Name="StatusText"
-                               Text="Check for the latest release on GitHub."
-                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Text="New update available!"
+                               Style="{StaticResource BodyStrongTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                TextWrapping="Wrap"/>
                     <TextBlock x:Name="DetailText"
@@ -53,7 +53,8 @@
                         VerticalAlignment="Center"
                         Click="ActionButton_Click"
                         AutomationProperties.AutomationId="UpdateActionButton"
-                        Content="Check for updates"/>
+                        Content="Install update"
+                        Style="{StaticResource AccentButtonStyle}"/>
             </Grid>
 
             <ProgressBar x:Name="DownloadProgress"

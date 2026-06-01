@@ -85,7 +85,8 @@
                 </tk:SettingsCard.Header>
             </tk:SettingsCard>
 
-            <controls:UpdateActionBar x:Name="SettingsUpdateBar"/>
+            <controls:UpdateActionBar x:Name="SettingsUpdateBar"
+                                        Placement="Settings"/>
 
         </StackPanel>
     </ScrollViewer>
