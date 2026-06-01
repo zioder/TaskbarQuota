@@ -50,7 +50,7 @@ namespace TaskbarQuota
             };
             updateTimer.Start();
 
-            if (!IsWidgetStartup(args.Arguments))
+            if (!IsWidgetStartup(args.Arguments, Environment.GetCommandLineArgs()))
             {
                 try
                 {
@@ -97,9 +97,25 @@ namespace TaskbarQuota
             Current.Exit();
         }
 
-        private static bool IsWidgetStartup(string? arguments)
-            => StartupSettingsService.IsEnabled
-            && !string.IsNullOrWhiteSpace(arguments)
+        internal static bool IsWidgetStartup(string? activationArguments, string[]? commandLineArguments = null)
+        {
+            if (ContainsStartupArgument(activationArguments))
+                return true;
+
+            if (commandLineArguments is not null)
+            {
+                foreach (var argument in commandLineArguments)
+                {
+                    if (string.Equals(argument, StartupSettingsService.StartupArgument, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool ContainsStartupArgument(string? arguments)
+            => !string.IsNullOrWhiteSpace(arguments)
             && arguments.Contains(StartupSettingsService.StartupArgument, StringComparison.OrdinalIgnoreCase);
     }
 }
