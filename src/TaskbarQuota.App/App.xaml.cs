@@ -17,7 +17,11 @@ namespace TaskbarQuota
         public App()
         {
             InitializeComponent();
-            UnhandledException += (_, e) => Log.Error(e.Exception, "Unhandled exception");
+            UnhandledException += (_, e) =>
+            {
+                Log.Error(e.Exception, "Unhandled exception");
+                e.Handled = true;
+            };
         }
 
         protected override void OnLaunched(LaunchActivatedEventArgs args)
@@ -64,7 +68,6 @@ namespace TaskbarQuota
             catch (Exception ex)
             {
                 Log.Error(ex, "Failed to show main window");
-                throw;
             }
         }
 

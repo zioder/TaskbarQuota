@@ -2,8 +2,8 @@
 # GitHub automatically attaches Source code (zip) and Source code (tar.gz) from the tag.
 #
 # Usage:
-#   git tag v1.0.1
-#   git push origin v1.0.1
+#   git tag v1.0.2
+#   git push origin v1.0.2
 
 name: Release
 
@@ -110,6 +110,37 @@ jobs:
             }
 
             $publishDir = (Resolve-Path -LiteralPath $publishDirRel).Path
+            $binDir = (Resolve-Path -LiteralPath "src/TaskbarQuota.App/bin/$($target.Platform)/Release/net10.0-windows10.0.19041.0/$($target.Rid)").Path
+
+            # dotnet publish often omits loose .xbf even with DisableEmbeddedXbf; copy from build output.
+            $xbfFiles = Get-ChildItem -Path $binDir -Filter '*.xbf' -Recurse -File
+            if ($xbfFiles.Count -eq 0) {
+              throw "No .xbf files in $binDir — WinUI markup did not compile."
+            }
+
+            foreach ($xbf in $xbfFiles) {
+              $relative = $xbf.FullName.Substring($binDir.Length).TrimStart('\', '/')
+              $dest = Join-Path $publishDir $relative
+              $destDir = Split-Path $dest -Parent
+              if ($destDir -and -not (Test-Path $destDir)) {
+                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+              }
+              Copy-Item -LiteralPath $xbf.FullName -Destination $dest -Force
+            }
+
+            $requiredXbf = @(
+              'MainWindow.xbf',
+              'FlyoutWindow.xbf',
+              'Views\DashboardPage.xbf',
+              'Controls\WidgetSummary.xbf'
+            )
+            foreach ($rel in $requiredXbf) {
+              if (-not (Test-Path (Join-Path $publishDir $rel))) {
+                throw "Publish output is missing $rel — installer would crash on launch."
+              }
+            }
+
+            Write-Host "Copied $($xbfFiles.Count) .xbf file(s) into publish directory."
             $outputDir = (Resolve-Path -LiteralPath artifacts).Path
 
             Write-Host "Publish directory: $publishDir"
