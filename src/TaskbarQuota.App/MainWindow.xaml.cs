@@ -51,8 +51,8 @@ namespace TaskbarQuota
 
         private void ApplyFluentChrome()
         {
-            // Signature Fluent material.
-            SystemBackdrop = new MicaBackdrop { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.Base };
+            // Desktop acrylic works on all supported targets; Mica can fail on some installs.
+            SystemBackdrop = new DesktopAcrylicBackdrop();
 
             // Custom title bar.
             ExtendsContentIntoTitleBar = true;

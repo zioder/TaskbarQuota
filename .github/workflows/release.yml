@@ -2,8 +2,8 @@
 # GitHub automatically attaches Source code (zip) and Source code (tar.gz) from the tag.
 #
 # Usage:
-#   git tag v1.0.0
-#   git push origin v1.0.0
+#   git tag v1.0.1
+#   git push origin v1.0.1
 
 name: Release
 
@@ -102,6 +102,11 @@ jobs:
             $publishDirRel = $candidates | Where-Object { Test-Path (Join-Path $_ 'TaskbarQuota.exe') } | Select-Object -First 1
             if (-not $publishDirRel) {
               throw "Publish output not found for $($target.Arch)."
+            }
+
+            $priPath = Join-Path $publishDirRel 'TaskbarQuota.pri'
+            if (-not (Test-Path $priPath)) {
+              throw "Publish output is missing TaskbarQuota.pri (WinUI XAML resources). Installer would crash on launch."
             }
 
             $publishDir = (Resolve-Path -LiteralPath $publishDirRel).Path

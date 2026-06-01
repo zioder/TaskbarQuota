@@ -38,17 +38,34 @@ namespace TaskbarQuota
             startupTimer.Start();
 
             if (!IsWidgetStartup(args.Arguments))
-                ShowMainWindow();
+            {
+                try
+                {
+                    ShowMainWindow();
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "Failed to open main window on launch");
+                }
+            }
         }
 
         public void ShowMainWindow()
         {
-            if (_mainWindow is null)
+            try
             {
-                _mainWindow = new MainWindow();
-                _mainWindow.Closed += (_, _) => _mainWindow = null;
+                if (_mainWindow is null)
+                {
+                    _mainWindow = new MainWindow();
+                    _mainWindow.Closed += (_, _) => _mainWindow = null;
+                }
+                _mainWindow.ShowFromTray();
             }
-            _mainWindow.ShowFromTray();
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to show main window");
+                throw;
+            }
         }
 
         public void ShowSettings()
