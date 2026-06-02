@@ -154,10 +154,11 @@ namespace TaskbarQuota.Controls
 
             var tooltipLines = _rows.Select(FormatTooltipLine);
             var plan = FormatPlanLabel(result.Id, result.DisplayName, usage.LoginMethod);
+            var costTooltip = WidgetCostTooltipLine(result.Id, usage.Cost);
             ToolTipService.SetToolTip(this,
                 string.IsNullOrEmpty(plan)
-                    ? $"{result.DisplayName}\n{string.Join("\n", tooltipLines)}{(usage.Cost != null ? $"\n{usage.Cost.Label}: {usage.Cost.Display}" : "")}"
-                    : $"{result.DisplayName} · {plan}\n{string.Join("\n", tooltipLines)}{(usage.Cost != null ? $"\n{usage.Cost.Label}: {usage.Cost.Display}" : "")}");
+                    ? $"{result.DisplayName}\n{string.Join("\n", tooltipLines)}{costTooltip}"
+                    : $"{result.DisplayName} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}");
         }
 
         public void SetActiveToolVisible(bool isVisible)
@@ -186,6 +187,17 @@ namespace TaskbarQuota.Controls
 
         private static List<WidgetUsageRow> BuildRows(UsageResult result, UsageSnapshot usage)
         {
+            if (result.Id == ProviderId.Codex)
+            {
+                var rows = BuildBaseRows(result, usage);
+                rows.AddRange(usage.ExtraRateWindows.Select(w => new WidgetUsageRow(
+                    CompactLabel(w.Title),
+                    WidgetSettingsService.DisplayPercent(w.Window.UsedPercent),
+                    WidgetSettingsService.FormatDisplayPercent(w.Window.UsedPercent),
+                    w.Window.ResetDescription)));
+                return rows;
+            }
+
             if (usage.ExtraRateWindows.Count > 0)
             {
                 return usage.ExtraRateWindows
@@ -200,6 +212,14 @@ namespace TaskbarQuota.Controls
             if (result.Id == ProviderId.Cursor)
                 return BuildCursorRows(result, usage);
 
+            return BuildBaseRows(result, usage);
+        }
+
+        internal static IReadOnlyList<string> BuildRowLabelsForTesting(UsageResult result, UsageSnapshot usage)
+            => BuildRows(result, usage).Select(row => row.Label).ToList();
+
+        private static List<WidgetUsageRow> BuildBaseRows(UsageResult result, UsageSnapshot usage)
+        {
             var rows = new List<WidgetUsageRow>
             {
                 new(
@@ -322,6 +342,22 @@ namespace TaskbarQuota.Controls
 
         private static string FormatCreditCount(double value)
             => value.ToString(value % 1 == 0 ? "N0" : "N1", CultureInfo.InvariantCulture);
+
+        private static string WidgetCostTooltipLine(ProviderId id, CostSnapshot? cost)
+        {
+            if (cost is null)
+                return string.Empty;
+
+            if (id == ProviderId.Codex && cost.Label == "Credits")
+            {
+                if (cost.Amount <= 0)
+                    return string.Empty;
+
+                return $"\nCredits: {FormatCreditCount(cost.Amount)} remaining";
+            }
+
+            return $"\n{cost.Label}: {cost.Display}";
+        }
 
         private void ApplyAntigravityDisplay(UsageSnapshot usage)
         {
@@ -871,6 +907,7 @@ namespace TaskbarQuota.Controls
                 "Auto + Composer Usage" => "Auto+Composer",
                 "API Usage" => "API",
                 "Session" => "Session",
+                "Spark Session" => "Spark Session",
                 _ when label.Contains("claude", StringComparison.OrdinalIgnoreCase) => "Claude",
                 _ when label.Contains("gemini", StringComparison.OrdinalIgnoreCase) && label.Contains("flash", StringComparison.OrdinalIgnoreCase) => "Gemini Flash",
                 _ when label.Contains("gemini", StringComparison.OrdinalIgnoreCase) && label.Contains("pro", StringComparison.OrdinalIgnoreCase) => "Gemini Pro",

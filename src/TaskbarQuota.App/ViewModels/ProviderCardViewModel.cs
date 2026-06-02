@@ -81,6 +81,7 @@ namespace TaskbarQuota.ViewModels
         public double CreditPercent { get; }
         public Brush CreditBrush { get; }
         public Visibility CreditVisibility { get; }
+        public double CreditOpacity { get; }
 
         public string SourceText { get; }
         public Visibility SourceVisibility { get; }
@@ -120,6 +121,7 @@ namespace TaskbarQuota.ViewModels
             CreditLimitText = string.Empty;
             CreditPercent = 0;
             CreditBrush = Ui.ConsumedUsageBrush(0);
+            CreditOpacity = 1.0;
             if (r.Ok && r.Fetch is { } f)
             {
                 var u = f.Usage;
@@ -161,6 +163,7 @@ namespace TaskbarQuota.ViewModels
                         CreditBrush = Ui.ConsumedUsageBrush(CreditPercent);
                         CreditLeftText = $"{FormatCount(used)}/{FormatCount(limit)} Credits";
                         CreditLimitText = FormatCreditReset(credits.ResetsAt, u.Primary.ResetDescription);
+                        CreditOpacity = r.Id == ProviderId.Codex && remaining <= 0 ? 0.55 : 1.0;
                         CostText = string.Empty;
                     }
                     else

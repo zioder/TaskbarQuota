@@ -10,7 +10,7 @@ namespace TaskbarQuota
         public const int LogicalWidth = 428;
 
         /// <summary>Header + tallest provider detail + status (content width 396).</summary>
-        public const int LogicalContentHeight = 390;
+        public const int LogicalContentHeight = 430;
 
         /// <summary>Frame padding + scroll padding + bottom chrome (update bar is optional / collapsed).</summary>
         public const int ChromeLogicalHeight = 122;

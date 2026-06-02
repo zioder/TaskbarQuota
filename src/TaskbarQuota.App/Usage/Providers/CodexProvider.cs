@@ -60,7 +60,7 @@ namespace TaskbarQuota.Usage.Providers
             return BuildResult(doc.RootElement, headerPrimary, headerSecondary, headerCredits);
         }
 
-        private static ProviderFetchResult BuildResult(JsonElement json, double? headerPrimary = null, double? headerSecondary = null, double? headerCredits = null)
+        internal static ProviderFetchResult BuildResult(JsonElement json, double? headerPrimary = null, double? headerSecondary = null, double? headerCredits = null)
         {
             var (primary, secondary, codeReview) = ExtractRateLimits(json);
             if (headerPrimary is double hp) primary = WithUsedPercent(primary, hp);
@@ -74,10 +74,14 @@ namespace TaskbarQuota.Usage.Providers
             var usage = new UsageSnapshot(primary);
             if (secondary != null) usage.Secondary = secondary;
             if (codeReview != null) usage.ModelSpecific = codeReview;
-            AddAdditionalRateLimits(json, usage);
 
-            if (json.TryGetProperty("plan_type", out var planEl) && planEl.ValueKind == JsonValueKind.String)
-                usage.LoginMethod = PlanDisplay(planEl.GetString()!);
+            string? planType = json.TryGetProperty("plan_type", out var planEl) && planEl.ValueKind == JsonValueKind.String
+                ? planEl.GetString()
+                : null;
+            AddAdditionalRateLimits(json, usage, planType);
+
+            if (!string.IsNullOrWhiteSpace(planType))
+                usage.LoginMethod = PlanDisplay(planType!);
 
             if (json.TryGetProperty("email", out var emailEl) && emailEl.ValueKind == JsonValueKind.String)
                 usage.Email = emailEl.GetString();
@@ -111,7 +115,7 @@ namespace TaskbarQuota.Usage.Providers
             return (new RateWindow(0), null, null);
         }
 
-        private static void AddAdditionalRateLimits(JsonElement json, UsageSnapshot usage)
+        private static void AddAdditionalRateLimits(JsonElement json, UsageSnapshot usage, string? planType)
         {
             if (!json.TryGetProperty("additional_rate_limits", out var limits) || limits.ValueKind != JsonValueKind.Array)
                 return;
@@ -131,12 +135,23 @@ namespace TaskbarQuota.Usage.Providers
                 string shortName = CodexModelPrefix.Replace(rawName, string.Empty);
                 if (string.IsNullOrWhiteSpace(shortName))
                     shortName = string.IsNullOrWhiteSpace(rawName) ? "Model" : rawName;
+                if (IsSparkLimit(shortName) && !IsProPlan(planType))
+                    continue;
 
                 if (rl.TryGetProperty("primary_window", out var primary) && primary.ValueKind == JsonValueKind.Object)
-                    usage.ExtraRateWindows.Add(new NamedRateWindow($"{shortName}-session", shortName, ParseWindow(primary)));
+                    usage.ExtraRateWindows.Add(new NamedRateWindow($"{shortName}-session", $"{shortName} Session", ParseWindow(primary)));
                 if (rl.TryGetProperty("secondary_window", out var secondary) && secondary.ValueKind == JsonValueKind.Object)
                     usage.ExtraRateWindows.Add(new NamedRateWindow($"{shortName}-weekly", $"{shortName} Weekly", ParseWindow(secondary)));
             }
+        }
+
+        private static bool IsSparkLimit(string shortName)
+            => string.Equals(shortName.Trim(), "Spark", StringComparison.OrdinalIgnoreCase);
+
+        private static bool IsProPlan(string? planType)
+        {
+            var normalized = NormalizePlanType(planType);
+            return normalized is "pro" or "prolite" or "pro_lite" or "pro-lite";
         }
 
         private static RateWindow ParseWindow(JsonElement window)
@@ -207,20 +222,22 @@ namespace TaskbarQuota.Usage.Providers
             return $"{mins}m";
         }
 
-        private static string PlanDisplay(string pt) => pt switch
+        private static string PlanDisplay(string pt) => NormalizePlanType(pt) switch
         {
             "guest" => "Guest",
             "free" => "Free",
             "go" => "Go",
             "plus" => "Plus",
-            "pro" => "Pro",
-            "pro_lite" or "prolite" or "pro-lite" => "Pro Lite",
+            "pro" => "Pro 20x",
+            "pro_lite" or "prolite" or "pro-lite" => "Pro 5x",
             "team" => "Team",
             "business" => "Business",
             "enterprise" => "Enterprise",
             "education" or "edu" => "Education",
             _ => Capitalize(pt),
         };
+
+        private static string NormalizePlanType(string? pt) => (pt ?? string.Empty).Trim().ToLowerInvariant();
 
         private static string Capitalize(string s) => string.IsNullOrEmpty(s) ? s : char.ToUpperInvariant(s[0]) + s[1..];
 

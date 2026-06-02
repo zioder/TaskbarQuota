@@ -104,6 +104,7 @@
                 </Border>
 
                 <Border Visibility="{x:Bind CreditVisibility}"
+                        Opacity="{x:Bind CreditOpacity}"
                         HorizontalAlignment="Stretch"
                         Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
