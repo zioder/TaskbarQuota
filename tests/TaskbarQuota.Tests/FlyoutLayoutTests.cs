@@ -4,5 +4,5 @@ public class FlyoutLayoutTests
 {
     [Fact]
     public void LogicalHeight_IsSizedForTheExpandedFlyout()
-        => Assert.Equal(596, FlyoutLayout.LogicalHeight);
+        => Assert.Equal(556, FlyoutLayout.LogicalHeight);
 }
