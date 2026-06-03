@@ -35,6 +35,7 @@ namespace TaskbarQuota.Taskbar
                 UsageCoordinator.Instance.StateChanged += OnStateChanged;
                 UsageCoordinator.Instance.ActiveProviderChanged += OnActiveProviderChanged;
                 UsageCoordinator.Instance.ActiveToolPresenceChanged += OnActiveToolPresenceChanged;
+                WidgetSettingsService.Changed += OnWidgetSettingsChanged;
                 App.Quitting += OnQuitting;
                 _initialized = true;
             }
@@ -151,7 +152,8 @@ namespace TaskbarQuota.Taskbar
                 if (toApply is { } result)
                     summary.Apply(result, force: true);
 
-                summary.SetActiveToolVisible(coordinator.IsActiveToolPresent);
+                bool isVisible = coordinator.IsActiveToolPresent && WidgetSettingsService.IsProviderVisible(target);
+                summary.SetActiveToolVisible(isVisible);
 
                 if (toApply is null)
                     _ = coordinator.TickAsync(force: true);
@@ -182,7 +184,12 @@ namespace TaskbarQuota.Taskbar
             if (result.Id != active)
                 return;
 
-            widget.Summary.DispatcherQueue.TryEnqueue(() => widget.Summary.Apply(result));
+            widget.Summary.DispatcherQueue.TryEnqueue(() =>
+            {
+                widget.Summary.Apply(result);
+                bool isVisible = UsageCoordinator.Instance.IsActiveToolPresent && WidgetSettingsService.IsProviderVisible(active);
+                widget.Summary.SetActiveToolVisible(isVisible);
+            });
         }
 
         private static void OnActiveProviderChanged(ProviderId? _) => SyncWidgetState();
@@ -191,7 +198,14 @@ namespace TaskbarQuota.Taskbar
         {
             var widget = _widget;
             if (widget?.Summary is null) return;
-            widget.Summary.DispatcherQueue.TryEnqueue(() => widget.Summary.SetActiveToolVisible(isPresent));
+            var active = UsageCoordinator.Instance.ActiveProvider ?? ProviderId.Codex;
+            bool isVisible = isPresent && WidgetSettingsService.IsProviderVisible(active);
+            widget.Summary.DispatcherQueue.TryEnqueue(() => widget.Summary.SetActiveToolVisible(isVisible));
+        }
+
+        private static void OnWidgetSettingsChanged(object? sender, EventArgs e)
+        {
+            _dispatcher?.TryEnqueue(SyncWidgetState);
         }
 
         private static void OnQuitting()
@@ -199,6 +213,7 @@ namespace TaskbarQuota.Taskbar
             UsageCoordinator.Instance.StateChanged -= OnStateChanged;
             UsageCoordinator.Instance.ActiveProviderChanged -= OnActiveProviderChanged;
             UsageCoordinator.Instance.ActiveToolPresenceChanged -= OnActiveToolPresenceChanged;
+            WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
             _initialized = false;
             _widgetHealthTimer?.Stop();
             _widgetHealthTimer = null;

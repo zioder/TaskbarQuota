@@ -53,6 +53,15 @@ namespace TaskbarQuota.Controls
         private Storyboard? _visibilityStoryboard;
         private Storyboard? _softRefreshStoryboard;
 
+        /// <summary>
+        /// Returns the display name for the constrained taskbar widget.
+        /// Providers with long brand names (e.g. "GitHub Copilot") expose a short DisplayName ("Copilot")
+        /// so the tray widget stays compact; the app dashboard maps the short name back to the full brand
+        /// name via <see cref="PlanDisplayNames.ForPageHeader"/>.
+        /// </summary>
+        private static string WidgetDisplayName(string fullName)
+            => string.IsNullOrEmpty(fullName) ? fullName : fullName;
+
         public HorizontalAlignment ElementsAlignment
         {
             get => Panel.HorizontalAlignment;
@@ -93,6 +102,12 @@ namespace TaskbarQuota.Controls
 
         public void Apply(UsageResult result, bool force = false)
         {
+            if (!WidgetSettingsService.IsProviderVisible(result.Id))
+            {
+                SetActiveToolVisible(false);
+                return;
+            }
+
             var signature = BuildRenderSignature(result);
             if (!force && _lastRenderSignature == signature)
                 return;
@@ -101,7 +116,9 @@ namespace TaskbarQuota.Controls
             _lastRenderSignature = signature;
             _lastResult = result;
             ApplyTaskbarForeground();
-            BadgeText.Text = Abbrev(result.DisplayName);
+
+            var widgetName = WidgetDisplayName(result.DisplayName);
+            BadgeText.Text = Abbrev(widgetName);
 
             var glyph = TaskbarQuota.ViewModels.Ui.Glyph(result.Id);
             if (glyph != null)
@@ -126,7 +143,7 @@ namespace TaskbarQuota.Controls
                 };
                 RenderRows();
                 AnimateRender(isFirstReveal);
-                ToolTipService.SetToolTip(this, $"{result.DisplayName}: {result.Error ?? "Unavailable"}");
+                ToolTipService.SetToolTip(this, $"{widgetName}: {result.Error ?? "Unavailable"}");
                 return;
             }
 
@@ -148,17 +165,22 @@ namespace TaskbarQuota.Controls
             }
 
             _rows = BuildRows(result, usage);
+            if (_rows.Count == 0)
+            {
+                SetActiveToolVisible(false);
+                return;
+            }
             RenderRows();
             SetBars();
             AnimateRender(isFirstReveal);
 
             var tooltipLines = _rows.Select(FormatTooltipLine);
-            var plan = FormatPlanLabel(result.Id, result.DisplayName, usage.LoginMethod);
+            var plan = FormatPlanLabel(result.Id, widgetName, usage.LoginMethod);
             var costTooltip = WidgetCostTooltipLine(result.Id, usage.Cost);
             ToolTipService.SetToolTip(this,
                 string.IsNullOrEmpty(plan)
-                    ? $"{result.DisplayName}\n{string.Join("\n", tooltipLines)}{costTooltip}"
-                    : $"{result.DisplayName} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}");
+                    ? $"{widgetName}\n{string.Join("\n", tooltipLines)}{costTooltip}"
+                    : $"{widgetName} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}");
         }
 
         public void SetActiveToolVisible(bool isVisible)
@@ -190,23 +212,30 @@ namespace TaskbarQuota.Controls
             if (result.Id == ProviderId.Codex)
             {
                 var rows = BuildBaseRows(result, usage);
-                rows.AddRange(usage.ExtraRateWindows.Select(w => new WidgetUsageRow(
-                    CompactLabel(w.Title),
-                    WidgetSettingsService.DisplayPercent(w.Window.UsedPercent),
-                    WidgetSettingsService.FormatDisplayPercent(w.Window.UsedPercent),
-                    w.Window.ResetDescription)));
+                if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
+                {
+                    rows.AddRange(usage.ExtraRateWindows.Select(w => new WidgetUsageRow(
+                        CompactLabel(w.Title),
+                        WidgetSettingsService.DisplayPercent(w.Window.UsedPercent),
+                        WidgetSettingsService.FormatDisplayPercent(w.Window.UsedPercent),
+                        w.Window.ResetDescription)));
+                }
                 return rows;
             }
 
             if (usage.ExtraRateWindows.Count > 0)
             {
-                return usage.ExtraRateWindows
-                    .Select(w => new WidgetUsageRow(
-                        CompactLabel(w.Title),
-                        WidgetSettingsService.DisplayPercent(w.Window.UsedPercent),
-                        WidgetSettingsService.FormatDisplayPercent(w.Window.UsedPercent),
-                        w.Window.ResetDescription))
-                    .ToList();
+                if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
+                {
+                    return usage.ExtraRateWindows
+                        .Select(w => new WidgetUsageRow(
+                            CompactLabel(w.Title),
+                            WidgetSettingsService.DisplayPercent(w.Window.UsedPercent),
+                            WidgetSettingsService.FormatDisplayPercent(w.Window.UsedPercent),
+                            w.Window.ResetDescription))
+                        .ToList();
+                }
+                return new List<WidgetUsageRow>();
             }
 
             if (result.Id == ProviderId.Cursor)
@@ -220,32 +249,39 @@ namespace TaskbarQuota.Controls
 
         private static List<WidgetUsageRow> BuildBaseRows(UsageResult result, UsageSnapshot usage)
         {
-            var rows = new List<WidgetUsageRow>
+            var rows = new List<WidgetUsageRow>();
+            if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowPrimary))
             {
-                new(
+                rows.Add(new WidgetUsageRow(
                     CompactLabel(result.Provider?.SessionLabel ?? "Usage"),
                     WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
                     WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent),
-                    usage.Primary.ResetDescription),
-            };
-            if (usage.Secondary != null)
+                    usage.Primary.ResetDescription));
+            }
+            if (usage.Secondary != null && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowSecondary))
+            {
                 rows.Add(new WidgetUsageRow(
                     CompactLabel(result.Provider?.WeeklyLabel ?? "Usage"),
                     WidgetSettingsService.DisplayPercent(usage.Secondary.UsedPercent),
                     WidgetSettingsService.FormatDisplayPercent(usage.Secondary.UsedPercent),
                     usage.Secondary.ResetDescription));
-            if (usage.ModelSpecific != null)
+            }
+            if (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowModelSpecific))
+            {
                 rows.Add(new WidgetUsageRow(
                     CompactLabel(ModelSpecificLabel(result.Id)),
                     WidgetSettingsService.DisplayPercent(usage.ModelSpecific.UsedPercent),
                     WidgetSettingsService.FormatDisplayPercent(usage.ModelSpecific.UsedPercent),
                     usage.ModelSpecific.ResetDescription));
-            if (usage.Monthly != null)
+            }
+            if (usage.Monthly != null && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowMonthly))
+            {
                 rows.Add(new WidgetUsageRow(
                     "Monthly",
                     WidgetSettingsService.DisplayPercent(usage.Monthly.UsedPercent),
                     WidgetSettingsService.FormatDisplayPercent(usage.Monthly.UsedPercent),
                     usage.Monthly.ResetDescription));
+            }
 
             return rows;
         }
@@ -254,25 +290,26 @@ namespace TaskbarQuota.Controls
         {
             var rows = new List<WidgetUsageRow>();
 
-            if (usage.Secondary != null)
+            if (usage.Secondary != null && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowSecondary))
                 rows.Add(new WidgetUsageRow(
                     CompactLabel(result.Provider?.WeeklyLabel ?? "Auto + Composer Usage"),
                     WidgetSettingsService.DisplayPercent(usage.Secondary.UsedPercent),
                     WidgetSettingsService.FormatDisplayPercent(usage.Secondary.UsedPercent),
                     usage.Secondary.ResetDescription));
 
-            if (usage.ModelSpecific != null)
+            if (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowModelSpecific))
                 rows.Add(new WidgetUsageRow(
                     CompactLabel(ModelSpecificLabel(result.Id)),
                     WidgetSettingsService.DisplayPercent(usage.ModelSpecific.UsedPercent),
                     WidgetSettingsService.FormatDisplayPercent(usage.ModelSpecific.UsedPercent),
                     usage.ModelSpecific.ResetDescription));
 
-            rows.Add(new WidgetUsageRow(
-                CompactLabel(result.Provider?.SessionLabel ?? "Total usage"),
-                WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
-                WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent),
-                usage.Primary.ResetDescription));
+            if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowPrimary))
+                rows.Add(new WidgetUsageRow(
+                    CompactLabel(result.Provider?.SessionLabel ?? "Total usage"),
+                    WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
+                    WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent),
+                    usage.Primary.ResetDescription));
 
             return rows;
         }
@@ -281,11 +318,21 @@ namespace TaskbarQuota.Controls
         {
             _forcePercentagesOnly = true;
             var balanceText = usage.Secondary?.ResetDescription;
-            _rows = new()
+            var rows = new List<WidgetUsageRow>();
+            if (WidgetSettingsService.IsRowVisible(ProviderId.OpenCode, WidgetSettingsService.RowUsage))
             {
-                new WidgetUsageRow("Usage", 0, usage.Cost?.Display ?? "--", HasBar: false),
-                new WidgetUsageRow("Balance", 0, balanceText != null ? "$" + balanceText.Split(' ')[0] : "--", HasBar: false),
-            };
+                rows.Add(new WidgetUsageRow("Usage", 0, usage.Cost?.Display ?? "--", HasBar: false));
+            }
+            if (WidgetSettingsService.IsRowVisible(ProviderId.OpenCode, WidgetSettingsService.RowBalance))
+            {
+                rows.Add(new WidgetUsageRow("Balance", 0, balanceText != null ? "$" + balanceText.Split(' ')[0] : "--", HasBar: false));
+            }
+            _rows = rows;
+            if (_rows.Count == 0)
+            {
+                SetActiveToolVisible(false);
+                return;
+            }
             RenderRows();
             AnimateRender(!_hasRevealed);
 
@@ -303,21 +350,23 @@ namespace TaskbarQuota.Controls
             double usedPercent = limit <= 0 ? 0 : Math.Clamp(used / limit * 100, 0, 100);
             string value = $"{FormatCreditCount(used)}/{FormatCreditCount(limit)}";
 
-            _rows = new()
+            var widgetName = WidgetDisplayName(result.DisplayName);
+            var rows = new List<WidgetUsageRow>();
+            if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowCredits))
             {
-                new WidgetUsageRow(
+                rows.Add(new WidgetUsageRow(
                     "Credits",
                     usedPercent,
                     value,
-                    usage.Primary.ResetDescription),
-            };
+                    usage.Primary.ResetDescription));
+            }
 
-            if (usage.AdditionalUsage is { Enabled: true } additional)
+            if (usage.AdditionalUsage is { Enabled: true } additional && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowAdditionalUsage))
             {
                 double spendPercent = additional.BudgetUsd is > 0
                     ? Math.Clamp(additional.SpentUsd / additional.BudgetUsd.Value * 100, 0, 100)
                     : 0;
-                _rows.Add(new WidgetUsageRow(
+                rows.Add(new WidgetUsageRow(
                     "Add'l usage",
                     spendPercent,
                     additional.SpendText,
@@ -325,14 +374,20 @@ namespace TaskbarQuota.Controls
                     HasBar: false));
             }
 
+            _rows = rows;
+            if (_rows.Count == 0)
+            {
+                SetActiveToolVisible(false);
+                return;
+            }
             RenderRows();
             SetBars();
             AnimateRender(!_hasRevealed);
 
-            var plan = FormatPlanLabel(result.Id, result.DisplayName, usage.LoginMethod);
+            var plan = FormatPlanLabel(result.Id, widgetName, usage.LoginMethod);
             var tooltip = string.IsNullOrEmpty(plan)
-                ? $"{result.DisplayName}\nCredits: {value} ({FormatCreditCount(remaining)} remaining)"
-                : $"{result.DisplayName} · {plan}\nCredits: {value} ({FormatCreditCount(remaining)} remaining)";
+                ? $"{widgetName}\nCredits: {value} ({FormatCreditCount(remaining)} remaining)"
+                : $"{widgetName} · {plan}\nCredits: {value} ({FormatCreditCount(remaining)} remaining)";
             if (usage.AdditionalUsage is { Enabled: true } addl)
                 tooltip += $"\nAdditional usage: {addl.StatusText} ({addl.SpendText})";
             if (usage.Primary.ResetDescription is { } resetDesc)
@@ -361,15 +416,25 @@ namespace TaskbarQuota.Controls
 
         private void ApplyAntigravityDisplay(UsageSnapshot usage)
         {
-            _rows = new()
+            var rows = new List<WidgetUsageRow>();
+            if (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowPrimary))
             {
-                new WidgetUsageRow("Gemini", WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
+                rows.Add(new WidgetUsageRow("Gemini", WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
                     WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent), usage.Primary.ResetDescription,
-                    GlyphData: ProviderGlyphs.Gemini),
-                new WidgetUsageRow("Non-Gemini", WidgetSettingsService.DisplayPercent(usage.Secondary?.UsedPercent ?? 0),
+                    GlyphData: ProviderGlyphs.Gemini));
+            }
+            if (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowSecondary))
+            {
+                rows.Add(new WidgetUsageRow("Non-Gemini", WidgetSettingsService.DisplayPercent(usage.Secondary?.UsedPercent ?? 0),
                     WidgetSettingsService.FormatDisplayPercent(usage.Secondary?.UsedPercent ?? 0), usage.Secondary?.ResetDescription,
-                    GlyphData: ProviderGlyphs.GeminiBarred),
-            };
+                    GlyphData: ProviderGlyphs.GeminiBarred));
+            }
+            _rows = rows;
+            if (_rows.Count == 0)
+            {
+                SetActiveToolVisible(false);
+                return;
+            }
             RenderRows();
             AnimateRender(!_hasRevealed);
 
@@ -911,6 +976,7 @@ namespace TaskbarQuota.Controls
                 _ when label.Contains("claude", StringComparison.OrdinalIgnoreCase) => "Claude",
                 _ when label.Contains("gemini", StringComparison.OrdinalIgnoreCase) && label.Contains("flash", StringComparison.OrdinalIgnoreCase) => "Gemini Flash",
                 _ when label.Contains("gemini", StringComparison.OrdinalIgnoreCase) && label.Contains("pro", StringComparison.OrdinalIgnoreCase) => "Gemini Pro",
+                _ when label.Contains("github copilot", StringComparison.OrdinalIgnoreCase) => "Copilot",
                 _ => label.Length > 12 ? label[..12] : label,
             };
         }

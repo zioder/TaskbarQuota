@@ -12,14 +12,35 @@
 
     <Page.Resources>
         <DataTemplate x:Key="UsageLineTemplate" x:DataType="vm:BarViewModel">
-            <Grid RowSpacing="6">
+            <Grid RowSpacing="6" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
-                <Grid Grid.Row="0" ColumnSpacing="12">
+                <Border Grid.Column="0" Grid.Row="0" Grid.RowSpan="2"
+                        VerticalAlignment="Stretch"
+                        HorizontalAlignment="Center">
+                    <ToggleButton VerticalAlignment="Center"
+                                  AutomationProperties.Name="{x:Bind WidgetToggleName}"
+                                  IsChecked="{x:Bind IsWidgetVisible, Mode=OneTime}"
+                                  IsEnabled="{x:Bind IsWidgetToggleEnabled, Mode=OneTime}"
+                                  Tag="{x:Bind}"
+                                  Padding="6"
+                                  MinWidth="32"
+                                  MinHeight="32"
+                                  ToolTipService.ToolTip="Show in taskbar widget"
+                                  Click="WidgetRowVisibility_Click">
+                        <FontIcon Glyph="&#xE890;" FontSize="12"/>
+                    </ToggleButton>
+                </Border>
+
+                <Grid Grid.Column="1" Grid.Row="0" ColumnSpacing="12">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
@@ -35,14 +56,14 @@
                                VerticalAlignment="Center"/>
                 </Grid>
 
-                <ProgressBar Grid.Row="1"
+                <ProgressBar Grid.Column="1" Grid.Row="1"
                              Value="{x:Bind Percent}"
                              Maximum="100"
                              Height="4"
                              Foreground="{x:Bind BarBrush}"
                              HorizontalAlignment="Stretch"/>
 
-                <TextBlock Grid.Row="2"
+                <TextBlock Grid.Column="1" Grid.Row="2"
                            Text="{x:Bind ResetText}"
                            Visibility="{x:Bind ResetVisibility}"
                            Foreground="{ThemeResource TextFillColorTertiaryBrush}"
@@ -54,15 +75,28 @@
             <Grid MinHeight="24"
                   ColumnSpacing="12">
                 <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0"
+                <ToggleButton Grid.Column="0"
+                              AutomationProperties.Name="{x:Bind WidgetToggleName}"
+                              IsChecked="{x:Bind IsWidgetVisible, Mode=OneTime}"
+                              IsEnabled="{x:Bind IsWidgetToggleEnabled, Mode=OneTime}"
+                              Tag="{x:Bind}"
+                              Padding="6"
+                              MinWidth="32"
+                              MinHeight="32"
+                              ToolTipService.ToolTip="Show in taskbar widget"
+                              Click="WidgetRowVisibility_Click">
+                    <FontIcon Glyph="&#xE890;" FontSize="12"/>
+                </ToggleButton>
+                <TextBlock Grid.Column="1"
                            Text="{x:Bind Label}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                            Style="{StaticResource BodyTextBlockStyle}"
                            VerticalAlignment="Center"/>
-                <TextBlock Grid.Column="1"
+                <TextBlock Grid.Column="2"
                            Text="{x:Bind Value}"
                            Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                            Style="{StaticResource BodyStrongTextBlockStyle}"
@@ -111,22 +145,43 @@
                         BorderThickness="1"
                         CornerRadius="8"
                         Padding="20,16">
-                    <Grid RowSpacing="8">
+                    <Grid RowSpacing="8" ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
-                        <TextBlock Grid.Row="0"
+                        <Border Grid.Column="0" Grid.Row="0" Grid.RowSpan="2"
+                                VerticalAlignment="Stretch"
+                                HorizontalAlignment="Center">
+                            <ToggleButton VerticalAlignment="Center"
+                                          AutomationProperties.Name="{x:Bind CreditWidgetToggle.WidgetToggleName}"
+                                          IsChecked="{x:Bind CreditWidgetToggle.IsWidgetVisible, Mode=OneTime}"
+                                          IsEnabled="{x:Bind CreditWidgetToggle.IsWidgetToggleEnabled, Mode=OneTime}"
+                                          Tag="{x:Bind CreditWidgetToggle}"
+                                          Padding="6"
+                                          MinWidth="32"
+                                          MinHeight="32"
+                                          ToolTipService.ToolTip="Show in taskbar widget"
+                                          Click="WidgetRowVisibility_Click">
+                                <FontIcon Glyph="&#xE890;" FontSize="12"/>
+                            </ToggleButton>
+                        </Border>
+                        <TextBlock Grid.Column="1" Grid.Row="0"
                                    Text="Credits"
-                                   Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                        <ProgressBar Grid.Row="1"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}"
+                                   VerticalAlignment="Center"/>
+                        <ProgressBar Grid.Column="1" Grid.Row="1"
                                      Value="{x:Bind CreditPercent}"
                                      Maximum="100"
                                      Height="4"
                                      Foreground="{x:Bind CreditBrush}"/>
-                        <Grid Grid.Row="2" ColumnSpacing="12">
+                        <Grid Grid.Column="1" Grid.Row="2" ColumnSpacing="12">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
@@ -152,8 +207,34 @@
                         BorderThickness="1"
                         CornerRadius="8"
                         Padding="20,12">
-                    <StackPanel Spacing="4">
-                        <Grid MinHeight="24" ColumnSpacing="12">
+                    <Grid RowSpacing="4" ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <Border Grid.Column="0" Grid.Row="0" Grid.RowSpan="2"
+                                VerticalAlignment="Stretch"
+                                HorizontalAlignment="Center">
+                            <ToggleButton VerticalAlignment="Center"
+                                          AutomationProperties.Name="{x:Bind AdditionalUsageWidgetToggle.WidgetToggleName}"
+                                          IsChecked="{x:Bind AdditionalUsageWidgetToggle.IsWidgetVisible, Mode=OneTime}"
+                                          IsEnabled="{x:Bind AdditionalUsageWidgetToggle.IsWidgetToggleEnabled, Mode=OneTime}"
+                                          Tag="{x:Bind AdditionalUsageWidgetToggle}"
+                                          Padding="6"
+                                          MinWidth="32"
+                                          MinHeight="32"
+                                          ToolTipService.ToolTip="Show in taskbar widget"
+                                          Click="WidgetRowVisibility_Click">
+                                <FontIcon Glyph="&#xE890;" FontSize="12"/>
+                            </ToggleButton>
+                        </Border>
+
+                        <Grid Grid.Column="1" Grid.Row="0" MinHeight="24" ColumnSpacing="12">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
@@ -170,7 +251,7 @@
                                        TextAlignment="Right"
                                        VerticalAlignment="Center"/>
                         </Grid>
-                        <Grid MinHeight="24" ColumnSpacing="12">
+                        <Grid Grid.Column="1" Grid.Row="1" MinHeight="24" ColumnSpacing="12">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
@@ -187,7 +268,7 @@
                                        TextAlignment="Right"
                                        VerticalAlignment="Center"/>
                         </Grid>
-                    </StackPanel>
+                    </Grid>
                 </Border>
 
                 <Border Visibility="{x:Bind TextMetricsVisibility}"
@@ -208,6 +289,7 @@
                 <TextBlock Text="{x:Bind CostText}"
                            Visibility="{x:Bind CostVisibility}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+
             </StackPanel>
         </DataTemplate>
     </Page.Resources>
@@ -244,18 +326,16 @@
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
-                        <StackPanel x:Name="TitlePanel" Grid.Row="0" Grid.Column="0" Spacing="6" VerticalAlignment="Center">
-                            <StackPanel Orientation="Horizontal" Spacing="10">
-                                <TextBlock Text="{x:Bind ViewModel.SelectedCard.PageTitle, Mode=OneWay}"
-                                           Style="{StaticResource SubtitleTextBlockStyle}"
-                                           VerticalAlignment="Center"/>
-                                <TextBlock Text="{x:Bind ViewModel.SelectedCard.PageTitleAccent, Mode=OneWay}"
-                                           Visibility="{x:Bind ViewModel.SelectedCard.PageTitleAccentVisibility, Mode=OneWay}"
-                                           Style="{StaticResource SubtitleTextBlockStyle}"
-                                           FontWeight="Normal"
-                                           Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
-                                           VerticalAlignment="Center"/>
-                            </StackPanel>
+                        <StackPanel x:Name="TitlePanel" Grid.Row="0" Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Text="{x:Bind ViewModel.SelectedCard.PageTitle, Mode=OneWay}"
+                                       Style="{StaticResource SubtitleTextBlockStyle}"
+                                       VerticalAlignment="Center"/>
+                            <TextBlock Text="{x:Bind ViewModel.SelectedCard.PageTitleAccent, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.SelectedCard.PageTitleAccentVisibility, Mode=OneWay}"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       FontSize="14"
+                                       Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                       VerticalAlignment="Center"/>
                         </StackPanel>
 
                         <StackPanel x:Name="ActionsPanel"
@@ -275,19 +355,34 @@
                             </HyperlinkButton>
                         </StackPanel>
 
-                        <Button x:Name="RefreshButton"
-                                Grid.Row="0"
-                                Grid.Column="1"
-                                AutomationProperties.AutomationId="RefreshUsageHeaderButton"
-                                AutomationProperties.Name="Refresh usage"
-                                Command="{x:Bind ViewModel.RefreshCommand}"
-                                Style="{StaticResource AccentButtonStyle}"
-                                VerticalAlignment="Center">
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon Glyph="&#xE72C;" FontSize="14"/>
-                                <TextBlock Text="Refresh"/>
-                            </StackPanel>
-                        </Button>
+                        <StackPanel x:Name="HeaderActionsPanel"
+                                    Grid.Row="0"
+                                    Grid.Column="1"
+                                    Orientation="Horizontal"
+                                    Spacing="8"
+                                    VerticalAlignment="Center">
+                            <Button x:Name="RefreshButton"
+                                    AutomationProperties.AutomationId="RefreshUsageHeaderButton"
+                                    AutomationProperties.Name="Refresh usage"
+                                    Command="{x:Bind ViewModel.RefreshCommand}"
+                                    VerticalAlignment="Center">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE72C;" FontSize="14"/>
+                                    <TextBlock Text="Refresh"/>
+                                </StackPanel>
+                            </Button>
+                            <ToggleButton x:Name="ProviderWidgetToggle"
+                                          AutomationProperties.AutomationId="ProviderWidgetVisibilityToggle"
+                                          AutomationProperties.Name="{x:Bind ViewModel.SelectedCard.ProviderWidgetToggleName, Mode=OneWay}"
+                                          IsChecked="{x:Bind ViewModel.SelectedCard.IsProviderWidgetVisible, Mode=OneWay}"
+                                          Tag="{x:Bind ViewModel.SelectedCard, Mode=OneWay}"
+                                          VerticalAlignment="Center"
+                                          MinWidth="76"
+                                          Click="ProviderWidgetToggle_Click">
+                                <TextBlock Text="{x:Bind ViewModel.SelectedCard.ProviderWidgetToggleText, Mode=OneWay}"/>
+                            </ToggleButton>
+                        </StackPanel>
+
                         <VisualStateManager.VisualStateGroups>
                             <VisualStateGroup>
                                 <VisualState>
@@ -295,9 +390,9 @@
                                         <AdaptiveTrigger MinWindowWidth="0"/>
                                     </VisualState.StateTriggers>
                                     <VisualState.Setters>
-                                        <Setter Target="RefreshButton.(Grid.Row)" Value="2"/>
-                                        <Setter Target="RefreshButton.(Grid.Column)" Value="0"/>
-                                        <Setter Target="RefreshButton.HorizontalAlignment" Value="Left"/>
+                                        <Setter Target="HeaderActionsPanel.(Grid.Row)" Value="2"/>
+                                        <Setter Target="HeaderActionsPanel.(Grid.Column)" Value="0"/>
+                                        <Setter Target="HeaderActionsPanel.(Grid.ColumnSpan)" Value="2"/>
                                         <Setter Target="ActionsPanel.Orientation" Value="Vertical"/>
                                     </VisualState.Setters>
                                 </VisualState>
@@ -306,9 +401,9 @@
                                         <AdaptiveTrigger MinWindowWidth="520"/>
                                     </VisualState.StateTriggers>
                                     <VisualState.Setters>
-                                        <Setter Target="RefreshButton.(Grid.Row)" Value="0"/>
-                                        <Setter Target="RefreshButton.(Grid.Column)" Value="1"/>
-                                        <Setter Target="RefreshButton.HorizontalAlignment" Value="Stretch"/>
+                                        <Setter Target="HeaderActionsPanel.(Grid.Row)" Value="0"/>
+                                        <Setter Target="HeaderActionsPanel.(Grid.Column)" Value="1"/>
+                                        <Setter Target="HeaderActionsPanel.(Grid.ColumnSpan)" Value="1"/>
                                         <Setter Target="ActionsPanel.Orientation" Value="Horizontal"/>
                                     </VisualState.Setters>
                                 </VisualState>
