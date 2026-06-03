@@ -30,8 +30,8 @@ namespace TaskbarQuota.ViewModels
         public Visibility ResetVisibility { get; }
         public Brush BarBrush { get; }
         public Brush PercentForeground { get; }
-        public bool IsWidgetVisible { get; }
-        public bool IsWidgetToggleEnabled { get; }
+        public bool IsWidgetVisible { get; internal set; }
+        public bool IsWidgetToggleEnabled { get; internal set; }
         public string WidgetToggleName => $"Show {Label} in taskbar widget";
 
         public BarViewModel(ProviderId providerId, string widgetRowId, string label, RateWindow w)
@@ -52,6 +52,12 @@ namespace TaskbarQuota.ViewModels
 
         public BarViewModel(ProviderId providerId, NamedRateWindow w)
             : this(providerId, WidgetSettingsService.RowExtra, w.Title, w.Window) { }
+
+        internal void RefreshVisibility()
+        {
+            IsWidgetVisible = WidgetSettingsService.IsRowVisible(ProviderId, WidgetRowId);
+            IsWidgetToggleEnabled = WidgetSettingsService.IsProviderVisible(ProviderId);
+        }
     }
 
     public sealed class TextMetricViewModel : IWidgetRowToggle
@@ -61,8 +67,8 @@ namespace TaskbarQuota.ViewModels
         public string Label { get; }
         public string Value { get; }
         public double MutedOpacity { get; }
-        public bool IsWidgetVisible { get; }
-        public bool IsWidgetToggleEnabled { get; }
+        public bool IsWidgetVisible { get; internal set; }
+        public bool IsWidgetToggleEnabled { get; internal set; }
         public string WidgetToggleName => $"Show {Label} in taskbar widget";
 
         public TextMetricViewModel(ProviderId providerId, string widgetRowId, string label, string value, bool muted = false)
@@ -75,6 +81,12 @@ namespace TaskbarQuota.ViewModels
             IsWidgetVisible = WidgetSettingsService.IsRowVisible(providerId, widgetRowId);
             IsWidgetToggleEnabled = WidgetSettingsService.IsProviderVisible(providerId);
         }
+
+        internal void RefreshVisibility()
+        {
+            IsWidgetVisible = WidgetSettingsService.IsRowVisible(ProviderId, WidgetRowId);
+            IsWidgetToggleEnabled = WidgetSettingsService.IsProviderVisible(ProviderId);
+        }
     }
 
     public sealed class WidgetRowToggleViewModel : IWidgetRowToggle
@@ -82,8 +94,8 @@ namespace TaskbarQuota.ViewModels
         public ProviderId ProviderId { get; }
         public string WidgetRowId { get; }
         public string Label { get; }
-        public bool IsWidgetVisible { get; }
-        public bool IsWidgetToggleEnabled { get; }
+        public bool IsWidgetVisible { get; internal set; }
+        public bool IsWidgetToggleEnabled { get; internal set; }
         public string WidgetToggleName => $"Show {Label} in taskbar widget";
 
         public WidgetRowToggleViewModel(ProviderId providerId, WidgetRowOption option)
@@ -93,6 +105,12 @@ namespace TaskbarQuota.ViewModels
             Label = option.Label;
             IsWidgetVisible = WidgetSettingsService.IsRowVisible(providerId, option.Id);
             IsWidgetToggleEnabled = WidgetSettingsService.IsProviderVisible(providerId);
+        }
+
+        internal void RefreshVisibility()
+        {
+            IsWidgetVisible = WidgetSettingsService.IsRowVisible(ProviderId, WidgetRowId);
+            IsWidgetToggleEnabled = WidgetSettingsService.IsProviderVisible(ProviderId);
         }
     }
 
@@ -132,7 +150,7 @@ namespace TaskbarQuota.ViewModels
 
         public string SourceText { get; }
         public Visibility SourceVisibility { get; }
-        public bool IsProviderWidgetVisible { get; }
+        public bool IsProviderWidgetVisible { get; internal set; }
         public string ProviderWidgetToggleName { get; }
         public string ProviderWidgetToggleText => IsProviderWidgetVisible ? "Widget" : "Ignored";
 
@@ -277,6 +295,15 @@ namespace TaskbarQuota.ViewModels
             CardBorderThickness = new Thickness(isActive ? 1.5 : 1);
 
             UsageDashboardUrl = ResolveLinkUrl(r, u => u.UsageDashboardUrl, DefaultUsageDashboardUrl);
+        }
+
+        internal void RefreshVisibility()
+        {
+            IsProviderWidgetVisible = WidgetSettingsService.IsProviderVisible(ProviderId);
+            foreach (var bar in Bars) bar.RefreshVisibility();
+            foreach (var metric in TextMetrics) metric.RefreshVisibility();
+            CreditWidgetToggle.RefreshVisibility();
+            AdditionalUsageWidgetToggle.RefreshVisibility();
         }
 
         private static string ResolveLinkUrl(

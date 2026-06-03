@@ -81,7 +81,13 @@ namespace TaskbarQuota.ViewModels
             => _dispatcher.TryEnqueue(() => UpdateCards(_lastResults, _lastActive, force: true));
 
         private void OnWidgetSettingsChanged(object? sender, EventArgs e)
-            => _dispatcher.TryEnqueue(() => UpdateCards(_lastResults, _lastActive, force: true));
+            => _dispatcher.TryEnqueue(() => RefreshCardsVisibility());
+
+        private void RefreshCardsVisibility()
+        {
+            foreach (var card in Cards)
+                card.RefreshVisibility();
+        }
 
         private async Task LoadProgressiveAsync(bool force)
         {
@@ -245,9 +251,7 @@ namespace TaskbarQuota.ViewModels
             var sb = new StringBuilder()
                 .Append(r.Id).Append('|')
                 .Append(isActive).Append('|')
-                .Append(r.Error).Append('|')
-                .Append(WidgetSettingsService.IsProviderVisible(r.Id)).Append('|')
-                .Append(WidgetSettingsService.RowVisibilitySignature(r.Id));
+                .Append(r.Error);
 
             if (r.Fetch is not { } fetch)
                 return sb.ToString();
