@@ -22,7 +22,7 @@ namespace TaskbarQuota.Usage.Providers
         };
 
         public ProviderId Id => ProviderId.Copilot;
-        public string DisplayName => "GitHub Copilot";
+        public string DisplayName => "Copilot";
         public string SessionLabel => "Credits";
         public string WeeklyLabel => "Chat";
         public BillingKind Billing => BillingKind.Subscription;

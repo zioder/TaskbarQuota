@@ -41,4 +41,11 @@ public class PlanDisplayNamesTests
         var (primary, accent) = PlanDisplayNames.ForPageHeader(ProviderId.Codex, "Codex", "ChatGPT Plus");
         Assert.Equal(("Codex", "Plus"), (primary, accent));
     }
+
+    [Fact]
+    public void ForPageHeader_Copilot_UsesGitHubCopilotWithPlanAccent()
+    {
+        var (primary, accent) = PlanDisplayNames.ForPageHeader(ProviderId.Copilot, "Copilot", "Student");
+        Assert.Equal(("GitHub Copilot", "Student"), (primary, accent));
+    }
 }

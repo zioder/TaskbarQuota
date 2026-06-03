@@ -39,6 +39,9 @@ namespace TaskbarQuota.Usage
             if (id is ProviderId.OpenCode or ProviderId.OpenCodeGo)
                 return ("OpenCode", id == ProviderId.OpenCodeGo ? "Go" : "Zen");
 
+            if (id == ProviderId.Copilot)
+                return ("GitHub Copilot", ForTitle(id, displayName, plan));
+
             return (displayName, ForTitle(id, displayName, plan));
         }
 
