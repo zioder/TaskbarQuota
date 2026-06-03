@@ -1,6 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
+using System.Text.Json;
+using TaskbarQuota.Usage;
 
 namespace TaskbarQuota;
 
@@ -17,13 +21,34 @@ public enum PercentageDisplayMode
     Remaining = 1,
 }
 
+public readonly record struct WidgetRowOption(string Id, string Label);
+
 public static class WidgetSettingsService
 {
+    public const string RowPrimary = "primary";
+    public const string RowSecondary = "secondary";
+    public const string RowModelSpecific = "model";
+    public const string RowMonthly = "monthly";
+    public const string RowExtra = "extra";
+    public const string RowUsage = "usage";
+    public const string RowBalance = "balance";
+    public const string RowCredits = "credits";
+    public const string RowAdditionalUsage = "additional";
+
     private static readonly string WidgetDisplayModePath =
         Path.Combine(AppStorage.AppDataDirectory, "widget-display-mode.txt");
 
     private static readonly string PercentageDisplayModePath =
         Path.Combine(AppStorage.AppDataDirectory, "percentage-display-mode.txt");
+
+    private static readonly string WidgetRowsPath =
+        Path.Combine(AppStorage.AppDataDirectory, "widget-rows.json");
+
+    private static readonly string WidgetProvidersPath =
+        Path.Combine(AppStorage.AppDataDirectory, "widget-providers.json");
+
+    private static readonly Dictionary<string, bool> RowVisibility = LoadRowVisibility();
+    private static readonly Dictionary<string, bool> ProviderVisibility = LoadProviderVisibility();
 
     public static WidgetDisplayMode Current { get; private set; } = LoadWidgetDisplayMode();
     public static PercentageDisplayMode CurrentPercentageMode { get; private set; } = LoadPercentageDisplayMode();
@@ -59,6 +84,146 @@ public static class WidgetSettingsService
 
     public static string FormatDisplayPercent(double usedPercent)
         => $"{DisplayPercent(usedPercent):0}%";
+
+    public static bool IsRowVisible(ProviderId provider, string rowId)
+    {
+        var key = RowVisibilityKey(provider, rowId);
+        return RowVisibility.TryGetValue(key, out bool visible)
+            ? visible
+            : DefaultRowVisible(provider, rowId);
+    }
+
+    public static bool IsProviderVisible(ProviderId provider)
+    {
+        var key = provider.ToString();
+        return ProviderVisibility.TryGetValue(key, out bool visible) ? visible : true;
+    }
+
+    public static void SetProviderVisible(ProviderId provider, bool visible)
+    {
+        if (IsProviderVisible(provider) == visible)
+            return;
+
+        ProviderVisibility[provider.ToString()] = visible;
+        SaveProviderVisibility();
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void SetRowVisible(ProviderId provider, string rowId, bool visible)
+    {
+        var key = RowVisibilityKey(provider, rowId);
+        if (IsRowVisible(provider, rowId) == visible)
+            return;
+
+        RowVisibility[key] = visible;
+        SaveRowVisibility();
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ResetRows(ProviderId provider)
+    {
+        var prefix = $"{provider}:";
+        var keys = new List<string>();
+        foreach (var key in RowVisibility.Keys)
+            if (key.StartsWith(prefix, StringComparison.Ordinal))
+                keys.Add(key);
+
+        if (keys.Count == 0)
+            return;
+
+        foreach (var key in keys)
+            RowVisibility.Remove(key);
+
+        SaveRowVisibility();
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static string RowVisibilitySignature(ProviderId provider)
+    {
+        string[] rowIds =
+        [
+            RowPrimary,
+            RowSecondary,
+            RowModelSpecific,
+            RowMonthly,
+            RowExtra,
+            RowUsage,
+            RowBalance,
+            RowCredits,
+            RowAdditionalUsage,
+        ];
+
+        var parts = new List<string>(rowIds.Length);
+        foreach (var rowId in rowIds)
+            parts.Add($"{rowId}:{(IsRowVisible(provider, rowId) ? 1 : 0)}");
+        return string.Join(",", parts);
+    }
+
+    public static string ProviderVisibilitySignature()
+    {
+        var parts = Enum.GetValues<ProviderId>()
+            .OrderBy(provider => provider.ToString())
+            .Select(provider => $"{provider}:{(IsProviderVisible(provider) ? 1 : 0)}");
+        return string.Join(",", parts);
+    }
+
+    internal static void ResetRowVisibilityForTesting()
+        => RowVisibility.Clear();
+
+    internal static void SetRowVisibleForTesting(ProviderId provider, string rowId, bool visible)
+        => RowVisibility[RowVisibilityKey(provider, rowId)] = visible;
+
+    internal static void ResetProviderVisibilityForTesting()
+        => ProviderVisibility.Clear();
+
+    internal static void SetProviderVisibleForTesting(ProviderId provider, bool visible)
+        => ProviderVisibility[provider.ToString()] = visible;
+
+    public static IReadOnlyList<WidgetRowOption> RowOptions(ProviderId provider)
+        => provider switch
+        {
+            ProviderId.Antigravity =>
+            [
+                new(RowPrimary, "Gemini"),
+                new(RowSecondary, "Non-Gemini"),
+            ],
+            ProviderId.OpenCode =>
+            [
+                new(RowUsage, "Usage"),
+                new(RowBalance, "Balance"),
+            ],
+            ProviderId.Copilot =>
+            [
+                new(RowCredits, "Credits"),
+                new(RowAdditionalUsage, "Additional usage"),
+                new(RowPrimary, "Session"),
+                new(RowSecondary, "Weekly"),
+                new(RowModelSpecific, "Completions"),
+                new(RowExtra, "Extra quota rows"),
+            ],
+            ProviderId.Cursor =>
+            [
+                new(RowSecondary, "Auto + Composer"),
+                new(RowModelSpecific, "API usage"),
+                new(RowPrimary, "Total usage"),
+            ],
+            ProviderId.Codex =>
+            [
+                new(RowPrimary, "Session"),
+                new(RowSecondary, "Weekly"),
+                new(RowModelSpecific, "Model"),
+                new(RowMonthly, "Monthly"),
+                new(RowExtra, "Extra model rows"),
+            ],
+            _ =>
+            [
+                new(RowPrimary, "Session"),
+                new(RowSecondary, "Weekly"),
+                new(RowModelSpecific, "Model"),
+                new(RowMonthly, "Monthly"),
+                new(RowExtra, "Extra quota rows"),
+            ],
+        };
 
     /// <summary>
     /// Theme brush key for a usage value already in display form (consumed or remaining per settings).
@@ -148,4 +313,68 @@ public static class WidgetSettingsService
             // Best effort. The widget can still use the in-memory value for this run.
         }
     }
+
+    private static Dictionary<string, bool> LoadRowVisibility()
+    {
+        try
+        {
+            if (!File.Exists(WidgetRowsPath))
+                return new Dictionary<string, bool>();
+
+            var loaded = JsonSerializer.Deserialize<Dictionary<string, bool>>(File.ReadAllText(WidgetRowsPath));
+            return loaded ?? new Dictionary<string, bool>();
+        }
+        catch
+        {
+            return new Dictionary<string, bool>();
+        }
+    }
+
+    private static void SaveRowVisibility()
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(WidgetRowsPath)!);
+            File.WriteAllText(WidgetRowsPath, JsonSerializer.Serialize(RowVisibility, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch
+        {
+            // Best effort. The widget can still use the in-memory value for this run.
+        }
+    }
+
+    private static Dictionary<string, bool> LoadProviderVisibility()
+    {
+        try
+        {
+            if (!File.Exists(WidgetProvidersPath))
+                return new Dictionary<string, bool>();
+
+            var loaded = JsonSerializer.Deserialize<Dictionary<string, bool>>(File.ReadAllText(WidgetProvidersPath));
+            return loaded ?? new Dictionary<string, bool>();
+        }
+        catch
+        {
+            return new Dictionary<string, bool>();
+        }
+    }
+
+    private static void SaveProviderVisibility()
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(WidgetProvidersPath)!);
+            File.WriteAllText(WidgetProvidersPath, JsonSerializer.Serialize(ProviderVisibility, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch
+        {
+            // Best effort. The widget can still use the in-memory value for this run.
+        }
+    }
+
+    private static string RowVisibilityKey(ProviderId provider, string rowId)
+        => $"{provider}:{rowId}";
+
+    private static bool DefaultRowVisible(ProviderId provider, string rowId)
+        => provider != ProviderId.Codex || rowId == RowPrimary || rowId == RowSecondary;
 }

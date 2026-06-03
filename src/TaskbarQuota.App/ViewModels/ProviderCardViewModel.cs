@@ -9,9 +9,20 @@ using TaskbarQuota.Usage;
 
 namespace TaskbarQuota.ViewModels
 {
-    /// <summary>A single usage bar (session / weekly / model) for the card template.</summary>
-    public sealed class BarViewModel
+    public interface IWidgetRowToggle
     {
+        ProviderId ProviderId { get; }
+        string WidgetRowId { get; }
+        bool IsWidgetVisible { get; }
+        bool IsWidgetToggleEnabled { get; }
+        string WidgetToggleName { get; }
+    }
+
+    /// <summary>A single usage bar (session / weekly / model) for the card template.</summary>
+    public sealed class BarViewModel : IWidgetRowToggle
+    {
+        public ProviderId ProviderId { get; }
+        public string WidgetRowId { get; }
         public string Label { get; }
         public double Percent { get; }
         public string PercentText { get; }
@@ -19,10 +30,15 @@ namespace TaskbarQuota.ViewModels
         public Visibility ResetVisibility { get; }
         public Brush BarBrush { get; }
         public Brush PercentForeground { get; }
+        public bool IsWidgetVisible { get; }
+        public bool IsWidgetToggleEnabled { get; }
+        public string WidgetToggleName => $"Show {Label} in taskbar widget";
 
-        public BarViewModel(string label, RateWindow w)
+        public BarViewModel(ProviderId providerId, string widgetRowId, string label, RateWindow w)
         {
             double displayPercent = WidgetSettingsService.DisplayPercent(w.UsedPercent);
+            ProviderId = providerId;
+            WidgetRowId = widgetRowId;
             Label = label;
             Percent = displayPercent;
             PercentText = WidgetSettingsService.FormatDisplayPercent(w.UsedPercent);
@@ -30,22 +46,53 @@ namespace TaskbarQuota.ViewModels
             ResetVisibility = w.ResetDescription is null ? Visibility.Collapsed : Visibility.Visible;
             BarBrush = Ui.UsageBrush(displayPercent);
             PercentForeground = BarBrush;
+            IsWidgetVisible = WidgetSettingsService.IsRowVisible(providerId, widgetRowId);
+            IsWidgetToggleEnabled = WidgetSettingsService.IsProviderVisible(providerId);
         }
 
-        public BarViewModel(NamedRateWindow w) : this(w.Title, w.Window) { }
+        public BarViewModel(ProviderId providerId, NamedRateWindow w)
+            : this(providerId, WidgetSettingsService.RowExtra, w.Title, w.Window) { }
     }
 
-    public sealed class TextMetricViewModel
+    public sealed class TextMetricViewModel : IWidgetRowToggle
     {
+        public ProviderId ProviderId { get; }
+        public string WidgetRowId { get; }
         public string Label { get; }
         public string Value { get; }
         public double MutedOpacity { get; }
+        public bool IsWidgetVisible { get; }
+        public bool IsWidgetToggleEnabled { get; }
+        public string WidgetToggleName => $"Show {Label} in taskbar widget";
 
-        public TextMetricViewModel(string label, string value, bool muted = false)
+        public TextMetricViewModel(ProviderId providerId, string widgetRowId, string label, string value, bool muted = false)
         {
+            ProviderId = providerId;
+            WidgetRowId = widgetRowId;
             Label = label;
             Value = value;
             MutedOpacity = muted ? 0.55 : 1.0;
+            IsWidgetVisible = WidgetSettingsService.IsRowVisible(providerId, widgetRowId);
+            IsWidgetToggleEnabled = WidgetSettingsService.IsProviderVisible(providerId);
+        }
+    }
+
+    public sealed class WidgetRowToggleViewModel : IWidgetRowToggle
+    {
+        public ProviderId ProviderId { get; }
+        public string WidgetRowId { get; }
+        public string Label { get; }
+        public bool IsWidgetVisible { get; }
+        public bool IsWidgetToggleEnabled { get; }
+        public string WidgetToggleName => $"Show {Label} in taskbar widget";
+
+        public WidgetRowToggleViewModel(ProviderId providerId, WidgetRowOption option)
+        {
+            ProviderId = providerId;
+            WidgetRowId = option.Id;
+            Label = option.Label;
+            IsWidgetVisible = WidgetSettingsService.IsRowVisible(providerId, option.Id);
+            IsWidgetToggleEnabled = WidgetSettingsService.IsProviderVisible(providerId);
         }
     }
 
@@ -85,11 +132,16 @@ namespace TaskbarQuota.ViewModels
 
         public string SourceText { get; }
         public Visibility SourceVisibility { get; }
+        public bool IsProviderWidgetVisible { get; }
+        public string ProviderWidgetToggleName { get; }
+        public string ProviderWidgetToggleText => IsProviderWidgetVisible ? "Widget" : "Ignored";
 
         public IReadOnlyList<BarViewModel> Bars { get; }
         public Visibility BarsVisibility { get; }
         public IReadOnlyList<TextMetricViewModel> TextMetrics { get; }
         public Visibility TextMetricsVisibility { get; }
+        public WidgetRowToggleViewModel CreditWidgetToggle { get; }
+        public WidgetRowToggleViewModel AdditionalUsageWidgetToggle { get; }
 
         public string AdditionalUsageStatusText { get; }
         public string AdditionalUsageSpendText { get; }
@@ -110,6 +162,8 @@ namespace TaskbarQuota.ViewModels
             IsActive = isActive;
             ActiveVisibility = isActive ? Visibility.Visible : Visibility.Collapsed;
             ProviderId = r.Id;
+            IsProviderWidgetVisible = WidgetSettingsService.IsProviderVisible(r.Id);
+            ProviderWidgetToggleName = $"Show {DisplayName} in taskbar widget";
 
             var bars = new List<BarViewModel>();
             var textMetrics = new List<TextMetricViewModel>();
@@ -122,6 +176,8 @@ namespace TaskbarQuota.ViewModels
             CreditPercent = 0;
             CreditBrush = Ui.ConsumedUsageBrush(0);
             CreditOpacity = 1.0;
+            CreditWidgetToggle = new WidgetRowToggleViewModel(r.Id, new WidgetRowOption(WidgetSettingsService.RowCredits, "Credits"));
+            AdditionalUsageWidgetToggle = new WidgetRowToggleViewModel(r.Id, new WidgetRowOption(WidgetSettingsService.RowAdditionalUsage, "Additional usage"));
             if (r.Ok && r.Fetch is { } f)
             {
                 var u = f.Usage;
@@ -132,14 +188,14 @@ namespace TaskbarQuota.ViewModels
                     var balanceVal = balanceText != null
                         ? "$" + balanceText.Split(' ')[0]
                         : "—";
-                    textMetrics.Add(new TextMetricViewModel("Usage", usageVal));
-                    textMetrics.Add(new TextMetricViewModel("Balance", balanceVal));
+                    textMetrics.Add(new TextMetricViewModel(r.Id, WidgetSettingsService.RowUsage, "Usage", usageVal));
+                    textMetrics.Add(new TextMetricViewModel(r.Id, WidgetSettingsService.RowBalance, "Balance", balanceVal));
                     CostText = string.Empty;
                 }
                 else if (r.Id == ProviderId.Antigravity)
                 {
-                    bars.Add(new BarViewModel("Gemini", u.Primary));
-                    if (u.Secondary != null) bars.Add(new BarViewModel("Non-Gemini", u.Secondary));
+                    bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowPrimary, "Gemini", u.Primary));
+                    if (u.Secondary != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowSecondary, "Non-Gemini", u.Secondary));
                     CostText = u.Cost != null ? $"{u.Cost.Label}: {u.Cost.Display}" : string.Empty;
                 }
                 else
@@ -147,11 +203,11 @@ namespace TaskbarQuota.ViewModels
                     bool copilotCredits = r.Id == ProviderId.Copilot && u.Cost is { Label: "Credits" };
                     if (!copilotCredits)
                     {
-                        bars.Add(new BarViewModel(r.Provider?.SessionLabel ?? "Session", u.Primary));
-                        if (u.Secondary != null) bars.Add(new BarViewModel(r.Provider?.WeeklyLabel ?? "Weekly", u.Secondary));
-                        if (u.ModelSpecific != null) bars.Add(new BarViewModel(ModelSpecificLabel(r.Id), u.ModelSpecific));
-                        if (u.Monthly != null) bars.Add(new BarViewModel("Monthly", u.Monthly));
-                        foreach (var extra in u.ExtraRateWindows) bars.Add(new BarViewModel(extra));
+                        bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowPrimary, r.Provider?.SessionLabel ?? "Session", u.Primary));
+                        if (u.Secondary != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowSecondary, r.Provider?.WeeklyLabel ?? "Weekly", u.Secondary));
+                        if (u.ModelSpecific != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowModelSpecific, ModelSpecificLabel(r.Id), u.ModelSpecific));
+                        if (u.Monthly != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowMonthly, "Monthly", u.Monthly));
+                        foreach (var extra in u.ExtraRateWindows) bars.Add(new BarViewModel(r.Id, extra));
                     }
 
                     if (u.Cost is { Label: "Credits" } credits)

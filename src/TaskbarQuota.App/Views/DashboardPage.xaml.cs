@@ -14,12 +14,16 @@ namespace TaskbarQuota.Views
     public sealed partial class DashboardPage : Page
     {
         private readonly bool _ownsViewModel;
+        private static bool _suppressWidgetEvents;
 
         public DashboardViewModel ViewModel { get; }
         public static DashboardViewModel? SharedViewModel { get; set; }
 
         /// <summary>The content panel; used by the main window scroll area.</summary>
         public FrameworkElement ContentPanel => DashboardContent;
+
+        public static void SetSuppressWidgetEvents(bool suppress)
+            => _suppressWidgetEvents = suppress;
 
         public DashboardPage()
         {
@@ -110,6 +114,30 @@ namespace TaskbarQuota.Views
         {
             if (ViewModel.SelectedCard?.UsageDashboardUrl is { Length: > 0 } url)
                 _ = Launcher.LaunchUriAsync(new Uri(url));
+        }
+
+        private void WidgetRowVisibility_Click(object sender, RoutedEventArgs e)
+        {
+            if (_suppressWidgetEvents)
+                return;
+            if (sender is not ToggleButton toggle || toggle.Tag is not IWidgetRowToggle row)
+                return;
+
+            var desired = toggle.IsChecked == true;
+            if (WidgetSettingsService.IsRowVisible(row.ProviderId, row.WidgetRowId) == desired)
+                return;
+
+            WidgetSettingsService.SetRowVisible(row.ProviderId, row.WidgetRowId, desired);
+        }
+
+        private void ProviderWidgetToggle_Click(object sender, RoutedEventArgs e)
+        {
+            if (_suppressWidgetEvents)
+                return;
+            if (sender is not ToggleButton toggle || toggle.Tag is not ProviderCardViewModel card)
+                return;
+
+            WidgetSettingsService.SetProviderVisible(card.ProviderId, toggle.IsChecked == true);
         }
     }
 }

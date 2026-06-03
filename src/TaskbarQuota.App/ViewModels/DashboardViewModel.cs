@@ -37,6 +37,7 @@ namespace TaskbarQuota.ViewModels
             _dispatcher = dispatcher;
             StatusText = "";
             WidgetSettingsService.PercentageModeChanged += OnPercentageModeChanged;
+            WidgetSettingsService.Changed += OnWidgetSettingsChanged;
             UsageCoordinator.Instance.StateChanged += OnCoordinatorStateChanged;
             UsageCoordinator.Instance.ActiveProviderChanged += OnActiveProviderChanged;
         }
@@ -77,6 +78,9 @@ namespace TaskbarQuota.ViewModels
         public Task LoadAsync() => LoadProgressiveAsync(force: false);
 
         private void OnPercentageModeChanged(object? sender, EventArgs e)
+            => _dispatcher.TryEnqueue(() => UpdateCards(_lastResults, _lastActive, force: true));
+
+        private void OnWidgetSettingsChanged(object? sender, EventArgs e)
             => _dispatcher.TryEnqueue(() => UpdateCards(_lastResults, _lastActive, force: true));
 
         private async Task LoadProgressiveAsync(bool force)
@@ -129,6 +133,22 @@ namespace TaskbarQuota.ViewModels
         }
 
         private void UpdateCards(IReadOnlyList<UsageResult> results, ProviderId? active, bool force = false)
+        {
+            Views.DashboardPage.SetSuppressWidgetEvents(true);
+            try
+            {
+                UpdateCardsCore(results, active, force);
+            }
+            finally
+            {
+                _dispatcher.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+                {
+                    Views.DashboardPage.SetSuppressWidgetEvents(false);
+                });
+            }
+        }
+
+        private void UpdateCardsCore(IReadOnlyList<UsageResult> results, ProviderId? active, bool force)
         {
             results = OrderResults(results, active);
             _lastResults = results.ToArray();
@@ -225,7 +245,9 @@ namespace TaskbarQuota.ViewModels
             var sb = new StringBuilder()
                 .Append(r.Id).Append('|')
                 .Append(isActive).Append('|')
-                .Append(r.Error);
+                .Append(r.Error).Append('|')
+                .Append(WidgetSettingsService.IsProviderVisible(r.Id)).Append('|')
+                .Append(WidgetSettingsService.RowVisibilitySignature(r.Id));
 
             if (r.Fetch is not { } fetch)
                 return sb.ToString();
@@ -274,6 +296,7 @@ namespace TaskbarQuota.ViewModels
         public void Dispose()
         {
             WidgetSettingsService.PercentageModeChanged -= OnPercentageModeChanged;
+            WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
             UsageCoordinator.Instance.StateChanged -= OnCoordinatorStateChanged;
             UsageCoordinator.Instance.ActiveProviderChanged -= OnActiveProviderChanged;
             _loadCts?.Cancel();
