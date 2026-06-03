@@ -21,14 +21,17 @@ public class CodexProviderTests
     }
 
     [Fact]
-    public void BuildResult_ProPlan_SurfacesSparkSessionAndWeeklyWindows()
+    public void BuildResult_ProPlan_UsesBaseSessionAndWeeklyInsteadOfSparkWindows()
     {
         using var doc = JsonDocument.Parse(CodexUsageJson("pro", includeSpark: true));
 
         var result = CodexProvider.BuildResult(doc.RootElement);
 
-        Assert.Contains(result.Usage.ExtraRateWindows, w => w.Title == "Spark Session" && w.Window.UsedPercent == 25);
-        Assert.Contains(result.Usage.ExtraRateWindows, w => w.Title == "Spark Weekly" && w.Window.UsedPercent == 40);
+        Assert.Equal(10, result.Usage.Primary.UsedPercent);
+        Assert.Equal(18000 / 60, result.Usage.Primary.WindowMinutes);
+        Assert.Equal(20, result.Usage.Secondary?.UsedPercent);
+        Assert.Equal(604800 / 60, result.Usage.Secondary?.WindowMinutes);
+        Assert.DoesNotContain(result.Usage.ExtraRateWindows, w => w.Title.Contains("Spark"));
     }
 
     [Fact]
@@ -43,21 +46,15 @@ public class CodexProviderTests
     }
 
     [Fact]
-    public void WidgetRows_ForCodex_KeepSessionAndWeeklyBeforeSpark()
+    public void WidgetRows_ForCodex_ShowSessionAndWeeklyWhenSparkLimitExists()
     {
-        var result = UsageResult.Success(ProviderId.Codex, new TestProvider(), new ProviderFetchResult(
-            new UsageSnapshot(new RateWindow(10))
-            {
-                Secondary = new RateWindow(20),
-                LoginMethod = "Pro 20x",
-            },
-            "oauth"));
-        result.Fetch!.Usage.ExtraRateWindows.Add(new NamedRateWindow("Spark-session", "Spark Session", new RateWindow(25)));
-        result.Fetch!.Usage.ExtraRateWindows.Add(new NamedRateWindow("Spark-weekly", "Spark Weekly", new RateWindow(40)));
+        using var doc = JsonDocument.Parse(CodexUsageJson("pro", includeSpark: true));
+        var fetch = CodexProvider.BuildResult(doc.RootElement);
+        var result = UsageResult.Success(ProviderId.Codex, new TestProvider(), fetch);
 
-        var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch.Usage);
+        var labels = WidgetSummary.BuildRowLabelsForTesting(result, fetch.Usage);
 
-        Assert.Equal(new[] { "Session", "Weekly", "Spark Session", "Spark Weekly" }, labels);
+        Assert.Equal(new[] { "Session", "Weekly" }, labels);
     }
 
     private static string CodexUsageJson(string planType, bool includeSpark = false)

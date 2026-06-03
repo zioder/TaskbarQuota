@@ -135,7 +135,7 @@ namespace TaskbarQuota.Usage.Providers
                 string shortName = CodexModelPrefix.Replace(rawName, string.Empty);
                 if (string.IsNullOrWhiteSpace(shortName))
                     shortName = string.IsNullOrWhiteSpace(rawName) ? "Model" : rawName;
-                if (IsSparkLimit(shortName) && !IsProPlan(planType))
+                if (IsSparkLimit(shortName))
                     continue;
 
                 if (rl.TryGetProperty("primary_window", out var primary) && primary.ValueKind == JsonValueKind.Object)
@@ -147,12 +147,6 @@ namespace TaskbarQuota.Usage.Providers
 
         private static bool IsSparkLimit(string shortName)
             => string.Equals(shortName.Trim(), "Spark", StringComparison.OrdinalIgnoreCase);
-
-        private static bool IsProPlan(string? planType)
-        {
-            var normalized = NormalizePlanType(planType);
-            return normalized is "pro" or "prolite" or "pro_lite" or "pro-lite";
-        }
 
         private static RateWindow ParseWindow(JsonElement window)
         {
