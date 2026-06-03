@@ -118,6 +118,8 @@ namespace TaskbarQuota.Views
 
         private void WidgetRowVisibility_Click(object sender, RoutedEventArgs e)
         {
+            if (_suppressWidgetEvents)
+                return;
             if (sender is not ToggleButton toggle || toggle.Tag is not IWidgetRowToggle row)
                 return;
 
@@ -130,6 +132,8 @@ namespace TaskbarQuota.Views
 
         private void ProviderWidgetToggle_Click(object sender, RoutedEventArgs e)
         {
+            if (_suppressWidgetEvents)
+                return;
             if (sender is not ToggleButton toggle || toggle.Tag is not ProviderCardViewModel card)
                 return;
 

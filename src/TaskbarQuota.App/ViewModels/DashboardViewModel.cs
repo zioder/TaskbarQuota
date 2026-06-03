@@ -37,6 +37,7 @@ namespace TaskbarQuota.ViewModels
             _dispatcher = dispatcher;
             StatusText = "";
             WidgetSettingsService.PercentageModeChanged += OnPercentageModeChanged;
+            WidgetSettingsService.Changed += OnWidgetSettingsChanged;
             UsageCoordinator.Instance.StateChanged += OnCoordinatorStateChanged;
             UsageCoordinator.Instance.ActiveProviderChanged += OnActiveProviderChanged;
         }
@@ -77,6 +78,9 @@ namespace TaskbarQuota.ViewModels
         public Task LoadAsync() => LoadProgressiveAsync(force: false);
 
         private void OnPercentageModeChanged(object? sender, EventArgs e)
+            => _dispatcher.TryEnqueue(() => UpdateCards(_lastResults, _lastActive, force: true));
+
+        private void OnWidgetSettingsChanged(object? sender, EventArgs e)
             => _dispatcher.TryEnqueue(() => UpdateCards(_lastResults, _lastActive, force: true));
 
         private async Task LoadProgressiveAsync(bool force)
@@ -292,6 +296,7 @@ namespace TaskbarQuota.ViewModels
         public void Dispose()
         {
             WidgetSettingsService.PercentageModeChanged -= OnPercentageModeChanged;
+            WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
             UsageCoordinator.Instance.StateChanged -= OnCoordinatorStateChanged;
             UsageCoordinator.Instance.ActiveProviderChanged -= OnActiveProviderChanged;
             _loadCts?.Cancel();

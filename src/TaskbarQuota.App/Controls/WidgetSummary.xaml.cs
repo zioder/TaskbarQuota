@@ -60,7 +60,12 @@ namespace TaskbarQuota.Controls
         /// name via <see cref="PlanDisplayNames.ForPageHeader"/>.
         /// </summary>
         private static string WidgetDisplayName(string fullName)
-            => string.IsNullOrEmpty(fullName) ? fullName : fullName;
+            => string.IsNullOrEmpty(fullName) ? fullName
+            : fullName switch
+            {
+                "GitHub Copilot" => "Copilot",
+                _ => fullName,
+            };
 
         public HorizontalAlignment ElementsAlignment
         {
