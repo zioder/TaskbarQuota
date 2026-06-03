@@ -154,7 +154,7 @@ namespace TaskbarQuota.Usage.Providers
             if (reset != null && DateTimeOffset.TryParse(reset, System.Globalization.CultureInfo.InvariantCulture,
                     System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var dt))
                 resetAt = dt;
-            return new RateWindow(remaining * 100.0, null, resetAt, CodexProvider.FormatResetCountdown(resetAt));
+            return new RateWindow((1.0 - remaining) * 100.0, null, resetAt, CodexProvider.FormatResetCountdown(resetAt));
         }
 
         private sealed record ProcessInfo(string CsrfToken, string? ExtensionServerCsrfToken, int ExtensionPort, int? Pid);
