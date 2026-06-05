@@ -21,4 +21,12 @@ public class AppStartupTests
     {
         Assert.False(App.IsWidgetStartup(null, ["TaskbarQuota.exe"]));
     }
+
+    [Fact]
+    public void ShouldRetryTaskbarInitialization_AllowsStartupWidgetRetries()
+    {
+        Assert.True(App.ShouldRetryTaskbarInitialization(1));
+        Assert.True(App.TaskbarInitializationMaxAttempts > 1);
+        Assert.False(App.ShouldRetryTaskbarInitialization(App.TaskbarInitializationMaxAttempts));
+    }
 }

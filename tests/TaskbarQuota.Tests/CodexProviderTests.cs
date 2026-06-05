@@ -43,7 +43,7 @@ public class CodexProviderTests
     }
 
     [Fact]
-    public void WidgetRows_ForCodex_KeepSessionAndWeeklyBeforeSpark()
+    public void WidgetRows_ForCodex_HidesExtraRowsByDefault()
     {
         var result = UsageResult.Success(ProviderId.Codex, new TestProvider(), new ProviderFetchResult(
             new UsageSnapshot(new RateWindow(10))
@@ -57,7 +57,7 @@ public class CodexProviderTests
 
         var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch.Usage);
 
-        Assert.Equal(new[] { "Session", "Weekly", "Spark Session", "Spark Weekly" }, labels);
+        Assert.Equal(new[] { "Session", "Weekly" }, labels);
     }
 
     private static string CodexUsageJson(string planType, bool includeSpark = false)
