@@ -68,7 +68,7 @@ public sealed class QuotaAlertService
                 _state,
                 DateTimeOffset.Now).ToList();
 
-            if (notifications.Count > 0)
+            if (_state.HasUnsavedChanges)
                 _state.Save();
         }
 
@@ -181,6 +181,8 @@ internal sealed class QuotaAlertState
         Path.Combine(AppStorage.AppDataDirectory, "quota-alert-state.json");
 
     public Dictionary<string, DateTimeOffset> LastAlertedAt { get; init; } = new();
+    internal bool HasUnsavedChanges { get; private set; }
+    internal void ResetUnsavedChangesForTesting() => HasUnsavedChanges = false;
 
     public static QuotaAlertState Load()
     {
@@ -202,10 +204,16 @@ internal sealed class QuotaAlertState
         || now - previous >= cooldown;
 
     public void MarkAlerted(string key, DateTimeOffset now)
-        => LastAlertedAt[key] = now;
+    {
+        LastAlertedAt[key] = now;
+        HasUnsavedChanges = true;
+    }
 
     public void Clear(string key)
-        => LastAlertedAt.Remove(key);
+    {
+        if (LastAlertedAt.Remove(key))
+            HasUnsavedChanges = true;
+    }
 
     public void Save()
     {
@@ -213,6 +221,7 @@ internal sealed class QuotaAlertState
         {
             Directory.CreateDirectory(Path.GetDirectoryName(StatePath)!);
             File.WriteAllText(StatePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            HasUnsavedChanges = false;
         }
         catch (Exception ex)
         {
@@ -248,7 +257,6 @@ internal static class QuotaAlertStateKey
     public static string For(ProviderId provider, string windowId, double threshold, RateWindow window)
     {
         var reset = window.ResetAt?.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture)
-            ?? window.ResetDescription
             ?? "no-reset";
 
         return $"{provider}:{windowId}:{threshold:0}:{reset}";

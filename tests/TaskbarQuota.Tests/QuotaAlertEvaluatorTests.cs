@@ -83,6 +83,35 @@ public class QuotaAlertEvaluatorTests
     }
 
     [Fact]
+    public void Evaluate_DropsBelowThreshold_MarksStateChanged()
+    {
+        var state = new QuotaAlertState();
+        var first = Now();
+
+        _ = QuotaAlertEvaluator.Evaluate(Result(91), Settings(), state, first).ToArray();
+        Assert.True(state.HasUnsavedChanges);
+
+        state.ResetUnsavedChangesForTesting();
+        Assert.False(state.HasUnsavedChanges);
+
+        _ = QuotaAlertEvaluator.Evaluate(Result(10), Settings(), state, first.AddMinutes(1)).ToArray();
+
+        Assert.True(state.HasUnsavedChanges);
+    }
+
+    [Fact]
+    public void StateKey_WithoutResetAt_DoesNotUseChangingResetDescription()
+    {
+        var first = new RateWindow(91, resetDescription: "91/100 USD");
+        var second = new RateWindow(92, resetDescription: "92/100 USD");
+
+        var firstKey = QuotaAlertStateKey.For(ProviderId.Claude, "primary", 90, first);
+        var secondKey = QuotaAlertStateKey.For(ProviderId.Claude, "primary", 90, second);
+
+        Assert.Equal(firstKey, secondKey);
+    }
+
+    [Fact]
     public void Settings_Normalized_KeepsCriticalAboveWarning()
     {
         var settings = new QuotaAlertSettings
