@@ -77,8 +77,8 @@ public class ClaudeProviderCredentialTests
         Assert.Contains(result.Usage.ExtraRateWindows, w => w.Id == "claude-design" && w.Window.UsedPercent == 26);
         Assert.Contains(result.Usage.ExtraRateWindows, w => w.Id == "claude-routines" && w.Window.UsedPercent == 11);
         Assert.Equal("$5.00 / $10.00", result.Usage.Cost?.Display);
-        Assert.Equal(5, result.Usage.AdditionalUsage?.SpentUsd);
-        Assert.Equal(10, result.Usage.AdditionalUsage?.BudgetUsd);
+        Assert.Equal(5.0, result.Usage.AdditionalUsage?.SpentUsd);
+        Assert.Equal(10.0, result.Usage.AdditionalUsage?.BudgetUsd);
     }
 
     [Fact]
