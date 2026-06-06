@@ -1,4 +1,7 @@
 using System.Text.Json;
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using TaskbarQuota.Usage.Providers;
 
 namespace TaskbarQuota.Tests;
@@ -43,5 +46,52 @@ public class ClaudeProviderCredentialTests
 
         Assert.Equal(1, result.Usage.Primary.UsedPercent);
         Assert.Equal(1, result.Usage.Secondary?.UsedPercent);
+    }
+
+    [Fact]
+    public void BuildResult_ClaudeNewUsageFields_AreDisplayed()
+    {
+        using var doc = JsonDocument.Parse("""
+        {
+          "five_hour": { "utilization": 9, "resets_at": "2026-06-02T12:00:00.000Z" },
+          "seven_day": { "utilization": 21, "resets_at": "2026-06-07T12:00:00.000Z" },
+          "seven_day_oauth_apps": { "utilization": 42 },
+          "seven_day_omelette": { "utilization": 26 },
+          "seven_day_cowork": { "utilization": 11 },
+          "extra_usage": {
+            "is_enabled": true,
+            "used_credits": 500,
+            "monthly_limit": 1000,
+            "currency": "USD"
+          }
+        }
+        """);
+
+        var result = ClaudeProvider.BuildResultForTesting(
+            doc.RootElement,
+            new ClaudeProvider.Credentials("token", "pro", "default_claude_ai"));
+
+        Assert.Equal(9, result.Usage.Primary.UsedPercent);
+        Assert.Equal(21, result.Usage.Secondary?.UsedPercent);
+        Assert.Contains(result.Usage.ExtraRateWindows, w => w.Id == "claude-oauth-apps" && w.Window.UsedPercent == 42);
+        Assert.Contains(result.Usage.ExtraRateWindows, w => w.Id == "claude-design" && w.Window.UsedPercent == 26);
+        Assert.Contains(result.Usage.ExtraRateWindows, w => w.Id == "claude-routines" && w.Window.UsedPercent == 11);
+        Assert.Equal("$5.00 / $10.00", result.Usage.Cost?.Display);
+        Assert.Equal(5.0, result.Usage.AdditionalUsage?.SpentUsd);
+        Assert.Equal(10.0, result.Usage.AdditionalUsage?.BudgetUsd);
+    }
+
+    [Fact]
+    public void ParseRetryAfter_Delta_ReturnsFutureTime()
+    {
+        using var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+        response.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromMinutes(10));
+
+        var before = DateTimeOffset.Now.AddMinutes(9);
+        var parsed = ClaudeProvider.ParseRetryAfter(response);
+        var after = DateTimeOffset.Now.AddMinutes(11);
+
+        Assert.NotNull(parsed);
+        Assert.InRange(parsed.Value, before, after);
     }
 }
