@@ -40,6 +40,7 @@ namespace TaskbarQuota
             Log.Information("TaskbarQuota launching");
 
             UsageCoordinator.Instance.Start();
+            QuotaAlertService.Instance.Start();
 
             ScheduleTaskbarInitialization();
 

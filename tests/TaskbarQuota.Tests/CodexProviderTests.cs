@@ -45,19 +45,38 @@ public class CodexProviderTests
     [Fact]
     public void WidgetRows_ForCodex_HidesExtraRowsByDefault()
     {
-        var result = UsageResult.Success(ProviderId.Codex, new TestProvider(), new ProviderFetchResult(
-            new UsageSnapshot(new RateWindow(10))
-            {
-                Secondary = new RateWindow(20),
-                LoginMethod = "Pro 20x",
-            },
-            "oauth"));
-        result.Fetch!.Usage.ExtraRateWindows.Add(new NamedRateWindow("Spark-session", "Spark Session", new RateWindow(25)));
-        result.Fetch!.Usage.ExtraRateWindows.Add(new NamedRateWindow("Spark-weekly", "Spark Weekly", new RateWindow(40)));
+        WidgetSettingsService.ResetRowVisibilityForTesting();
+        try
+        {
+            var result = CodexWidgetResultWithExtraRows();
 
-        var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch.Usage);
+            var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch!.Usage);
 
-        Assert.Equal(new[] { "Session", "Weekly" }, labels);
+            Assert.Equal(new[] { "Session", "Weekly" }, labels);
+        }
+        finally
+        {
+            WidgetSettingsService.ResetRowVisibilityForTesting();
+        }
+    }
+
+    [Fact]
+    public void WidgetRows_ForCodex_ShowsExtraRowsWhenEnabled()
+    {
+        WidgetSettingsService.ResetRowVisibilityForTesting();
+        try
+        {
+            WidgetSettingsService.SetRowVisibleForTesting(ProviderId.Codex, WidgetSettingsService.RowExtra, true);
+            var result = CodexWidgetResultWithExtraRows();
+
+            var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch!.Usage);
+
+            Assert.Equal(new[] { "Session", "Weekly", "Spark Session", "Spark Weekly" }, labels);
+        }
+        finally
+        {
+            WidgetSettingsService.ResetRowVisibilityForTesting();
+        }
     }
 
     private static string CodexUsageJson(string planType, bool includeSpark = false)
@@ -103,6 +122,20 @@ public class CodexProviderTests
                  {{additional}}
                }
                """;
+    }
+
+    private static UsageResult CodexWidgetResultWithExtraRows()
+    {
+        var result = UsageResult.Success(ProviderId.Codex, new TestProvider(), new ProviderFetchResult(
+            new UsageSnapshot(new RateWindow(10))
+            {
+                Secondary = new RateWindow(20),
+                LoginMethod = "Pro 20x",
+            },
+            "oauth"));
+        result.Fetch!.Usage.ExtraRateWindows.Add(new NamedRateWindow("Spark-session", "Spark Session", new RateWindow(25)));
+        result.Fetch!.Usage.ExtraRateWindows.Add(new NamedRateWindow("Spark-weekly", "Spark Weekly", new RateWindow(40)));
+        return result;
     }
 
     private sealed class TestProvider : IUsageProvider
