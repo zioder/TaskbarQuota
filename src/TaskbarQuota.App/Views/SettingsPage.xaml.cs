@@ -28,6 +28,7 @@ namespace TaskbarQuota.Views
             };
             PercentageModeCombo.SelectedIndex = WidgetSettingsService.CurrentPercentageMode == PercentageDisplayMode.Remaining ? 1 : 0;
             StartupToggle.IsOn = StartupSettingsService.IsEnabled;
+            ApplyQuotaAlertSettingsToControls();
             VersionLabel.Text = $"Version {AppVersion.GetDisplayLabel()}";
             _isInitializing = false;
         }
@@ -76,6 +77,59 @@ namespace TaskbarQuota.Views
                     ? PercentageDisplayMode.Remaining
                     : PercentageDisplayMode.Consumed;
                 WidgetSettingsService.Apply(mode);
+            }
+        }
+
+        private void OnQuotaAlertsToggled(object sender, RoutedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            QuotaAlertSettingsService.SetEnabled(QuotaAlertsToggle.IsOn);
+        }
+
+        private void OnWarningThresholdChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+        {
+            if (_isInitializing || double.IsNaN(args.NewValue))
+                return;
+
+            QuotaAlertSettingsService.SetWarningThreshold(args.NewValue);
+            ApplyQuotaAlertSettingsToControls();
+        }
+
+        private void OnCriticalThresholdChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+        {
+            if (_isInitializing || double.IsNaN(args.NewValue))
+                return;
+
+            QuotaAlertSettingsService.SetCriticalThreshold(args.NewValue);
+            ApplyQuotaAlertSettingsToControls();
+        }
+
+        private void OnAlertCooldownChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+        {
+            if (_isInitializing || double.IsNaN(args.NewValue))
+                return;
+
+            QuotaAlertSettingsService.SetCooldownMinutes(args.NewValue);
+            ApplyQuotaAlertSettingsToControls();
+        }
+
+        private void ApplyQuotaAlertSettingsToControls()
+        {
+            var settings = QuotaAlertSettingsService.Current;
+            var wasInitializing = _isInitializing;
+            _isInitializing = true;
+            try
+            {
+                QuotaAlertsToggle.IsOn = settings.Enabled;
+                WarningThresholdBox.Value = settings.WarningThreshold;
+                CriticalThresholdBox.Value = settings.CriticalThreshold;
+                AlertCooldownBox.Value = settings.CooldownMinutes;
+            }
+            finally
+            {
+                _isInitializing = wasInitializing;
             }
         }
     }

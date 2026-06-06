@@ -63,6 +63,61 @@
                               Toggled="OnStartupToggled"/>
             </tk:SettingsCard>
 
+            <TextBlock Text="Notifications" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,2"/>
+            <tk:SettingsCard Header="Quota alerts" Description="Show Windows notifications when usage crosses your configured thresholds.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xEA8F;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <ToggleSwitch x:Name="QuotaAlertsToggle"
+                              AutomationProperties.Name="Enable quota alerts"
+                              Toggled="OnQuotaAlertsToggled"/>
+            </tk:SettingsCard>
+
+            <tk:SettingsCard Header="Warning threshold" Description="Notify when a usage window reaches this consumed percentage.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE7BA;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <NumberBox x:Name="WarningThresholdBox"
+                           AutomationProperties.Name="Warning threshold"
+                           Minimum="1"
+                           Maximum="99"
+                           SmallChange="1"
+                           LargeChange="5"
+                           SpinButtonPlacementMode="Compact"
+                           ValueChanged="OnWarningThresholdChanged"
+                           Width="120"/>
+            </tk:SettingsCard>
+
+            <tk:SettingsCard Header="Critical threshold" Description="Notify again when a usage window reaches this higher consumed percentage.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE814;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <NumberBox x:Name="CriticalThresholdBox"
+                           AutomationProperties.Name="Critical threshold"
+                           Minimum="2"
+                           Maximum="100"
+                           SmallChange="1"
+                           LargeChange="5"
+                           SpinButtonPlacementMode="Compact"
+                           ValueChanged="OnCriticalThresholdChanged"
+                           Width="120"/>
+            </tk:SettingsCard>
+
+            <tk:SettingsCard Header="Notification cooldown" Description="Minimum minutes before TaskbarQuota repeats the same alert.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE823;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <NumberBox x:Name="AlertCooldownBox"
+                           AutomationProperties.Name="Notification cooldown"
+                           Minimum="1"
+                           Maximum="1440"
+                           SmallChange="1"
+                           LargeChange="15"
+                           SpinButtonPlacementMode="Compact"
+                           ValueChanged="OnAlertCooldownChanged"
+                           Width="120"/>
+            </tk:SettingsCard>
+
             <TextBlock Text="Credentials" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,2"/>
             <TextBlock Text="All providers detect credentials automatically. If auto-detection fails for a provider, use the &quot;Fix&quot; button on its dashboard card."
                        Opacity="0.7" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" Margin="0,0,0,4"/>
