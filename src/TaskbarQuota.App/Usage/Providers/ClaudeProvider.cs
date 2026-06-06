@@ -5,6 +5,7 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text.Json.Nodes;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,14 +14,21 @@ namespace TaskbarQuota.Usage.Providers
 {
     /// <summary>
     /// Claude (Anthropic) usage via the OAuth token Claude Code stores in ~/.claude/.credentials.json,
-    /// querying https://api.anthropic.com/api/oauth/usage.
+    /// querying https://api.anthropic.com/api/oauth/usage, with a claude.ai cookie fallback when
+    /// the OAuth usage endpoint is temporarily rate limited.
     /// Ported from Win-CodexBar rust/src/providers/claude/oauth.rs.
     /// </summary>
     public sealed class ClaudeProvider : IUsageProvider
     {
         private const string UsageUrl = "https://api.anthropic.com/api/oauth/usage";
+        private const string RefreshUrl = "https://platform.claude.com/v1/oauth/token";
+        private const string ClientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+        private const string RefreshScope = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+        private const string WebApiBaseUrl = "https://claude.ai/api";
 
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
+        private static readonly object RateLimitLock = new();
+        private static DateTimeOffset? _oauthRateLimitedUntil;
 
         public ProviderId Id => ProviderId.Claude;
         public string DisplayName => "Claude Code";
@@ -32,34 +40,82 @@ namespace TaskbarQuota.Usage.Providers
         {
             var creds = LoadCredentials();
 
-            using var request = new HttpRequestMessage(HttpMethod.Get, UsageUrl);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", creds.AccessToken);
-            request.Headers.Accept.ParseAdd("application/json");
-            request.Headers.TryAddWithoutValidation("anthropic-beta", "oauth-2025-04-20");
+            if (IsOAuthRateLimited())
+            {
+                if (await TryFetchWebUsageAsync(ct).ConfigureAwait(false) is { } webResult)
+                    return webResult;
 
-            using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
+                throw new ProviderException(ProviderErrorKind.RateLimited, "Claude API rate limited. Will retry in a few minutes.");
+            }
+
+            using var response = await SendUsageRequestAsync(creds.AccessToken, ct).ConfigureAwait(false);
 
             if (response.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                var refreshed = await TryRefreshCredentialsAsync(creds, ct).ConfigureAwait(false);
+                if (refreshed != null)
+                {
+                    using var retry = await SendUsageRequestAsync(refreshed.AccessToken, ct).ConfigureAwait(false);
+                    return await HandleUsageResponseAsync(retry, refreshed, ct).ConfigureAwait(false);
+                }
+
                 throw new ProviderException(ProviderErrorKind.AuthRequired, "Claude OAuth token expired. Run `claude` to re-authenticate.");
+            }
+
+            return await HandleUsageResponseAsync(response, creds, ct).ConfigureAwait(false);
+        }
+
+        private static async Task<HttpResponseMessage> SendUsageRequestAsync(string accessToken, CancellationToken ct)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, UsageUrl);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            request.Headers.Accept.ParseAdd("application/json");
+            request.Headers.TryAddWithoutValidation("anthropic-beta", "oauth-2025-04-20");
+            request.Headers.TryAddWithoutValidation("User-Agent", "claude-code/2.1.0");
+            return await Http.SendAsync(request, ct).ConfigureAwait(false);
+        }
+
+        private static async Task<ProviderFetchResult> HandleUsageResponseAsync(HttpResponseMessage response, Credentials creds, CancellationToken ct)
+        {
             if (response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable)
+            {
+                RecordOAuthRateLimit(response);
+                if (await TryFetchWebUsageAsync(ct).ConfigureAwait(false) is { } webResult)
+                    return webResult;
+
                 throw new ProviderException(ProviderErrorKind.RateLimited,
                     $"Claude API rate limited ({(int)response.StatusCode}). Will retry in a few minutes.");
+            }
             if (!response.IsSuccessStatusCode)
                 throw new ProviderException(ProviderErrorKind.Other, $"Claude API returned {(int)response.StatusCode}");
 
             using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
             using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+            ClearOAuthRateLimit();
 
             return BuildResult(doc.RootElement, creds);
         }
 
         private static ProviderFetchResult BuildResult(JsonElement json, Credentials creds)
         {
-            var primary = ParseWindow(json, "five_hour", 300) ?? new RateWindow(0);
+            var primary = ParseWindow(json, 300, "five_hour", "fiveHour") ?? new RateWindow(0);
             var usage = new UsageSnapshot(primary);
 
-            usage.Secondary = ParseWindow(json, "seven_day", 10080);
-            usage.ModelSpecific = ParseWindow(json, "seven_day_opus", 10080) ?? ParseWindow(json, "seven_day_sonnet", 10080);
+            usage.Secondary = ParseWindow(json, 10080, "seven_day", "sevenDay");
+            usage.ModelSpecific =
+                ParseWindow(json, 10080, "seven_day_opus", "sevenDayOpus")
+                ?? ParseWindow(json, 10080, "seven_day_sonnet", "sevenDaySonnet");
+
+            AddExtraWindow(usage, json, "claude-oauth-apps", "OAuth apps", "seven_day_oauth_apps", "seven_day_claude_oauth_apps", "oauth_apps", "oauth", "sevenDayOauthApps");
+            AddExtraWindow(usage, json, "claude-design", "Claude Design", "seven_day_design", "seven_day_claude_design", "claude_design", "design", "seven_day_omelette", "omelette", "sevenDayDesign");
+            AddExtraWindow(usage, json, "claude-routines", "Daily Routines", "seven_day_routines", "seven_day_claude_routines", "claude_routines", "routines", "routine", "seven_day_cowork", "cowork", "sevenDayRoutines");
+
+            if (TryParseExtraUsage(json, out var cost, out var additional))
+            {
+                usage.Cost = cost;
+                usage.AdditionalUsage = additional;
+            }
+
             usage.LoginMethod = ResolvePlan(creds.SubscriptionType, creds.RateLimitTier);
             return new ProviderFetchResult(usage, "oauth");
         }
@@ -102,9 +158,15 @@ namespace TaskbarQuota.Usage.Providers
 
         private static readonly char[] WordSeps = " -_.".ToCharArray();
 
-        private static RateWindow? ParseWindow(JsonElement root, string name, int windowMinutes)
+        private static void AddExtraWindow(UsageSnapshot usage, JsonElement root, string id, string title, params string[] names)
         {
-            if (!root.TryGetProperty(name, out var w) || w.ValueKind != JsonValueKind.Object) return null;
+            if (ParseWindow(root, 10080, names) is { } window)
+                usage.ExtraRateWindows.Add(new NamedRateWindow(id, title, window));
+        }
+
+        private static RateWindow? ParseWindow(JsonElement root, int windowMinutes, params string[] names)
+        {
+            if (!TryGetFirstProperty(root, out var w, names) || w.ValueKind != JsonValueKind.Object) return null;
             if (!w.TryGetProperty("utilization", out var ut) || ut.ValueKind != JsonValueKind.Number) return null;
 
             double util = ut.GetDouble();
@@ -121,7 +183,349 @@ namespace TaskbarQuota.Usage.Providers
             return new RateWindow(util, windowMinutes, resetAt, resetDesc);
         }
 
-        internal sealed record Credentials(string AccessToken, string? SubscriptionType, string? RateLimitTier);
+        private static bool TryGetFirstProperty(JsonElement root, out JsonElement value, params string[] names)
+        {
+            foreach (var name in names)
+            {
+                if (root.TryGetProperty(name, out value) && value.ValueKind != JsonValueKind.Null)
+                    return true;
+            }
+
+            value = default;
+            return false;
+        }
+
+        private static bool TryParseExtraUsage(JsonElement root, out CostSnapshot? cost, out AdditionalUsageSnapshot? additional)
+        {
+            cost = null;
+            additional = null;
+            if (!TryGetFirstProperty(root, out var extra, "extra_usage", "extraUsage") || extra.ValueKind != JsonValueKind.Object)
+                return false;
+
+            var enabled = Bool(extra, "is_enabled", "isEnabled") ?? false;
+            var usedCredits = Num(extra, "used_credits", "usedCredits");
+            var limitCredits = Num(extra, "monthly_limit", "monthlyLimit", "monthly_credit_limit", "monthlyCreditLimit");
+            var currency = Str(extra, "currency") ?? "USD";
+
+            if (!enabled && usedCredits is null && limitCredits is null)
+                return false;
+
+            var used = (usedCredits ?? 0) / 100.0;
+            var limit = limitCredits is { } lim ? lim / 100.0 : (double?)null;
+            cost = new CostSnapshot(used, currency, "Monthly");
+            if (limit is { } limitValue) cost.WithLimit(limitValue);
+            additional = new AdditionalUsageSnapshot
+            {
+                Enabled = enabled,
+                SpentUsd = used,
+                BudgetUsd = limit,
+            };
+            return true;
+        }
+
+        private static double? Num(JsonElement obj, params string[] keys)
+        {
+            foreach (var key in keys)
+            {
+                if (obj.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number))
+                    return number;
+            }
+
+            return null;
+        }
+
+        private static string? Str(JsonElement obj, params string[] keys)
+        {
+            foreach (var key in keys)
+            {
+                if (obj.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String)
+                    return value.GetString();
+            }
+
+            return null;
+        }
+
+        private static bool? Bool(JsonElement obj, params string[] keys)
+        {
+            foreach (var key in keys)
+            {
+                if (obj.TryGetProperty(key, out var value))
+                {
+                    if (value.ValueKind == JsonValueKind.True) return true;
+                    if (value.ValueKind == JsonValueKind.False) return false;
+                }
+            }
+
+            return null;
+        }
+
+        private static bool IsOAuthRateLimited()
+        {
+            lock (RateLimitLock)
+            {
+                if (_oauthRateLimitedUntil is not { } until)
+                    return false;
+                if (DateTimeOffset.Now < until)
+                    return true;
+                _oauthRateLimitedUntil = null;
+                return false;
+            }
+        }
+
+        private static void RecordOAuthRateLimit(HttpResponseMessage response)
+        {
+            var until = ParseRetryAfter(response) ?? DateTimeOffset.Now.AddMinutes(5);
+            lock (RateLimitLock)
+            {
+                _oauthRateLimitedUntil = until;
+            }
+        }
+
+        private static void ClearOAuthRateLimit()
+        {
+            lock (RateLimitLock)
+            {
+                _oauthRateLimitedUntil = null;
+            }
+        }
+
+        internal static DateTimeOffset? ParseRetryAfter(HttpResponseMessage response)
+        {
+            if (response.Headers.RetryAfter is { } retryAfter)
+            {
+                if (retryAfter.Date is { } date)
+                    return date;
+                if (retryAfter.Delta is { } delta)
+                    return DateTimeOffset.Now.Add(delta);
+            }
+
+            return null;
+        }
+
+        private static async Task<ProviderFetchResult?> TryFetchWebUsageAsync(CancellationToken ct)
+        {
+            try
+            {
+                var cookie = ResolveClaudeWebCookie();
+                var headers = BuildWebHeaders(cookie);
+                var orgId = await GetWebOrganizationId(cookie, headers, ct).ConfigureAwait(false);
+                using var usageDoc = await GetWebJson($"{WebApiBaseUrl}/organizations/{orgId}/usage", headers, "Claude web usage", ct).ConfigureAwait(false);
+
+                var result = BuildResult(usageDoc.RootElement, new Credentials(string.Empty, null, null));
+                if (string.IsNullOrWhiteSpace(result.Usage.LoginMethod))
+                    result.Usage.LoginMethod = "Claude";
+                result.Usage.UsageDashboardUrl = "https://claude.ai/new#settings/usage";
+
+                using var extraDoc = await TryGetWebJson($"{WebApiBaseUrl}/organizations/{orgId}/overage_spend_limit", headers, ct).ConfigureAwait(false);
+                if (extraDoc != null && TryParseExtraUsage(extraDoc.RootElement, out var cost, out var additional))
+                {
+                    result.Usage.Cost = cost;
+                    result.Usage.AdditionalUsage = additional;
+                }
+
+                using var accountDoc = await TryGetWebJson($"{WebApiBaseUrl}/account", headers, ct).ConfigureAwait(false);
+                if (accountDoc != null)
+                {
+                    var account = accountDoc.RootElement;
+                    result.Usage.Email = Str(account, "email_address", "email");
+                    var plan = ResolvePlan(null, Str(account, "rate_limit_tier", "rateLimitTier"));
+                    if (!string.IsNullOrWhiteSpace(plan))
+                        result.Usage.LoginMethod = plan;
+                }
+
+                return new ProviderFetchResult(result.Usage, "web");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Diagnostics.Log.Warning(ex, "Claude OAuth usage was rate limited and the web usage fallback was unavailable.");
+                return null;
+            }
+        }
+
+        private static string ResolveClaudeWebCookie()
+        {
+            var sessionKey = Environment.GetEnvironmentVariable("CLAUDE_AI_SESSION_KEY") ?? Environment.GetEnvironmentVariable("CLAUDE_WEB_SESSION_KEY");
+            if (!string.IsNullOrWhiteSpace(sessionKey))
+            {
+                var value = sessionKey.Trim();
+                if (!value.StartsWith("sessionKey=", StringComparison.OrdinalIgnoreCase))
+                    value = "sessionKey=" + value;
+                return value;
+            }
+
+            return CookieHelper.Resolve(ProviderId.Claude, "claude.ai", "claude.com", "console.anthropic.com", "anthropic.com");
+        }
+
+        private static Dictionary<string, string> BuildWebHeaders(string cookie) => new()
+        {
+            ["Cookie"] = cookie,
+            ["Accept"] = "application/json",
+            ["Origin"] = "https://claude.ai",
+            ["Referer"] = "https://claude.ai/settings/usage",
+            ["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+            ["anthropic-client-platform"] = "web_claude_ai",
+        };
+
+        private static async Task<string> GetWebOrganizationId(string cookie, Dictionary<string, string> headers, CancellationToken ct)
+        {
+            if (CookieValue(cookie, "lastActiveOrg") is { } orgFromCookie)
+                return orgFromCookie;
+
+            using (var accountDoc = await TryGetWebJson($"{WebApiBaseUrl}/account", headers, ct).ConfigureAwait(false))
+            {
+                if (accountDoc != null && FindOrganizationId(accountDoc.RootElement) is { } orgFromAccount)
+                    return orgFromAccount;
+            }
+
+            using var orgsDoc = await GetWebJson($"{WebApiBaseUrl}/organizations", headers, "Claude web organizations", ct).ConfigureAwait(false);
+            if (orgsDoc.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var org in orgsDoc.RootElement.EnumerateArray())
+                {
+                    if (Str(org, "uuid", "id") is { } id)
+                        return id;
+                }
+            }
+
+            throw new ProviderException(ProviderErrorKind.Parse, "Claude web API did not return an organization id.");
+        }
+
+        private static string? FindOrganizationId(JsonElement account)
+        {
+            if (!account.TryGetProperty("memberships", out var memberships) || memberships.ValueKind != JsonValueKind.Array)
+                return null;
+
+            foreach (var membership in memberships.EnumerateArray())
+            {
+                if (membership.TryGetProperty("organization", out var org) && Str(org, "uuid", "id") is { } orgId)
+                    return orgId;
+                if (Str(membership, "uuid", "id") is { } membershipId)
+                    return membershipId;
+            }
+
+            return null;
+        }
+
+        private static async Task<JsonDocument> GetWebJson(string url, Dictionary<string, string> headers, string label, CancellationToken ct)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            foreach (var header in headers)
+                request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+
+            using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                throw new ProviderException(ProviderErrorKind.AuthRequired, "Claude web cookies expired.");
+            if (!response.IsSuccessStatusCode)
+                throw new ProviderException(ProviderErrorKind.Other, $"{label} returned {(int)response.StatusCode}");
+
+            var text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            return JsonDocument.Parse(text);
+        }
+
+        private static async Task<JsonDocument?> TryGetWebJson(string url, Dictionary<string, string> headers, CancellationToken ct)
+        {
+            try { return await GetWebJson(url, headers, "Claude web API", ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch { return null; }
+        }
+
+        private static string? CookieValue(string cookieHeader, string name)
+        {
+            foreach (var part in cookieHeader.Split(';'))
+            {
+                var pieces = part.Trim().Split('=', 2);
+                if (pieces.Length == 2 && string.Equals(pieces[0].Trim(), name, StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(pieces[1]))
+                    return pieces[1].Trim();
+            }
+
+            return null;
+        }
+
+        private static async Task<Credentials?> TryRefreshCredentialsAsync(Credentials creds, CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(creds.RefreshToken))
+                return null;
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, RefreshUrl);
+            var body = new
+            {
+                grant_type = "refresh_token",
+                refresh_token = creds.RefreshToken,
+                client_id = ClientId,
+                scope = RefreshScope,
+            };
+            request.Content = new StringContent(JsonSerializer.Serialize(body), System.Text.Encoding.UTF8, "application/json");
+
+            using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                Diagnostics.Log.Warning($"Claude OAuth token refresh failed: HTTP {(int)response.StatusCode}");
+                return null;
+            }
+
+            using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("access_token", out var accessEl) || accessEl.ValueKind != JsonValueKind.String)
+                return null;
+
+            var accessToken = accessEl.GetString();
+            if (string.IsNullOrWhiteSpace(accessToken))
+                return null;
+
+            var refreshToken = root.TryGetProperty("refresh_token", out var refreshEl) && refreshEl.ValueKind == JsonValueKind.String
+                ? refreshEl.GetString()
+                : creds.RefreshToken;
+            var expiresAtMs = root.TryGetProperty("expires_in", out var expiresEl) && expiresEl.ValueKind == JsonValueKind.Number
+                ? DateTimeOffset.Now.AddSeconds(expiresEl.GetDouble()).ToUnixTimeMilliseconds()
+                : (long?)null;
+
+            var refreshed = creds with
+            {
+                AccessToken = accessToken!,
+                RefreshToken = refreshToken,
+                ExpiresAtMs = expiresAtMs,
+            };
+            PersistRefreshedCredentials(refreshed);
+            Diagnostics.Log.Information("Claude OAuth token refreshed successfully.");
+            return refreshed;
+        }
+
+        private static void PersistRefreshedCredentials(Credentials creds)
+        {
+            if (string.IsNullOrWhiteSpace(creds.CredentialsPath) || !File.Exists(creds.CredentialsPath))
+                return;
+
+            try
+            {
+                var node = JsonNode.Parse(File.ReadAllText(creds.CredentialsPath)) as JsonObject ?? new JsonObject();
+                var oauth = node["claudeAiOauth"] as JsonObject ?? new JsonObject();
+                node["claudeAiOauth"] = oauth;
+                oauth["accessToken"] = creds.AccessToken;
+                if (!string.IsNullOrWhiteSpace(creds.RefreshToken))
+                    oauth["refreshToken"] = creds.RefreshToken;
+                if (creds.ExpiresAtMs is { } expiresAt)
+                    oauth["expiresAt"] = expiresAt;
+                if (!string.IsNullOrWhiteSpace(creds.SubscriptionType))
+                    oauth["subscriptionType"] = creds.SubscriptionType;
+                if (!string.IsNullOrWhiteSpace(creds.RateLimitTier))
+                    oauth["rateLimitTier"] = creds.RateLimitTier;
+
+                File.WriteAllText(creds.CredentialsPath, node.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Log.Warning(ex, "Failed to persist refreshed Claude OAuth credentials.");
+            }
+        }
+
+        internal sealed record Credentials(
+            string AccessToken,
+            string? SubscriptionType,
+            string? RateLimitTier,
+            string? RefreshToken = null,
+            long? ExpiresAtMs = null,
+            string? CredentialsPath = null);
 
         private static Credentials LoadCredentials()
         {
@@ -135,7 +539,8 @@ namespace TaskbarQuota.Usage.Providers
                 throw new ProviderException(ProviderErrorKind.AuthRequired, "Claude credentials not found. Run `claude` to authenticate.");
 
             using var doc = JsonDocument.Parse(File.ReadAllText(path));
-            return ReadCredentials(doc.RootElement);
+            var creds = ReadCredentials(doc.RootElement);
+            return creds with { CredentialsPath = path };
         }
 
         internal static Credentials ReadCredentials(JsonElement root)
@@ -148,7 +553,11 @@ namespace TaskbarQuota.Usage.Providers
 
             string? tier = oauth.TryGetProperty("rateLimitTier", out var rt) ? rt.GetString() : null;
             string? subType = oauth.TryGetProperty("subscriptionType", out var st) ? st.GetString() : null;
-            return new Credentials(access!, subType, tier);
+            string? refresh = oauth.TryGetProperty("refreshToken", out var refreshEl) ? refreshEl.GetString() : null;
+            long? expiresAt = null;
+            if (oauth.TryGetProperty("expiresAt", out var expiresEl) && expiresEl.ValueKind == JsonValueKind.Number)
+                expiresAt = expiresEl.TryGetInt64(out var raw) ? raw : (long?)expiresEl.GetDouble();
+            return new Credentials(access!, subType, tier, refresh, expiresAt);
         }
     }
 }
