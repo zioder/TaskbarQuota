@@ -8,6 +8,9 @@
 </p>
 
 <p align="center">
+  <a href="https://apps.microsoft.com/detail/9n3kl49vfpvn?hl=en-US&amp;gl=US&amp;mode=direct">
+    <img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200" alt="Get TaskbarQuota from Microsoft Store" />
+  </a>
   <a href="https://github.com/zioder/TaskbarQuota/releases/latest">
     <img src="https://img.shields.io/github/v/release/zioder/TaskbarQuota?label=Download%20from%20GitHub&logo=github&logoColor=white&color=24292f&labelColor=57606a" height="32" alt="Download from GitHub Releases" />
   </a>
@@ -184,14 +187,24 @@ Diagnostic log:
 
 ## Release & distribution
 
+Install the signed Microsoft Store build:
+
+<p>
+  <a href="https://apps.microsoft.com/detail/9n3kl49vfpvn?hl=en-US&amp;gl=US&amp;mode=direct">
+    <img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200" alt="Get TaskbarQuota from Microsoft Store" />
+  </a>
+</p>
+
 Download the latest installer from [GitHub Releases](https://github.com/zioder/TaskbarQuota/releases).
 
 | Download | CPU |
 | -------- | --- |
-| `TaskbarQuotaSetup-<version>-x64.exe` | Intel / AMD (most PCs) |
-| `TaskbarQuotaSetup-<version>-arm64.exe` | Windows on ARM |
+| `TaskbarQuotaSetup-<version>-x64-unsigned.exe` | Intel / AMD (most PCs) |
+| `TaskbarQuotaSetup-<version>-arm64-unsigned.exe` | Windows on ARM |
 
 Run the matching `.exe`, then launch TaskbarQuota from the Start menu. Windows may show **SmartScreen** for unsigned builds — **More info** → **Run anyway**.
+
+Microsoft Store builds use the signed package identity `ZiedKallel.TaskbarQuota_q2e4dm2bjnsne`. When a Store-installed build sees an update, TaskbarQuota opens the Microsoft Store product page instead of downloading the unsigned GitHub installer.
 
 ## Project structure
 

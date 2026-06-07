@@ -5,6 +5,7 @@
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
     <RootNamespace>TaskbarQuota</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AppxManifest>Package.appxmanifest</AppxManifest>
     <Platforms>x64;ARM64</Platforms>
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <UseWinUI>true</UseWinUI>
@@ -34,8 +35,20 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Content Include="Assets\TaskBarQuota.png" />
+    <Content Include="Assets\TaskBarQuota.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Include="Assets\TaskBarQuota.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- MSIX Store logo assets (referenced by Package.appxmanifest) -->
+    <Content Include="Assets\StoreLogo.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Assets\Square150x150Logo.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Assets\Square44x44Logo.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
@@ -55,7 +68,10 @@
     <InternalsVisibleTo Include="TaskbarQuota.Tests" />
   </ItemGroup>
 
-  <Target Name="AddLooseXbfToPublish" AfterTargets="AssignTargetPaths" BeforeTargets="GetCopyToPublishDirectoryItems">
+  <Target Name="AddLooseXbfToPublish"
+          Condition="'$(WindowsPackageType)' == 'None'"
+          AfterTargets="AssignTargetPaths"
+          BeforeTargets="GetCopyToPublishDirectoryItems">
     <ItemGroup>
       <_LooseXbf Include="$(OutputPath)**\*.xbf" />
       <Content Include="@(_LooseXbf)" CopyToPublishDirectory="PreserveNewest" Link="%(RecursiveDir)%(Filename)%(Extension)" />

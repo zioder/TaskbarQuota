@@ -15,8 +15,15 @@ public sealed class UpdateCheckerService
 {
     private const string LatestReleaseUrl = "https://api.github.com/repos/zioder/TaskbarQuota/releases/latest";
     private const string HttpUserAgent = "TaskbarQuota";
+    private static readonly Uri StoreProductUri = new("ms-windows-store://pdp/?productid=9N3KL49VFPVN");
 
     public async Task<UpdateCheckResult> CheckAsync(string currentVersion, CancellationToken cancellationToken = default)
+        => await CheckAsync(currentVersion, AppDistribution.CurrentChannel, cancellationToken).ConfigureAwait(false);
+
+    internal async Task<UpdateCheckResult> CheckAsync(
+        string currentVersion,
+        AppDistributionChannel distributionChannel,
+        CancellationToken cancellationToken = default)
     {
         using var client = new HttpClient();
         client.DefaultRequestHeaders.UserAgent.ParseAdd(HttpUserAgent);
@@ -35,21 +42,29 @@ public sealed class UpdateCheckerService
         if (VersionComparer.Compare(latest, current) <= 0)
             return UpdateCheckResult.UpToDate;
 
+        if (distributionChannel == AppDistributionChannel.MicrosoftStore)
+        {
+            return UpdateCheckResult.UpdateAvailable(
+                latest,
+                releaseUrl: StoreProductUri,
+                downloadUrl: null,
+                deliveryChannel: UpdateDeliveryChannel.MicrosoftStore);
+        }
+
         var archSlug = GetInstallerArchSlug();
         var installers = release.Assets?
             .Where(IsTaskbarQuotaSetupExe)
             .ToList() ?? [];
 
-        var asset = installers.FirstOrDefault(a => MatchesArch(a.Name, archSlug))
-            ?? installers.FirstOrDefault(a => MatchesArch(a.Name, "x64"))
-            ?? installers.FirstOrDefault();
+        var asset = SelectUnsignedInstaller(installers, archSlug);
 
         return UpdateCheckResult.UpdateAvailable(
             latest,
             Uri.TryCreate(release.HtmlUrl, UriKind.Absolute, out var releaseUri) ? releaseUri : null,
             asset?.BrowserDownloadUrl is { } download && Uri.TryCreate(download, UriKind.Absolute, out var downloadUri)
                 ? downloadUri
-                : null);
+                : null,
+            UpdateDeliveryChannel.GitHubUnsigned);
     }
 
     public async Task<DownloadedUpdate> DownloadAsync(
@@ -104,8 +119,27 @@ public sealed class UpdateCheckerService
         asset.Name.StartsWith("TaskbarQuotaSetup-", StringComparison.OrdinalIgnoreCase)
         && asset.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase);
 
+    internal static string? SelectUnsignedInstallerName(IEnumerable<string> assetNames, string archSlug)
+    {
+        var assets = assetNames.Select(name => new GitHubAsset { Name = name }).ToList();
+        return SelectUnsignedInstaller(assets, archSlug)?.Name;
+    }
+
+    private static GitHubAsset? SelectUnsignedInstaller(IEnumerable<GitHubAsset> installers, string archSlug)
+    {
+        var installerList = installers.ToList();
+        var unsignedInstallers = installerList
+            .Where(a => a.Name.Contains("unsigned", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        var preferred = unsignedInstallers.Count > 0 ? unsignedInstallers : installerList;
+        return preferred.FirstOrDefault(a => MatchesArch(a.Name, archSlug))
+            ?? preferred.FirstOrDefault(a => MatchesArch(a.Name, "x64"))
+            ?? preferred.FirstOrDefault();
+    }
+
     private static bool MatchesArch(string fileName, string archSlug) =>
-        fileName.Contains($"-{archSlug}.exe", StringComparison.OrdinalIgnoreCase);
+        fileName.Contains($"-{archSlug}", StringComparison.OrdinalIgnoreCase);
 
     private static string GetInstallerArchSlug() =>
         RuntimeInformation.ProcessArchitecture switch
@@ -135,7 +169,7 @@ public sealed class UpdateCheckerService
         if (!string.IsNullOrWhiteSpace(fallback) && IsTaskbarQuotaSetupExe(new GitHubAsset { Name = fallback }))
             return fallback;
 
-        return $"TaskbarQuotaSetup-{GetInstallerArchSlug()}.exe";
+        return $"TaskbarQuotaSetup-{GetInstallerArchSlug()}-unsigned.exe";
     }
 
     private sealed class GitHubRelease
@@ -166,16 +200,27 @@ public enum UpdateCheckResultKind
     UpdateAvailable,
 }
 
+public enum UpdateDeliveryChannel
+{
+    GitHubUnsigned,
+    MicrosoftStore,
+}
+
 public sealed record UpdateCheckResult(
     UpdateCheckResultKind Kind,
     string? Version = null,
     Uri? ReleaseUrl = null,
-    Uri? DownloadUrl = null)
+    Uri? DownloadUrl = null,
+    UpdateDeliveryChannel DeliveryChannel = UpdateDeliveryChannel.GitHubUnsigned)
 {
     public static UpdateCheckResult UpToDate { get; } = new(UpdateCheckResultKind.UpToDate);
 
-    public static UpdateCheckResult UpdateAvailable(string version, Uri? releaseUrl, Uri? downloadUrl) =>
-        new(UpdateCheckResultKind.UpdateAvailable, version, releaseUrl, downloadUrl);
+    public static UpdateCheckResult UpdateAvailable(
+        string version,
+        Uri? releaseUrl,
+        Uri? downloadUrl,
+        UpdateDeliveryChannel deliveryChannel) =>
+        new(UpdateCheckResultKind.UpdateAvailable, version, releaseUrl, downloadUrl, deliveryChannel);
 }
 
 public sealed record DownloadedUpdate(string Version, string FilePath);

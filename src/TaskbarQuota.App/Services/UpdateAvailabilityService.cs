@@ -75,7 +75,12 @@ public sealed class UpdateAvailabilityService
             AvailableUpdate = result;
             DownloadedUpdate = null;
 
-            if (result.DownloadUrl is null)
+            if (result.DeliveryChannel == UpdateDeliveryChannel.MicrosoftStore)
+            {
+                StatusMessage = $"New update available in Microsoft Store (v{result.Version}).";
+                UiState = UpdateAvailabilityUiState.UpdateAvailable;
+            }
+            else if (result.DownloadUrl is null)
             {
                 StatusMessage = $"New update available (v{result.Version}) — see GitHub release.";
                 UiState = UpdateAvailabilityUiState.UpdateAvailable;

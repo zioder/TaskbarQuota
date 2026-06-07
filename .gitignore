@@ -11,6 +11,7 @@ ARM64/
 !installer/
 *.pdb
 *.appx*
+!src/TaskbarQuota.App/Package.appxmanifest
 *.msix*
 
 # IDE / tooling

@@ -98,9 +98,11 @@ public sealed partial class UpdateActionBar : UserControl
         DownloadProgress.Visibility = Visibility.Collapsed;
         ActionButton.Visibility = Visibility.Visible;
         ActionButton.IsEnabled = true;
-        ActionButton.Content = _updates.AvailableUpdate?.DownloadUrl is null
-            ? "View release"
-            : "Download update";
+        ActionButton.Content = _updates.AvailableUpdate?.DeliveryChannel == UpdateDeliveryChannel.MicrosoftStore
+            ? "Open Store"
+            : _updates.AvailableUpdate?.DownloadUrl is null
+                ? "View release"
+                : "Download update";
         break;
 
       case UpdateAvailabilityUiState.Downloading:
@@ -168,7 +170,12 @@ public sealed partial class UpdateActionBar : UserControl
     switch (_updates.UiState)
     {
       case UpdateAvailabilityUiState.UpdateAvailable:
-        if (_updates.AvailableUpdate?.DownloadUrl is null
+        if (_updates.AvailableUpdate?.DeliveryChannel == UpdateDeliveryChannel.MicrosoftStore
+            && _updates.AvailableUpdate.ReleaseUrl is { } storeUrl)
+        {
+          _ = Launcher.LaunchUriAsync(storeUrl);
+        }
+        else if (_updates.AvailableUpdate?.DownloadUrl is null
             && _updates.AvailableUpdate?.ReleaseUrl is { } releaseUrl)
         {
           _ = Launcher.LaunchUriAsync(releaseUrl);
