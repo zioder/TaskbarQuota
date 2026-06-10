@@ -25,7 +25,10 @@ namespace TaskbarQuota.Usage.Providers
         private const string BillingUrl = "https://cli-chat-proxy.grok.com/v1/billing";
         private const string SettingsUrl = "https://cli-chat-proxy.grok.com/v1/settings";
         private const string TokenAuthHeader = "xai-grok-cli";
-        private const int BillingRetries = 4;
+        // The billing proxy frequently returns a transient "Timeout expired" on a cold call and
+        // succeeds on the next try, so retry several times with a short backoff between attempts.
+        private const int BillingRetries = 6;
+        private static readonly TimeSpan BillingRetryDelay = TimeSpan.FromMilliseconds(500);
 
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
 
@@ -77,6 +80,7 @@ namespace TaskbarQuota.Usage.Providers
                 catch (ProviderException pe) when (pe.Kind == ProviderErrorKind.Timeout && attempt < BillingRetries - 1)
                 {
                     last = pe;
+                    await Task.Delay(BillingRetryDelay, ct).ConfigureAwait(false);
                 }
             }
 
