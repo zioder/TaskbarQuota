@@ -65,6 +65,17 @@ namespace TaskbarQuota.Usage.Providers
                 if (billing.ResetAt is { } resetsAt)
                     cost.WithResetsAt(resetsAt);
                 usage.Cost = cost;
+
+                // Pay-as-you-go (on-demand) credits beyond the included limit, mirroring Copilot's
+                // additional-usage block. On-demand is only consumed once the included limit is spent.
+                double onDemandUsed = Math.Max(0, billing.UsedUnits - billing.LimitUnits);
+                usage.AdditionalUsage = new AdditionalUsageSnapshot
+                {
+                    Enabled = billing.OnDemandCapUnits > 0,
+                    SpentUsd = onDemandUsed,
+                    BudgetUsd = billing.OnDemandCapUnits,
+                    IsCredits = true,
+                };
             }
 
             // Plan name is best-effort: xAI formats it for us, but a missing field must not fail the fetch.
@@ -77,7 +88,7 @@ namespace TaskbarQuota.Usage.Providers
 
         // --- Credits (/v1/billing JSON) ----------------------------------------------------------
 
-        internal sealed record BillingSnapshot(double UsedPercent, double UsedUnits, double LimitUnits, DateTimeOffset? ResetAt);
+        internal sealed record BillingSnapshot(double UsedPercent, double UsedUnits, double LimitUnits, double OnDemandCapUnits, DateTimeOffset? ResetAt);
 
         private static async Task<BillingSnapshot> FetchBillingAsync(string accessToken, CancellationToken ct)
         {
@@ -145,7 +156,8 @@ namespace TaskbarQuota.Usage.Providers
                 reset = dt;
             }
 
-            return new BillingSnapshot(percent, used.Value, limit.Value, reset);
+            double onDemandCap = UnitsValue(config, "onDemandCap") ?? 0;
+            return new BillingSnapshot(percent, used.Value, limit.Value, onDemandCap, reset);
         }
 
         private static double? UnitsValue(JsonElement parent, string name)

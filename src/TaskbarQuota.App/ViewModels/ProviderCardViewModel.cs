@@ -245,7 +245,7 @@ namespace TaskbarQuota.ViewModels
                         CostText = u.Cost != null ? $"{u.Cost.Label}: {u.Cost.Display}" : string.Empty;
                     }
 
-                    if (r.Id == ProviderId.Copilot && u.AdditionalUsage is { } additional)
+                    if (r.Id is ProviderId.Copilot or ProviderId.Grok && u.AdditionalUsage is { } additional)
                     {
                         bool muted = !additional.Enabled;
                         AdditionalUsageStatusText = additional.StatusText;

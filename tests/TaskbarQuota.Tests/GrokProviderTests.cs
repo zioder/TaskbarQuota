@@ -44,14 +44,14 @@ public class GrokProviderTests
     }
 
     [Fact]
-    public void ParseBilling_ComputesPercentAndReset()
+    public void ParseBilling_ComputesPercentResetAndCap()
     {
         const string json = """
         {
           "config": {
             "monthlyLimit": { "val": 15000 },
             "used": { "val": 15 },
-            "onDemandCap": { "val": 0 },
+            "onDemandCap": { "val": 5000 },
             "billingPeriodEnd": "2026-07-01T00:00:00+00:00"
           }
         }
@@ -61,7 +61,26 @@ public class GrokProviderTests
         var snapshot = GrokProvider.ParseBilling(doc.RootElement);
 
         Assert.Equal(0.1, snapshot.UsedPercent, 3);
+        Assert.Equal(15, snapshot.UsedUnits);
+        Assert.Equal(15000, snapshot.LimitUnits);
+        Assert.Equal(5000, snapshot.OnDemandCapUnits);
         Assert.Equal(DateTimeOffset.Parse("2026-07-01T00:00:00+00:00"), snapshot.ResetAt);
+    }
+
+    [Fact]
+    public void AdditionalUsage_InCreditsMode_FormatsAsCredits()
+    {
+        var enabled = new AdditionalUsageSnapshot { Enabled = true, SpentUsd = 200, BudgetUsd = 5000, IsCredits = true };
+        Assert.Equal("Enabled", enabled.StatusText);
+        Assert.Equal("200 / 5000 credits", enabled.SpendText);
+
+        var disabled = new AdditionalUsageSnapshot { Enabled = false, SpentUsd = 0, BudgetUsd = 0, IsCredits = true };
+        Assert.Equal("Not enabled", disabled.StatusText);
+        Assert.Equal("0 / 0 credits", disabled.SpendText);
+
+        // USD (Copilot) formatting is unchanged.
+        var usd = new AdditionalUsageSnapshot { Enabled = true, SpentUsd = 1.5, BudgetUsd = 5 };
+        Assert.Equal("$1.50 / $5.00 budget", usd.SpendText);
     }
 
     [Fact]
