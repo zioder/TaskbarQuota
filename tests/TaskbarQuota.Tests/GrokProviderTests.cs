@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Text.Json;
 using TaskbarQuota.Usage;
 using TaskbarQuota.Usage.Providers;
@@ -45,109 +44,63 @@ public class GrokProviderTests
     }
 
     [Fact]
-    public void ParseCreditsResponse_ExtractsPercentAndPreferredReset()
+    public void ParseBilling_ComputesPercentAndReset()
     {
-        var now = DateTimeOffset.FromUnixTimeSeconds(1_780_000_000);
-        long periodStart = 1_779_000_000; // in the past relative to now -> ignored
-        long resetAt = 1_790_000_000;     // future -> selected
-
-        // Message: field1 { field1=fixed32(0.1), field4{field1=periodStart}, field5{field1=resetAt} }
-        var inner = new List<byte>();
-        inner.AddRange(Fixed32(1, 0.1f));
-        inner.AddRange(LenDelim(4, Varint(1, (ulong)periodStart)));
-        inner.AddRange(LenDelim(5, Varint(1, (ulong)resetAt)));
-        var message = LenDelim(1, inner);
-        var framed = DataFrame(message);
-
-        var snapshot = GrokProvider.ParseCreditsResponse(framed.ToArray(), now);
-
-        Assert.Equal(0.1, snapshot.UsedPercent, 3);
-        Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(resetAt), snapshot.ResetAt);
-    }
-
-    [Theory]
-    [InlineData("SUBSCRIPTION_TIER_GROK_PRO", "SuperGrok")]
-    [InlineData("SUBSCRIPTION_TIER_GROK_HEAVY", "SuperGrok Heavy")]
-    [InlineData("SUBSCRIPTION_TIER_X_PREMIUM_PLUS", "X Premium+")]
-    [InlineData("SUBSCRIPTION_TIER_X_PREMIUM", "X Premium")]
-    [InlineData("SUBSCRIPTION_TIER_GROK_BASIC", "Basic")]
-    [InlineData("SUBSCRIPTION_TIER_SOMETHING_NEW", "Something New")]
-    public void PlanFromSubscriptions_MapsTier(string tier, string expected)
-    {
-        string json = $$"""
-        { "subscriptions": [ { "tier": "{{tier}}", "status": "SUBSCRIPTION_STATUS_ACTIVE" } ] }
+        const string json = """
+        {
+          "config": {
+            "monthlyLimit": { "val": 15000 },
+            "used": { "val": 15 },
+            "onDemandCap": { "val": 0 },
+            "billingPeriodEnd": "2026-07-01T00:00:00+00:00"
+          }
+        }
         """;
         using var doc = JsonDocument.Parse(json);
 
-        Assert.Equal(expected, GrokProvider.PlanFromSubscriptions(doc.RootElement));
+        var snapshot = GrokProvider.ParseBilling(doc.RootElement);
+
+        Assert.Equal(0.1, snapshot.UsedPercent, 3);
+        Assert.Equal(DateTimeOffset.Parse("2026-07-01T00:00:00+00:00"), snapshot.ResetAt);
     }
 
     [Fact]
-    public void PlanFromSubscriptions_AppendsTrialSuffix()
+    public void ParseBilling_ClampsOverLimitUsage()
     {
         const string json = """
-        { "subscriptions": [ {
-            "tier": "SUBSCRIPTION_TIER_GROK_PRO",
-            "status": "SUBSCRIPTION_STATUS_ACTIVE",
-            "activeOffer": { "type": "ACTIVE_OFFER_FREE_TRIAL" }
-        } ] }
+        { "config": { "monthlyLimit": { "val": 100 }, "used": { "val": 250 }, "billingPeriodEnd": "2026-07-01T00:00:00Z" } }
         """;
         using var doc = JsonDocument.Parse(json);
 
-        Assert.Equal("SuperGrok (Trial)", GrokProvider.PlanFromSubscriptions(doc.RootElement));
+        Assert.Equal(100, GrokProvider.ParseBilling(doc.RootElement).UsedPercent);
     }
 
-    // --- protobuf / gRPC-web encoding helpers (mirror of the decoder under test) ---
-
-    private static List<byte> Varint(int field, ulong value)
+    [Fact]
+    public void ParseBilling_ThrowsWhenShapeChanged()
     {
-        var bytes = new List<byte> { (byte)((field << 3) | 0) };
-        bytes.AddRange(EncodeVarint(value));
-        return bytes;
+        using var doc = JsonDocument.Parse("""{ "config": { "used": { "val": 1 } } }""");
+
+        var ex = Assert.Throws<ProviderException>(() => GrokProvider.ParseBilling(doc.RootElement));
+        Assert.Equal(ProviderErrorKind.Parse, ex.Kind);
     }
 
-    private static List<byte> Fixed32(int field, float value)
+    [Theory]
+    [InlineData("SuperGrok")]
+    [InlineData("SuperGrok Heavy")]
+    [InlineData("X Premium+")]
+    public void PlanFromSettings_ReturnsDisplayNameVerbatim(string display)
     {
-        var bytes = new List<byte> { (byte)((field << 3) | 5) };
-        bytes.AddRange(BitConverter.GetBytes(value));
-        return bytes;
+        string json = $$"""{ "subscription_tier_display": "{{display}}", "release_channel": "stable" }""";
+        using var doc = JsonDocument.Parse(json);
+
+        Assert.Equal(display, GrokProvider.PlanFromSettings(doc.RootElement));
     }
 
-    private static List<byte> LenDelim(int field, List<byte> payload)
+    [Fact]
+    public void PlanFromSettings_ReturnsNullWhenAbsent()
     {
-        var bytes = new List<byte> { (byte)((field << 3) | 2) };
-        bytes.AddRange(EncodeVarint((ulong)payload.Count));
-        bytes.AddRange(payload);
-        return bytes;
-    }
+        using var doc = JsonDocument.Parse("""{ "release_channel": "stable" }""");
 
-    private static IEnumerable<byte> EncodeVarint(ulong value)
-    {
-        do
-        {
-            byte b = (byte)(value & 0x7F);
-            value >>= 7;
-            if (value != 0) b |= 0x80;
-            yield return b;
-        } while (value != 0);
-    }
-
-    private static List<byte> DataFrame(List<byte> message)
-    {
-        int len = message.Count;
-        return new List<byte>
-        {
-            0x00,
-            (byte)((len >> 24) & 0xFF), (byte)((len >> 16) & 0xFF), (byte)((len >> 8) & 0xFF), (byte)(len & 0xFF),
-        }.Concat(message);
-    }
-}
-
-file static class GrokTestExtensions
-{
-    public static List<byte> Concat(this List<byte> head, List<byte> tail)
-    {
-        head.AddRange(tail);
-        return head;
+        Assert.Null(GrokProvider.PlanFromSettings(doc.RootElement));
     }
 }
