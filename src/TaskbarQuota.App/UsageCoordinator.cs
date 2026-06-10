@@ -49,6 +49,8 @@ namespace TaskbarQuota
         public void Start()
         {
             if (_timer != null) return;
+            // Warm WMI off-thread so the first terminal detection isn't blocked by COM cold start.
+            _ = Task.Run(() => _detector.Prewarm());
             _detector.OpenCodeModelStateChanged += OnOpenCodeModelStateChanged;
             _detector.StartOpenCodeModelStateWatcher();
             // Fast tick for snappy active-app switching; usage fetches respect per-result cache TTL (60s ok, 5m on 429).

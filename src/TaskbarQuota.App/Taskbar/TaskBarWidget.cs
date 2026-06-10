@@ -477,9 +477,11 @@ namespace TaskbarQuota.Taskbar
             {
                 if (!File.Exists(positionPath))
                     return -1;
-                return int.TryParse(File.ReadAllText(positionPath), NumberStyles.Integer, CultureInfo.InvariantCulture, out int offset)
-                    ? offset
-                    : -1;
+                if (!int.TryParse(File.ReadAllText(positionPath), NumberStyles.Integer, CultureInfo.InvariantCulture, out int offset))
+                    return -1;
+
+                // A saved offset of 0 lands under the Start button on LTR taskbars and looks "missing".
+                return offset == 0 ? -1 : offset;
             }
             catch (Exception ex)
             {

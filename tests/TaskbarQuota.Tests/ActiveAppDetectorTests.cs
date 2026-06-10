@@ -149,6 +149,7 @@ public class ActiveAppDetectorTests : IDisposable
     }
 
     [Theory]
+    [InlineData("grok.exe", @"C:\Users\me\.grok\bin\grok.exe", ProviderId.Grok)]
     [InlineData("antigravity.exe", @"C:\Program Files\Antigravity\bin\antigravity.exe", ProviderId.Antigravity)]
     [InlineData("node.exe", @"node C:\Users\me\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js", ProviderId.Claude)]
     [InlineData("claude.exe", @"C:\Users\me\AppData\Roaming\npm\claude.cmd", ProviderId.Claude)]
@@ -343,6 +344,97 @@ public class ActiveAppDetectorTests : IDisposable
     [InlineData(@"C:\Users\me\.local\state\other\model.json", false)]
     public void IsOpenCodeModelStatePath_MatchesExpectedFiles(string path, bool expected)
         => Assert.Equal(expected, ActiveAppDetector.IsOpenCodeModelStatePath(path));
+
+    [Fact]
+    public void ExpandTerminalSessionPids_ConhostForeground_IncludesSiblingGrok()
+    {
+        // Windows reports conhost as foreground while grok runs as a sibling under powershell.
+        var parents = new Dictionary<int, int>
+        {
+            [101136] = 101192, // conhost -> powershell
+            [116616] = 101192, // grok -> powershell
+            [101192] = 9084,   // powershell -> explorer
+        };
+        var names = new Dictionary<int, string>
+        {
+            [101136] = "conhost",
+            [101192] = "powershell",
+            [116616] = "grok",
+        };
+
+        var session = ActiveAppDetector.ExpandTerminalSessionPids(101136, "conhost", parents, names);
+
+        Assert.Contains(101136, session);
+        Assert.Contains(101192, session);
+        Assert.Contains(116616, session);
+    }
+
+    [Fact]
+    public void IsInTerminalSession_GrokSiblingOfConhost_ReturnsTrue()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [101136] = 101192,
+            [116616] = 101192,
+            [101192] = 9084,
+        };
+        var names = new Dictionary<int, string>
+        {
+            [101136] = "conhost",
+            [101192] = "powershell",
+            [116616] = "grok",
+        };
+        var session = ActiveAppDetector.ExpandTerminalSessionPids(101136, "conhost", parents, names);
+
+        Assert.True(ActiveAppDetector.IsInTerminalSession(116616, 101192, session, parents));
+    }
+
+    [Fact]
+    public void IsInTerminalSession_GrokInOtherShell_ReturnsFalse()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [101136] = 101192,
+            [116616] = 202202,
+            [101192] = 9084,
+            [202202] = 9084,
+        };
+        var names = new Dictionary<int, string>
+        {
+            [101136] = "conhost",
+            [101192] = "powershell",
+            [202202] = "powershell",
+            [116616] = "grok",
+        };
+        var session = ActiveAppDetector.ExpandTerminalSessionPids(101136, "conhost", parents, names);
+
+        Assert.False(ActiveAppDetector.IsInTerminalSession(116616, 202202, session, parents));
+    }
+
+    [Fact]
+    public void ReadActiveGrokSessionPids_ReadsPidFromFile()
+    {
+        var grokDir = Path.Combine(_tempDir, ".grok");
+        Directory.CreateDirectory(grokDir);
+        var sessionsPath = Path.Combine(grokDir, "active_sessions.json");
+        File.WriteAllText(sessionsPath, """
+            [
+              { "session_id": "abc", "pid": 4242, "cwd": "C:\\\\work", "opened_at": "2026-06-10T12:00:00Z" }
+            ]
+            """);
+
+        Environment.SetEnvironmentVariable("GROK_HOME", grokDir);
+        try
+        {
+            var pids = ActiveAppDetector.ReadActiveGrokSessionPids();
+            Assert.Single(pids);
+            Assert.Equal(4242, pids[0]);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("GROK_HOME", null);
+        }
+    }
 
     [Fact]
     public void OpenCodeModelStateWatcher_NotifiesWhenModelJsonChanges()

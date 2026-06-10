@@ -38,6 +38,19 @@ namespace TaskbarQuota.ActiveApp
             "wezterm-gui", "wezterm", "alacritty", "mintty", "bash", "wt", "tabby", "hyper",
         };
 
+        // Shell processes that host interactive CLIs. On Windows, conhost/OpenConsole are
+        // siblings of the CLI under the shell, not ancestors — matching must include the
+        // full shell session, not just descendants of the foreground PID.
+        private static readonly HashSet<string> ShellHosts = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "powershell", "pwsh", "cmd", "bash", "wsl", "wslhost",
+        };
+
+        private static readonly HashSet<string> InteractiveClis = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "grok", "claude", "codex", "cursor", "cursor-agent", "opencode", "copilot", "antigravity",
+        };
+
         // CLI command-line markers -> provider, checked in order. Claude is checked
         // before Codex because terminal launchers and paths can contain both names.
         private static readonly (string marker, ProviderId id)[] CliMarkers =
@@ -54,6 +67,8 @@ namespace TaskbarQuota.ActiveApp
             ("gh copilot", ProviderId.Copilot),
             ("github-copilot", ProviderId.Copilot),
             ("copilot", ProviderId.Copilot),
+            (".grok\\bin\\grok", ProviderId.Grok),
+            (".grok/bin/grok", ProviderId.Grok),
             ("grok", ProviderId.Grok),
             ("claude", ProviderId.Claude),
             ("codex", ProviderId.Codex),
@@ -127,6 +142,13 @@ namespace TaskbarQuota.ActiveApp
             if (TryResolveGuiProcess(procName) is { } gui)
                 return _lastForegroundResult = gui;
 
+            // Interactive CLI TUI focused directly (e.g. grok.exe owns the window).
+            if (InteractiveClis.Contains(procName))
+            {
+                if (TryDetectCliProvider($"{procName}.exe", null) is { } cli)
+                    return _lastForegroundResult = cli;
+            }
+
             // Terminal focused: find the CLI running inside, but throttle the WMI scan.
             if (Terminals.Contains(procName))
             {
@@ -134,13 +156,35 @@ namespace TaskbarQuota.ActiveApp
                     && _cliCachePid == processId
                     && DateTime.UtcNow - _cliCacheAt < CliCacheTtl)
                     return _lastForegroundResult = _cliCache;
-                _cliCache = DetectCliFromProcesses(processId);
+                _cliCache = DetectCliFromProcesses(processId, procName);
                 _cliCachePid = processId;
                 _cliCacheAt = DateTime.UtcNow;
                 return _lastForegroundResult = _cliCache;
             }
 
             return _lastForegroundResult = null;
+        }
+
+        private int _prewarmed;
+
+        /// <summary>
+        /// Run one throwaway WMI process scan so the process-wide COM/WMI cold start (~1-3s) happens
+        /// off the UI/timer thread at launch instead of stalling the user's first terminal detection.
+        /// Safe to call repeatedly; only the first call does work.
+        /// </summary>
+        public void Prewarm()
+        {
+            if (System.Threading.Interlocked.Exchange(ref _prewarmed, 1) != 0)
+                return;
+
+            try
+            {
+                DetectCliFromProcesses();
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Log.Warning(ex, "Active-app detector prewarm failed");
+            }
         }
 
         public bool HasAnyKnownToolRunning()
@@ -204,12 +248,13 @@ namespace TaskbarQuota.ActiveApp
             catch { return null; }
         }
 
-        private static ProviderId? DetectCliFromProcesses(int? foregroundTerminalPid = null)
+        private static ProviderId? DetectCliFromProcesses(int? foregroundTerminalPid = null, string? foregroundProcName = null)
         {
             // Inspect command lines of running processes for CLI markers.
             // node-based CLIs show up as "node ... claude", codex/opencode may be native exes.
             var candidates = new List<(ProviderId id, DateTime started, int pid, int parentPid)>();
             var processParents = new Dictionary<int, int>();
+            var processNames = new Dictionary<int, string>();
             try
             {
                 using var searcher = new ManagementObjectSearcher(
@@ -221,6 +266,8 @@ namespace TaskbarQuota.ActiveApp
                     var parentPid = TryParseInt(mo["ParentProcessId"]);
                     if (pid != null && parentPid != null)
                         processParents[pid.Value] = parentPid.Value;
+                    if (pid != null && mo["Name"] is string rawName)
+                        processNames[pid.Value] = NormalizeProcessName(rawName);
 
                     if (TryDetectCliProvider(mo["Name"] as string, mo["CommandLine"] as string) is { } id)
                     {
@@ -249,15 +296,150 @@ namespace TaskbarQuota.ActiveApp
 
             if (foregroundTerminalPid is int rootPid)
             {
+                var sessionPids = ExpandTerminalSessionPids(rootPid, foregroundProcName, processParents, processNames);
                 var foregroundTree = candidates
-                    .Where(c => c.pid == rootPid || IsDescendantOf(c.pid, rootPid, processParents))
+                    .Where(c => IsInTerminalSession(c.pid, c.parentPid, sessionPids, processParents))
                     .ToList();
                 if (foregroundTree.Count > 0)
                     return foregroundTree.OrderByDescending(c => c.started).First().id;
+
+                if (TryDetectGrokFromActiveSessions(sessionPids, processParents) is { } grok)
+                    return grok;
             }
 
             return candidates.OrderByDescending(c => c.started).First().id;
         }
+
+        internal static HashSet<int> ExpandTerminalSessionPids(
+            int foregroundPid,
+            string? foregroundProcName,
+            IReadOnlyDictionary<int, int> parents,
+            IReadOnlyDictionary<int, string> names)
+        {
+            var session = new HashSet<int> { foregroundPid };
+
+            void AddShellSession(int shellPid)
+            {
+                session.Add(shellPid);
+                foreach (var (pid, parentPid) in parents)
+                {
+                    if (parentPid == shellPid)
+                        session.Add(pid);
+                }
+            }
+
+            if (IsShellHostName(foregroundProcName))
+            {
+                AddShellSession(foregroundPid);
+                return session;
+            }
+
+            if (IsConsoleHostName(foregroundProcName) && parents.TryGetValue(foregroundPid, out var shellPid))
+            {
+                AddShellSession(shellPid);
+                return session;
+            }
+
+            if (IsWindowsTerminalName(foregroundProcName))
+            {
+                foreach (var (pid, parentPid) in parents)
+                {
+                    if (pid == foregroundPid || IsDescendantOf(pid, foregroundPid, parents))
+                        session.Add(pid);
+                }
+
+                foreach (var pid in session.ToArray())
+                {
+                    if (names.TryGetValue(pid, out var name) && IsShellHostName(name))
+                        AddShellSession(pid);
+                }
+            }
+
+            return session;
+        }
+
+        internal static bool IsInTerminalSession(
+            int candidatePid,
+            int candidateParentPid,
+            IReadOnlySet<int> sessionPids,
+            IReadOnlyDictionary<int, int> parents) =>
+            sessionPids.Contains(candidatePid)
+            || sessionPids.Contains(candidateParentPid)
+            || sessionPids.Any(rootPid => IsDescendantOf(candidatePid, rootPid, parents));
+
+        private static ProviderId? TryDetectGrokFromActiveSessions(
+            IReadOnlySet<int> sessionPids,
+            IReadOnlyDictionary<int, int> parents)
+        {
+            foreach (var grokPid in ReadActiveGrokSessionPids())
+            {
+                if (!sessionPids.Contains(grokPid)
+                    && !sessionPids.Any(rootPid => IsDescendantOf(grokPid, rootPid, parents))
+                    && !(parents.TryGetValue(grokPid, out var grokParent) && sessionPids.Contains(grokParent)))
+                    continue;
+
+                try
+                {
+                    using var process = Process.GetProcessById(grokPid);
+                    if (!process.HasExited)
+                        return ProviderId.Grok;
+                }
+                catch { }
+            }
+
+            return null;
+        }
+
+        internal static IReadOnlyList<int> ReadActiveGrokSessionPids()
+        {
+            var path = GetGrokActiveSessionsPath();
+            if (!File.Exists(path))
+                return Array.Empty<int>();
+
+            try
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                    return Array.Empty<int>();
+
+                var pids = new List<int>();
+                foreach (var item in doc.RootElement.EnumerateArray())
+                {
+                    if (item.TryGetProperty("pid", out var pidProp) && pidProp.TryGetInt32(out var pid) && pid > 0)
+                        pids.Add(pid);
+                }
+
+                return pids;
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Log.Warning(ex, "Failed to read Grok active_sessions.json");
+                return Array.Empty<int>();
+            }
+        }
+
+        internal static string GetGrokActiveSessionsPath()
+        {
+            var grokHome = Environment.GetEnvironmentVariable("GROK_HOME")?.Trim();
+            var root = !string.IsNullOrEmpty(grokHome)
+                ? grokHome
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".grok");
+            return Path.Combine(root, "active_sessions.json");
+        }
+
+        private static string NormalizeProcessName(string processName) =>
+            processName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+                ? processName[..^4]
+                : processName;
+
+        private static bool IsShellHostName(string? processName) =>
+            processName != null && ShellHosts.Contains(processName);
+
+        private static bool IsConsoleHostName(string? processName) =>
+            processName is "conhost" or "openconsole";
+
+        private static bool IsWindowsTerminalName(string? processName) =>
+            processName is "windowsterminal" or "wt";
 
         internal static ProviderId? TryDetectCliProvider(string? processName, string? commandLine)
         {

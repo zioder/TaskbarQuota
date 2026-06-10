@@ -29,6 +29,8 @@ namespace TaskbarQuota
         private bool _shown;
         private bool _dashboardLoaded;
         private bool _sizeHooksRegistered;
+        private bool _applyingBounds;
+        private RectInt32? _lastAppliedBounds;
         private readonly DashboardViewModel _dashboardViewModel;
         private readonly Dictionary<ProviderId, FlyoutProviderStripItem> _providerStripItems = new();
 
@@ -100,22 +102,39 @@ namespace TaskbarQuota
 
         private void ApplyFlyoutBounds()
         {
-            if (!_shown || _widgetHandle == IntPtr.Zero)
+            if (!_shown || _widgetHandle == IntPtr.Zero || _applyingBounds)
                 return;
 
-            var scale = Root.XamlRoot?.RasterizationScale ?? GetWindowScale();
-            int w = WindowDpi.ToPhysical(FlyoutLayout.LogicalWidth, scale);
-            int h = WindowDpi.ToPhysical(FlyoutLayout.LogicalHeight, scale);
+            _applyingBounds = true;
+            try
+            {
+                var scale = Root.XamlRoot?.RasterizationScale ?? GetWindowScale();
+                int w = WindowDpi.ToPhysical(FlyoutLayout.LogicalWidth, scale);
+                int h = WindowDpi.ToPhysical(FlyoutLayout.LogicalHeight, scale);
 
-            if (!User32.GetWindowRect(_widgetHandle, out RECT wr))
-                return;
+                if (!User32.GetWindowRect(_widgetHandle, out RECT wr))
+                    return;
 
-            int x = wr.right - w;
-            int y = wr.top - h - WindowDpi.ToPhysical(8, scale);
-            if (y < 0) y = 0;
-            if (x < 0) x = 0;
+                int x = wr.right - w;
+                int y = wr.top - h - WindowDpi.ToPhysical(8, scale);
+                if (y < 0) y = 0;
+                if (x < 0) x = 0;
 
-            GetAppWindow().MoveAndResize(new RectInt32(x, y, w, h));
+                var bounds = new RectInt32(x, y, w, h);
+                if (_lastAppliedBounds is { } last
+                    && last.X == bounds.X
+                    && last.Y == bounds.Y
+                    && last.Width == bounds.Width
+                    && last.Height == bounds.Height)
+                    return;
+
+                _lastAppliedBounds = bounds;
+                GetAppWindow().MoveAndResize(bounds);
+            }
+            finally
+            {
+                _applyingBounds = false;
+            }
         }
 
         private double GetWindowScale()
@@ -129,6 +148,7 @@ namespace TaskbarQuota
         {
             if (!_shown) return;
             _shown = false;
+            _lastAppliedBounds = null;
             GetAppWindow().Hide();
         }
 
