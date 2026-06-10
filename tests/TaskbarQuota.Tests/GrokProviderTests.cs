@@ -68,7 +68,10 @@ public class GrokProviderTests
     [Theory]
     [InlineData("SUBSCRIPTION_TIER_GROK_PRO", "SuperGrok")]
     [InlineData("SUBSCRIPTION_TIER_GROK_HEAVY", "SuperGrok Heavy")]
+    [InlineData("SUBSCRIPTION_TIER_X_PREMIUM_PLUS", "X Premium+")]
+    [InlineData("SUBSCRIPTION_TIER_X_PREMIUM", "X Premium")]
     [InlineData("SUBSCRIPTION_TIER_GROK_BASIC", "Basic")]
+    [InlineData("SUBSCRIPTION_TIER_SOMETHING_NEW", "Something New")]
     public void PlanFromSubscriptions_MapsTier(string tier, string expected)
     {
         string json = $$"""

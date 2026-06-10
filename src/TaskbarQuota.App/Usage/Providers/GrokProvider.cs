@@ -234,13 +234,19 @@ namespace TaskbarQuota.Usage.Providers
             return null;
         }
 
+        // xAI does not document the tier enum. Only SUBSCRIPTION_TIER_GROK_PRO is verified (a real
+        // SuperGrok account); the rest are inferred by substring and any unknown tier is title-cased
+        // verbatim so it is never silently mislabeled. CodexBar does not read tier at all (it labels
+        // every OIDC login "SuperGrok"), so this is intentionally more granular than the reference.
         private static string PlanFromTier(string tier)
         {
             var upper = tier.ToUpperInvariant();
-            if (upper.Contains("HEAVY")) return "SuperGrok Heavy";
-            if (upper.Contains("PRO") || upper.Contains("SUPER")) return "SuperGrok";
+            if (upper.Contains("HEAVY")) return "SuperGrok Heavy";          // inferred
+            if (upper.Contains("PRO") || upper.Contains("SUPER")) return "SuperGrok"; // PRO verified
+            if (upper.Contains("PREMIUM"))                                  // inferred (X Premium / Premium+)
+                return upper.Contains("PLUS") ? "X Premium+" : "X Premium";
 
-            // Strip SUBSCRIPTION_TIER_[GROK_] prefix, title-case the remainder.
+            // Unknown tier: strip SUBSCRIPTION_TIER_[GROK_] prefix, title-case the remainder verbatim.
             var trimmed = upper
                 .Replace("SUBSCRIPTION_TIER_", string.Empty, StringComparison.Ordinal)
                 .Replace("GROK_", string.Empty, StringComparison.Ordinal)
