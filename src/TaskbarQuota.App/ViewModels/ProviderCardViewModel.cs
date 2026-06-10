@@ -328,6 +328,7 @@ namespace TaskbarQuota.ViewModels
             ProviderId.OpenCode or ProviderId.OpenCodeGo => "https://opencode.ai",
             ProviderId.Copilot => "https://github.com/settings/billing/ai_usage",
             ProviderId.Antigravity => "https://aistudio.google.com/usage",
+            ProviderId.Grok => "https://grok.com/?_s=usage",
             _ => string.Empty,
         };
 

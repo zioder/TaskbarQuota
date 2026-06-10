@@ -54,6 +54,7 @@ namespace TaskbarQuota.ActiveApp
             ("gh copilot", ProviderId.Copilot),
             ("github-copilot", ProviderId.Copilot),
             ("copilot", ProviderId.Copilot),
+            ("grok", ProviderId.Grok),
             ("claude", ProviderId.Claude),
             ("codex", ProviderId.Codex),
         };
@@ -213,7 +214,7 @@ namespace TaskbarQuota.ActiveApp
             {
                 using var searcher = new ManagementObjectSearcher(
                     "SELECT ProcessId, ParentProcessId, Name, CommandLine FROM Win32_Process WHERE " +
-                    "Name = 'node.exe' OR Name = 'antigravity.exe' OR Name = 'claude.exe' OR Name = 'codex.exe' OR Name = 'cursor.exe' OR Name = 'cursor-agent.exe' OR Name = 'opencode.exe' OR Name = 'copilot.exe' OR Name = 'gh.exe' OR Name = 'bun.exe' OR Name = 'deno.exe' OR Name = 'npm.exe' OR Name = 'npx.exe' OR Name = 'pnpm.exe' OR Name = 'yarn.exe' OR Name = 'cmd.exe' OR Name = 'powershell.exe' OR Name = 'pwsh.exe' OR Name = 'windowsterminal.exe' OR Name = 'openconsole.exe' OR Name = 'conhost.exe'");
+                    "Name = 'node.exe' OR Name = 'antigravity.exe' OR Name = 'claude.exe' OR Name = 'codex.exe' OR Name = 'cursor.exe' OR Name = 'cursor-agent.exe' OR Name = 'opencode.exe' OR Name = 'copilot.exe' OR Name = 'gh.exe' OR Name = 'grok.exe' OR Name = 'bun.exe' OR Name = 'deno.exe' OR Name = 'npm.exe' OR Name = 'npx.exe' OR Name = 'pnpm.exe' OR Name = 'yarn.exe' OR Name = 'cmd.exe' OR Name = 'powershell.exe' OR Name = 'pwsh.exe' OR Name = 'windowsterminal.exe' OR Name = 'openconsole.exe' OR Name = 'conhost.exe'");
                 foreach (ManagementObject mo in searcher.Get())
                 {
                     var pid = TryParseInt(mo["ProcessId"]);
@@ -268,6 +269,7 @@ namespace TaskbarQuota.ActiveApp
             if (name is "cursor-agent.exe") return ProviderId.Cursor;
             if (name is "opencode.exe") return ProviderId.OpenCode;
             if (name is "copilot.exe" or "gh.exe") return ProviderId.Copilot;
+            if (name is "grok.exe") return ProviderId.Grok;
 
             var haystack = ((commandLine ?? "") + " " + name).ToLowerInvariant();
             foreach (var (marker, id) in CliMarkers)

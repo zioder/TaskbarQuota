@@ -65,6 +65,7 @@ namespace TaskbarQuota.Usage
             ProviderId.OpenCode => ["OpenCode "],
             ProviderId.OpenCodeGo => ["OpenCode "],
             ProviderId.Antigravity => ["Google AI ", "Antigravity ", "Google "],
+            ProviderId.Grok => ["Grok ", "xAI "],
             _ => Array.Empty<string>(),
         };
     }

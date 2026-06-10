@@ -12,6 +12,7 @@ namespace TaskbarQuota.Usage
         OpenCode,
         OpenCodeGo,
         Copilot,
+        Grok,
     }
 
     /// <summary>A single rate-limit window (for example session or weekly), expressed as percent used.</summary>

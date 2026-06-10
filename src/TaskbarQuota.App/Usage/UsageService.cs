@@ -28,6 +28,7 @@ namespace TaskbarQuota.Usage
             Register(new CursorProvider());
             Register(new OpenCodeProvider());
             Register(new OpenCodeGoProvider());
+            Register(new GrokProvider());
         }
 
         public void Register(IUsageProvider provider) => _providers[provider.Id] = provider;
