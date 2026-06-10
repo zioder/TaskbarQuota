@@ -56,6 +56,17 @@ namespace TaskbarQuota.Usage.Providers
                 UsageDashboardUrl = "https://grok.com/?_s=usage",
             };
 
+            // Surface credits the same way GitHub Copilot does: a "Credits" cost meter
+            // (remaining against the monthly limit) instead of a plain percent bar.
+            if (billing.LimitUnits > 0)
+            {
+                var cost = new CostSnapshot(billing.LimitUnits - billing.UsedUnits, "credits", "Credits")
+                    .WithLimit(billing.LimitUnits);
+                if (billing.ResetAt is { } resetsAt)
+                    cost.WithResetsAt(resetsAt);
+                usage.Cost = cost;
+            }
+
             // Plan name is best-effort: xAI formats it for us, but a missing field must not fail the fetch.
             var plan = await TryFetchPlanAsync(creds, ct).ConfigureAwait(false);
             if (!string.IsNullOrWhiteSpace(plan))
@@ -66,7 +77,7 @@ namespace TaskbarQuota.Usage.Providers
 
         // --- Credits (/v1/billing JSON) ----------------------------------------------------------
 
-        internal sealed record BillingSnapshot(double UsedPercent, DateTimeOffset? ResetAt);
+        internal sealed record BillingSnapshot(double UsedPercent, double UsedUnits, double LimitUnits, DateTimeOffset? ResetAt);
 
         private static async Task<BillingSnapshot> FetchBillingAsync(string accessToken, CancellationToken ct)
         {
@@ -134,7 +145,7 @@ namespace TaskbarQuota.Usage.Providers
                 reset = dt;
             }
 
-            return new BillingSnapshot(percent, reset);
+            return new BillingSnapshot(percent, used.Value, limit.Value, reset);
         }
 
         private static double? UnitsValue(JsonElement parent, string name)

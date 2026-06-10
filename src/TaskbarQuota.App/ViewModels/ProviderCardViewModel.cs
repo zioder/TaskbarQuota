@@ -218,8 +218,8 @@ namespace TaskbarQuota.ViewModels
                 }
                 else
                 {
-                    bool copilotCredits = r.Id == ProviderId.Copilot && u.Cost is { Label: "Credits" };
-                    if (!copilotCredits)
+                    bool creditsOnly = r.Id is ProviderId.Copilot or ProviderId.Grok && u.Cost is { Label: "Credits" };
+                    if (!creditsOnly)
                     {
                         bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowPrimary, r.Provider?.SessionLabel ?? "Session", u.Primary));
                         if (u.Secondary != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowSecondary, r.Provider?.WeeklyLabel ?? "Weekly", u.Secondary));

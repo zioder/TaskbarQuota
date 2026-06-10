@@ -163,9 +163,9 @@ namespace TaskbarQuota.Controls
                 ApplyAntigravityDisplay(usage);
                 return;
             }
-            if (result.Id == ProviderId.Copilot && usage.Cost is { Label: "Credits" } credits)
+            if (result.Id is ProviderId.Copilot or ProviderId.Grok && usage.Cost is { Label: "Credits" } credits)
             {
-                ApplyCopilotCreditsDisplay(result, usage, credits);
+                ApplyCreditsDisplay(result, usage, credits);
                 return;
             }
 
@@ -347,7 +347,7 @@ namespace TaskbarQuota.Controls
                 $"Balance: {(balanceText != null ? "$" + balanceText.Split(' ')[0] : "--")}");
         }
 
-        private void ApplyCopilotCreditsDisplay(UsageResult result, UsageSnapshot usage, CostSnapshot credits)
+        private void ApplyCreditsDisplay(UsageResult result, UsageSnapshot usage, CostSnapshot credits)
         {
             double limit = credits.Limit ?? 0;
             double remaining = credits.Amount;

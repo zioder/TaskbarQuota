@@ -144,8 +144,8 @@
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                         BorderThickness="1"
                         CornerRadius="8"
-                        Padding="20,16">
-                    <Grid RowSpacing="8" ColumnSpacing="12">
+                        Padding="22,18">
+                    <Grid RowSpacing="4" ColumnSpacing="14">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
@@ -174,14 +174,16 @@
                         </Border>
                         <TextBlock Grid.Column="1" Grid.Row="0"
                                    Text="Credits"
+                                   Margin="0,0,0,8"
                                    Style="{StaticResource BodyStrongTextBlockStyle}"
                                    VerticalAlignment="Center"/>
                         <ProgressBar Grid.Column="1" Grid.Row="1"
                                      Value="{x:Bind CreditPercent}"
                                      Maximum="100"
-                                     Height="4"
+                                     Height="6"
+                                     CornerRadius="3"
                                      Foreground="{x:Bind CreditBrush}"/>
-                        <Grid Grid.Column="1" Grid.Row="2" ColumnSpacing="12">
+                        <Grid Grid.Column="1" Grid.Row="2" Margin="0,2,0,0" ColumnSpacing="14">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
