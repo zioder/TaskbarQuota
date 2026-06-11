@@ -29,6 +29,7 @@ namespace TaskbarQuota.Usage
             Register(new OpenCodeProvider());
             Register(new OpenCodeGoProvider());
             Register(new GrokProvider());
+            Register(new DevinProvider());
         }
 
         public void Register(IUsageProvider provider) => _providers[provider.Id] = provider;
@@ -97,7 +98,7 @@ namespace TaskbarQuota.Usage
                     return lastSuccess;
                 }
 
-                var result = UsageResult.Failure(id, pe.Message, provider);
+                var result = UsageResult.Failure(id, pe.Message, provider, pe.Kind);
                 Store(id, result, FetchCachePolicy.TtlForFailure(pe.Kind));
                 return result;
             }
@@ -129,7 +130,7 @@ namespace TaskbarQuota.Usage
             }
         }
 
-        private bool TryGetLastSuccessfulLiveResult(ProviderId id, out UsageResult result)
+        public bool TryGetLastSuccessfulLiveResult(ProviderId id, out UsageResult result)
         {
             lock (_lock)
             {
@@ -275,14 +276,15 @@ namespace TaskbarQuota.Usage
         public IUsageProvider? Provider { get; private init; }
         public ProviderFetchResult? Fetch { get; private init; }
         public string? Error { get; private init; }
+        public ProviderErrorKind? ErrorKind { get; private init; }
         public bool Ok => Fetch != null;
         public string DisplayName => Provider?.DisplayName ?? Id.ToString();
 
         public static UsageResult Success(ProviderId id, IUsageProvider provider, ProviderFetchResult fetch)
             => new() { Id = id, Provider = provider, Fetch = fetch };
 
-        public static UsageResult Failure(ProviderId id, string error, IUsageProvider? provider = null)
-            => new() { Id = id, Provider = provider, Error = error };
+        public static UsageResult Failure(ProviderId id, string error, IUsageProvider? provider = null, ProviderErrorKind? kind = null)
+            => new() { Id = id, Provider = provider, Error = error, ErrorKind = kind };
 
         public static UsageResult Pending(ProviderId id, IUsageProvider provider, string message)
             => new() { Id = id, Provider = provider, Error = message };

@@ -13,6 +13,7 @@ namespace TaskbarQuota.Usage
         OpenCodeGo,
         Copilot,
         Grok,
+        Devin,
     }
 
     /// <summary>A single rate-limit window (for example session or weekly), expressed as percent used.</summary>
@@ -145,6 +146,7 @@ namespace TaskbarQuota.Usage
     public enum ProviderErrorKind
     {
         NotInstalled,
+        NotRunning,
         AuthRequired,
         Timeout,
         RateLimited,
