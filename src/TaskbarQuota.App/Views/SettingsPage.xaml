@@ -53,6 +53,25 @@
                 </ComboBox>
             </tk:SettingsCard>
 
+            <TextBlock Text="Providers" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,2"/>
+            <tk:SettingsCard Header="Hide unavailable providers"
+                             Description="Automatically hide providers that are not installed or signed in. You can still add them from the dashboard or below.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE7B8;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <ToggleSwitch x:Name="AutoHideUnavailableToggle"
+                              AutomationProperties.Name="Hide unavailable providers"
+                              Toggled="OnAutoHideUnavailableToggled"/>
+            </tk:SettingsCard>
+
+            <TextBlock Text="Choose which providers appear in the dashboard and taskbar widget."
+                       Opacity="0.7"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,4"/>
+
+            <StackPanel x:Name="ProviderSettingsPanel" Spacing="4"/>
+
             <TextBlock Text="Behavior" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,2"/>
             <tk:SettingsCard Header="Open at startup" Description="Start TaskbarQuota with Windows and show only the taskbar widget.">
                 <tk:SettingsCard.HeaderIcon>

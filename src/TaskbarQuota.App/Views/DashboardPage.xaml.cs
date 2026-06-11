@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Navigation;
 using TaskbarQuota.Usage;
 using TaskbarQuota.ViewModels;
 using Windows.System;
@@ -15,6 +16,7 @@ namespace TaskbarQuota.Views
     {
         private readonly bool _ownsViewModel;
         private static bool _suppressWidgetEvents;
+        private bool _useCompactLayout;
 
         public DashboardViewModel ViewModel { get; }
         public static DashboardViewModel? SharedViewModel { get; set; }
@@ -31,13 +33,48 @@ namespace TaskbarQuota.Views
             _ownsViewModel = SharedViewModel is null;
             InitializeComponent();
             ViewModel.ScrollToTopRequested += OnScrollToTopRequested;
-            Loaded += async (_, _) => await ViewModel.LoadAsync();
+            ViewModel.DetailContentWidthChanged += OnDetailContentWidthChanged;
+            Loaded += (_, _) =>
+            {
+                ApplyLayoutState();
+                DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => _ = ViewModel.LoadAsync());
+            };
             Unloaded += (_, _) =>
             {
                 ViewModel.ScrollToTopRequested -= OnScrollToTopRequested;
+                ViewModel.DetailContentWidthChanged -= OnDetailContentWidthChanged;
                 if (_ownsViewModel)
                     ViewModel.Dispose();
             };
+        }
+
+        protected override void OnNavigatedTo(NavigationEventArgs e)
+        {
+            base.OnNavigatedTo(e);
+            if (e.Parameter is bool compact)
+            {
+                _useCompactLayout = compact;
+                ApplyLayoutState();
+            }
+        }
+
+        private void OnDetailContentWidthChanged(double width)
+            => ApplyLayoutState();
+
+        private void ApplyLayoutState()
+        {
+            if (_useCompactLayout)
+            {
+                DashboardContent.HorizontalAlignment = HorizontalAlignment.Left;
+                DashboardContent.Width = ViewModel.DetailContentWidth;
+                MainScrollViewer.HorizontalContentAlignment = HorizontalAlignment.Left;
+            }
+            else
+            {
+                DashboardContent.ClearValue(FrameworkElement.WidthProperty);
+                DashboardContent.HorizontalAlignment = HorizontalAlignment.Stretch;
+                MainScrollViewer.HorizontalContentAlignment = HorizontalAlignment.Stretch;
+            }
         }
 
         private void OnScrollToTopRequested()
@@ -138,6 +175,23 @@ namespace TaskbarQuota.Views
                 return;
 
             WidgetSettingsService.SetProviderVisible(card.ProviderId, toggle.IsChecked == true);
+        }
+
+        private void OpenSetupUrl_Click(object sender, RoutedEventArgs e)
+        {
+            ProviderId? providerId = sender switch
+            {
+                HyperlinkButton { Tag: ProviderId id } => id,
+                Button { Tag: ProviderId id } => id,
+                _ => null,
+            };
+
+            if (providerId is not { } resolvedId)
+                return;
+
+            var url = ProviderSetupInfo.SetupUrl(resolvedId);
+            if (!string.IsNullOrEmpty(url))
+                _ = Launcher.LaunchUriAsync(new Uri(url));
         }
     }
 }

@@ -149,7 +149,9 @@ public class ActiveAppDetectorTests : IDisposable
     }
 
     [Theory]
+    [InlineData("grok.exe", @"C:\Users\me\.grok\bin\grok.exe", ProviderId.Grok)]
     [InlineData("antigravity.exe", @"C:\Program Files\Antigravity\bin\antigravity.exe", ProviderId.Antigravity)]
+    [InlineData("agy.exe", @"C:\Users\me\AppData\Local\agy\bin\agy.exe", ProviderId.Antigravity)]
     [InlineData("node.exe", @"node C:\Users\me\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js", ProviderId.Claude)]
     [InlineData("claude.exe", @"C:\Users\me\AppData\Roaming\npm\claude.cmd", ProviderId.Claude)]
     [InlineData("codex.exe", @"C:\Users\me\AppData\Roaming\npm\codex.cmd", ProviderId.Codex)]
@@ -345,6 +347,591 @@ public class ActiveAppDetectorTests : IDisposable
         => Assert.Equal(expected, ActiveAppDetector.IsOpenCodeModelStatePath(path));
 
     [Fact]
+    public void ExpandTerminalSessionPids_ConhostForeground_IncludesSiblingGrok()
+    {
+        // Windows reports conhost as foreground while grok runs as a sibling under powershell.
+        var parents = new Dictionary<int, int>
+        {
+            [101136] = 101192, // conhost -> powershell
+            [116616] = 101192, // grok -> powershell
+            [101192] = 9084,   // powershell -> explorer
+        };
+        var names = new Dictionary<int, string>
+        {
+            [101136] = "conhost",
+            [101192] = "powershell",
+            [116616] = "grok",
+        };
+
+        var session = ActiveAppDetector.ExpandTerminalSessionPids(101136, "conhost", parents, names);
+
+        Assert.Contains(101136, session);
+        Assert.Contains(101192, session);
+        Assert.Contains(116616, session);
+    }
+
+    [Fact]
+    public void IsInTerminalSession_GrokSiblingOfConhost_ReturnsTrue()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [101136] = 101192,
+            [116616] = 101192,
+            [101192] = 9084,
+        };
+        var names = new Dictionary<int, string>
+        {
+            [101136] = "conhost",
+            [101192] = "powershell",
+            [116616] = "grok",
+        };
+        var session = ActiveAppDetector.ExpandTerminalSessionPids(101136, "conhost", parents, names);
+
+        Assert.True(ActiveAppDetector.IsInTerminalSession(116616, 101192, session, parents));
+    }
+
+    [Fact]
+    public void IsInTerminalSession_GrokInOtherShell_ReturnsFalse()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [101136] = 101192,
+            [116616] = 202202,
+            [101192] = 9084,
+            [202202] = 9084,
+        };
+        var names = new Dictionary<int, string>
+        {
+            [101136] = "conhost",
+            [101192] = "powershell",
+            [202202] = "powershell",
+            [116616] = "grok",
+        };
+        var session = ActiveAppDetector.ExpandTerminalSessionPids(101136, "conhost", parents, names);
+
+        Assert.False(ActiveAppDetector.IsInTerminalSession(116616, 202202, session, parents));
+    }
+
+    [Fact]
+    public void ReadActiveGrokSessionPids_ReadsPidFromFile()
+    {
+        var grokDir = Path.Combine(_tempDir, ".grok");
+        Directory.CreateDirectory(grokDir);
+        var sessionsPath = Path.Combine(grokDir, "active_sessions.json");
+        File.WriteAllText(sessionsPath, """
+            [
+              { "session_id": "abc", "pid": 4242, "cwd": "C:\\\\work", "opened_at": "2026-06-10T12:00:00Z" }
+            ]
+            """);
+
+        Environment.SetEnvironmentVariable("GROK_HOME", grokDir);
+        try
+        {
+            var pids = ActiveAppDetector.ReadActiveGrokSessionPids();
+            Assert.Single(pids);
+            Assert.Equal(4242, pids[0]);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("GROK_HOME", null);
+        }
+    }
+
+    [Fact]
+    public void PickForegroundCli_PrefersCliAttachedToFocusedShell()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [500] = 400,
+            [501] = 401,
+            [400] = 300,
+            [401] = 300,
+            [300] = 100,
+        };
+
+        var candidates = new List<(ProviderId id, DateTime started, int pid, int parentPid)>
+        {
+            (ProviderId.Grok, new DateTime(2026, 6, 10, 12, 0, 0, DateTimeKind.Utc), 501, 401),
+            (ProviderId.Claude, new DateTime(2026, 6, 10, 11, 0, 0, DateTimeKind.Utc), 500, 400),
+        };
+
+        var picked = ActiveAppDetector.PickForegroundCli(candidates, sessionRootPid: 400, parents);
+        Assert.Equal(ProviderId.Claude, picked);
+    }
+
+    [Fact]
+    public void ShouldReuseCliCacheState_InvalidatesWhenForegroundWindowChanges()
+    {
+        var hwndA = new IntPtr(1001);
+        var hwndB = new IntPtr(1002);
+        var ttl = TimeSpan.FromMilliseconds(250);
+        var cachedAt = DateTime.UtcNow;
+
+        Assert.True(ActiveAppDetector.ShouldReuseCliCacheState(
+            hwndA, 900, 400, terminalFocused: true, openCodeModelChanged: false,
+            ProviderId.Grok, hwndA, 900, 400, cachedAt, ttl));
+
+        Assert.False(ActiveAppDetector.ShouldReuseCliCacheState(
+            hwndB, 900, 400, terminalFocused: true, openCodeModelChanged: false,
+            ProviderId.Grok, hwndA, 900, 400, cachedAt, ttl));
+    }
+
+    [Fact]
+    public void ShouldReuseCliCacheState_InvalidatesWhenFocusedPaneChanges()
+    {
+        var hwnd = new IntPtr(1001);
+        var ttl = TimeSpan.FromMilliseconds(250);
+        var cachedAt = DateTime.UtcNow;
+
+        Assert.False(ActiveAppDetector.ShouldReuseCliCacheState(
+            hwnd, 900, 401, terminalFocused: true, openCodeModelChanged: false,
+            ProviderId.Claude, hwnd, 900, 400, cachedAt, ttl));
+    }
+
+    [Fact]
+    public void ShouldReuseCliCacheState_InvalidatesWhenInnerFocusHwndChanges()
+    {
+        var hwnd = new IntPtr(1001);
+        var focusA = new IntPtr(2001);
+        var focusB = new IntPtr(2002);
+        var ttl = TimeSpan.FromMilliseconds(250);
+        var cachedAt = DateTime.UtcNow;
+
+        // Same top hwnd + session root, but different inner focus (tab switch inside WT) should miss cache.
+        Assert.True(ActiveAppDetector.ShouldReuseCliCacheState(
+            hwnd, 900, 400, terminalFocused: true, openCodeModelChanged: false,
+            ProviderId.Grok, hwnd, 900, 400, cachedAt, ttl,
+            focusHwnd: focusA, lastFocusHwnd: focusA));
+
+        Assert.False(ActiveAppDetector.ShouldReuseCliCacheState(
+            hwnd, 900, 400, terminalFocused: true, openCodeModelChanged: false,
+            ProviderId.Grok, hwnd, 900, 400, cachedAt, ttl,
+            focusHwnd: focusB, lastFocusHwnd: focusA));
+    }
+
+    [Fact]
+    public void ExpandTerminalSessionPids_OpenConsoleForeground_OnlyIncludesFocusedTab()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [700] = 600,  // openconsole (grok tab)
+            [701] = 601,  // openconsole (claude tab)
+            [600] = 500,  // pwsh
+            [601] = 500,  // pwsh
+            [610] = 600,  // grok
+            [611] = 601,  // claude
+            [500] = 100,  // windowsterminal
+        };
+        var names = new Dictionary<int, string>
+        {
+            [700] = "openconsole",
+            [701] = "openconsole",
+            [600] = "pwsh",
+            [601] = "pwsh",
+            [610] = "grok",
+            [611] = "claude",
+            [500] = "windowsterminal",
+        };
+
+        var grokTab = ActiveAppDetector.ExpandTerminalSessionPids(700, "openconsole", parents, names);
+        var claudeTab = ActiveAppDetector.ExpandTerminalSessionPids(701, "openconsole", parents, names);
+
+        Assert.Contains(610, grokTab);
+        Assert.DoesNotContain(611, grokTab);
+        Assert.Contains(611, claudeTab);
+        Assert.DoesNotContain(610, claudeTab);
+    }
+
+    [Fact]
+    public void ExpandTerminalSessionPids_WindowsTerminalReparentedShell_UsesCreationTimeFallback()
+    {
+        var started = new DateTime(2026, 6, 11, 13, 15, 52, DateTimeKind.Local);
+        var parents = new Dictionary<int, int>
+        {
+            [53960] = 2000, // WindowsTerminal
+            [53916] = 2000, // OpenConsole sibling
+            [53840] = 8836, // cmd reparented away from WindowsTerminal
+            [53688] = 53840, // claude running inside cmd
+            [37024] = 34604, // unrelated older cmd
+            [37156] = 37024,
+        };
+        var names = new Dictionary<int, string>
+        {
+            [53960] = "WindowsTerminal",
+            [53916] = "OpenConsole",
+            [53840] = "cmd",
+            [53688] = "claude",
+            [37024] = "cmd",
+            [37156] = "node",
+        };
+        var starts = new Dictionary<int, DateTime>
+        {
+            [53960] = started,
+            [53916] = started,
+            [53840] = started,
+            [53688] = started.AddSeconds(18),
+            [37024] = started.AddMinutes(-23),
+            [37156] = started.AddMinutes(-23),
+        };
+
+        var session = ActiveAppDetector.ExpandTerminalSessionPids(53960, "WindowsTerminal", parents, names, starts);
+
+        Assert.Contains(53840, session);
+        Assert.Contains(53688, session);
+        Assert.DoesNotContain(37024, session);
+        Assert.DoesNotContain(37156, session);
+    }
+
+    [Fact]
+    public void ExpandTerminalSessionPids_WindowsTerminalLaterPane_UsesOpenConsoleCreationTimeFallback()
+    {
+        var terminalStarted = new DateTime(2026, 6, 11, 13, 15, 52, DateTimeKind.Local);
+        var devinPaneStarted = new DateTime(2026, 6, 11, 13, 22, 04, DateTimeKind.Local);
+        var parents = new Dictionary<int, int>
+        {
+            [53960] = 2000, // WindowsTerminal
+            [53488] = 2000, // OpenConsole for the later pane
+            [59368] = 8836, // powershell reparented away from WindowsTerminal
+            [54180] = 59368, // devin running inside powershell
+            [37024] = 34604, // unrelated old shell
+            [51952] = 13844, // unrelated Claude desktop child
+        };
+        var names = new Dictionary<int, string>
+        {
+            [53960] = "WindowsTerminal",
+            [53488] = "OpenConsole",
+            [59368] = "powershell",
+            [54180] = "devin",
+            [37024] = "cmd",
+            [51952] = "claude",
+        };
+        var starts = new Dictionary<int, DateTime>
+        {
+            [53960] = terminalStarted,
+            [53488] = devinPaneStarted,
+            [59368] = devinPaneStarted,
+            [54180] = devinPaneStarted.AddMinutes(5),
+            [37024] = terminalStarted.AddMinutes(-30),
+            [51952] = terminalStarted.AddSeconds(31),
+        };
+
+        var session = ActiveAppDetector.ExpandTerminalSessionPids(53960, "WindowsTerminal", parents, names, starts);
+
+        Assert.Contains(53488, session);
+        Assert.Contains(59368, session);
+        Assert.Contains(54180, session);
+        Assert.DoesNotContain(37024, session);
+        Assert.DoesNotContain(51952, session);
+    }
+
+    [Fact]
+    public void PickForegroundCli_PrefersFocusedTabOverNewerGrokInOtherTab()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [500] = 400,
+            [501] = 401,
+            [400] = 300,
+            [401] = 300,
+            [300] = 100,
+        };
+
+        var candidates = new List<(ProviderId id, DateTime started, int pid, int parentPid)>
+        {
+            (ProviderId.Grok, new DateTime(2026, 6, 10, 13, 0, 0, DateTimeKind.Utc), 501, 401),
+            (ProviderId.Claude, new DateTime(2026, 6, 10, 11, 0, 0, DateTimeKind.Utc), 500, 400),
+        };
+
+        var picked = ActiveAppDetector.PickForegroundCli(candidates, sessionRootPid: 400, parents);
+        Assert.Equal(ProviderId.Claude, picked);
+    }
+
+    [Fact]
+    public void PickTerminalCli_PrefersKnownTerminalWindowProviderWhenSessionIsAmbiguous()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [54180] = 59368, // devin <- old powershell pane
+            [59368] = 8836,
+            [64076] = 63744, // claude <- newer cmd pane
+            [63744] = 8836,
+        };
+
+        var foregroundTree = new List<(ProviderId id, DateTime started, int pid, int parentPid)>
+        {
+            (ProviderId.Devin, new DateTime(2026, 6, 11, 13, 27, 08, DateTimeKind.Local), 54180, 59368),
+            (ProviderId.Claude, new DateTime(2026, 6, 11, 13, 30, 06, DateTimeKind.Local), 64076, 63744),
+        };
+
+        var picked = ActiveAppDetector.PickTerminalCli(
+            foregroundTree,
+            foregroundTree,
+            foregroundIsWindowsTerminal: true,
+            sessionRootPid: 53960,
+            parents,
+            windowTitleHint: null,
+            preferredProvider: ProviderId.Devin);
+
+        Assert.Equal(ProviderId.Devin, picked);
+    }
+
+    [Fact]
+    public void PickTerminalCli_TitleTieBreakOverridesStaleKnownWindowProvider()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [54180] = 59368,
+            [59368] = 8836,
+            [66588] = 65136,
+            [65136] = 8836,
+        };
+
+        var foregroundTree = new List<(ProviderId id, DateTime started, int pid, int parentPid)>
+        {
+            (ProviderId.Devin, new DateTime(2026, 6, 11, 13, 27, 08, DateTimeKind.Local), 54180, 59368),
+            (ProviderId.Claude, new DateTime(2026, 6, 11, 13, 34, 06, DateTimeKind.Local), 66588, 65136),
+        };
+
+        var picked = ActiveAppDetector.PickTerminalCli(
+            foregroundTree,
+            foregroundTree,
+            foregroundIsWindowsTerminal: true,
+            sessionRootPid: 53960,
+            parents,
+            windowTitleHint: "Claude Code",
+            preferredProvider: ProviderId.Devin);
+
+        Assert.Equal(ProviderId.Claude, picked);
+    }
+
+    [Fact]
+    public void PickTerminalCli_WindowsTerminalTitleCanRecoverWhenPaneTreePointsAtDifferentCli()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [67660] = 63908, // grok <- the only pane currently exposed by WT process tree
+            [63908] = 53960,
+            [66588] = 65136, // claude <- another WT window/pane reparented away from WT
+            [65136] = 8836,
+            [54180] = 59368, // devin <- another WT window/pane reparented away from WT
+            [59368] = 8836,
+        };
+
+        var allCandidates = new List<(ProviderId id, DateTime started, int pid, int parentPid)>
+        {
+            (ProviderId.Devin, new DateTime(2026, 6, 11, 13, 27, 08, DateTimeKind.Local), 54180, 59368),
+            (ProviderId.Claude, new DateTime(2026, 6, 11, 13, 34, 06, DateTimeKind.Local), 66588, 65136),
+            (ProviderId.Grok, new DateTime(2026, 6, 11, 13, 38, 23, DateTimeKind.Local), 67660, 63908),
+        };
+
+        var foregroundTree = new List<(ProviderId id, DateTime started, int pid, int parentPid)>
+        {
+            (ProviderId.Grok, new DateTime(2026, 6, 11, 13, 38, 23, DateTimeKind.Local), 67660, 63908),
+        };
+
+        var picked = ActiveAppDetector.PickTerminalCli(
+            allCandidates,
+            foregroundTree,
+            foregroundIsWindowsTerminal: true,
+            sessionRootPid: 53960,
+            parents,
+            windowTitleHint: "Claude Code");
+
+        Assert.Equal(ProviderId.Claude, picked);
+    }
+
+    [Fact]
+    public void PickTerminalCli_WindowsTerminalTitleCanRecoverAgyAlias()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [67660] = 63908, // grok <- the only pane currently exposed by WT process tree
+            [63908] = 53960,
+            [71228] = 66976, // agy <- another active WT pane/window
+            [66976] = 53960,
+        };
+
+        var allCandidates = new List<(ProviderId id, DateTime started, int pid, int parentPid)>
+        {
+            (ProviderId.Grok, new DateTime(2026, 6, 11, 13, 38, 23, DateTimeKind.Local), 67660, 63908),
+            (ProviderId.Antigravity, new DateTime(2026, 6, 11, 13, 43, 43, DateTimeKind.Local), 71228, 66976),
+        };
+
+        var foregroundTree = new List<(ProviderId id, DateTime started, int pid, int parentPid)>
+        {
+            (ProviderId.Grok, new DateTime(2026, 6, 11, 13, 38, 23, DateTimeKind.Local), 67660, 63908),
+        };
+
+        var picked = ActiveAppDetector.PickTerminalCli(
+            allCandidates,
+            foregroundTree,
+            foregroundIsWindowsTerminal: true,
+            sessionRootPid: 53960,
+            parents,
+            windowTitleHint: @"C:\Users\ziedk\AppData\Local\agy\bin\agy.exe");
+
+        Assert.Equal(ProviderId.Antigravity, picked);
+    }
+
+    [Fact]
+    public void PickTerminalCli_WithoutKnownWindowProviderUsesNormalRecency()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [54180] = 59368,
+            [59368] = 8836,
+            [64076] = 63744,
+            [63744] = 8836,
+        };
+
+        var foregroundTree = new List<(ProviderId id, DateTime started, int pid, int parentPid)>
+        {
+            (ProviderId.Devin, new DateTime(2026, 6, 11, 13, 27, 08, DateTimeKind.Local), 54180, 59368),
+            (ProviderId.Claude, new DateTime(2026, 6, 11, 13, 30, 06, DateTimeKind.Local), 64076, 63744),
+        };
+
+        var picked = ActiveAppDetector.PickTerminalCli(
+            foregroundTree,
+            foregroundTree,
+            foregroundIsWindowsTerminal: true,
+            sessionRootPid: 53960,
+            parents,
+            windowTitleHint: null);
+
+        Assert.Equal(ProviderId.Claude, picked);
+    }
+
+    [Fact]
+    public void IsGrokPidInFocusedSession_RejectsGrokFromOtherTab()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [700] = 600,
+            [701] = 601,
+            [600] = 500,
+            [601] = 500,
+            [610] = 600,
+            [611] = 601,
+            [500] = 100,
+        };
+        var names = new Dictionary<int, string>
+        {
+            [700] = "openconsole",
+            [701] = "openconsole",
+            [600] = "pwsh",
+            [601] = "pwsh",
+            [610] = "grok",
+            [611] = "claude",
+            [500] = "windowsterminal",
+        };
+
+        var grokTab = ActiveAppDetector.ExpandTerminalSessionPids(700, "openconsole", parents, names);
+        var claudeTab = ActiveAppDetector.ExpandTerminalSessionPids(701, "openconsole", parents, names);
+
+        Assert.True(ActiveAppDetector.IsGrokPidInFocusedSession(610, grokTab, parents));
+        Assert.False(ActiveAppDetector.IsGrokPidInFocusedSession(610, claudeTab, parents));
+    }
+
+    [Fact]
+    public void ExpandTerminalSessionPids_OpenConsoleChildOfShell_IncludesNestedCli()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [701] = 500,
+            [601] = 701,
+            [620] = 601,
+            [621] = 620,
+            [611] = 621,
+            [500] = 100,
+        };
+        var names = new Dictionary<int, string>
+        {
+            [701] = "openconsole",
+            [601] = "pwsh",
+            [620] = "cmd",
+            [621] = "node",
+            [611] = "claude",
+            [500] = "windowsterminal",
+        };
+
+        var session = ActiveAppDetector.ExpandTerminalSessionPids(701, "openconsole", parents, names);
+
+        Assert.Contains(611, session);
+        Assert.Contains(621, session);
+    }
+
+    [Fact]
+    public void SessionProximity_ChildOfFocusedShellScoresHigherThanSiblingTab()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [500] = 400,
+            [501] = 401,
+            [400] = 300,
+            [401] = 300,
+        };
+
+        int claude = ActiveAppDetector.SessionProximity(500, 400, parents);
+        int grok = ActiveAppDetector.SessionProximity(501, 400, parents);
+
+        Assert.True(claude > grok);
+    }
+
+    [Fact]
+    public void ExpandTerminalSessionPids_WezTermGuiForeground_IncludesDirectShellAndNestedCli()
+    {
+        // WezTerm (and similar) often spawn the shell directly as a child of the GUI process.
+        var parents = new Dictionary<int, int>
+        {
+            [8100] = 8000, // wezterm-gui
+            [8200] = 8100, // pwsh (direct child of wezterm)
+            [8300] = 8200, // grok under pwsh
+            [9000] = 8001, // unrelated other wezterm window
+            [9100] = 9000,
+        };
+        var names = new Dictionary<int, string>
+        {
+            [8100] = "wezterm-gui",
+            [8200] = "pwsh",
+            [8300] = "grok",
+            [9000] = "wezterm-gui",
+            [9100] = "claude",
+        };
+
+        var session = ActiveAppDetector.ExpandTerminalSessionPids(8100, "wezterm-gui", parents, names);
+
+        Assert.Contains(8100, session);
+        Assert.Contains(8200, session);
+        Assert.Contains(8300, session);
+        Assert.DoesNotContain(9100, session);
+    }
+
+    [Fact]
+    public void ExpandTerminalSessionPids_AlacrittyForeground_IncludesDirectInteractiveCli()
+    {
+        // Some terminals may launch a CLI directly (no long-lived shell visible in tree).
+        var parents = new Dictionary<int, int>
+        {
+            [7100] = 7000, // alacritty
+            [7200] = 7100, // claude (direct)
+            [7300] = 7101, // other alacritty's child (should be excluded)
+        };
+        var names = new Dictionary<int, string>
+        {
+            [7100] = "alacritty",
+            [7200] = "claude",
+            [7101] = "alacritty",
+            [7300] = "cursor-agent",
+        };
+
+        var session = ActiveAppDetector.ExpandTerminalSessionPids(7100, "alacritty", parents, names);
+
+        Assert.Contains(7100, session);
+        Assert.Contains(7200, session);
+        Assert.DoesNotContain(7300, session);
+    }
+
+    [Fact]
     public void OpenCodeModelStateWatcher_NotifiesWhenModelJsonChanges()
     {
         var signaled = new ManualResetEventSlim(false);
@@ -357,5 +944,73 @@ public class ActiveAppDetectorTests : IDisposable
         WriteModelState(new { recent = new[] { new { providerID = "opencode-go", modelID = "qwen3.6-plus" } } });
 
         Assert.True(signaled.Wait(TimeSpan.FromSeconds(3)));
+    }
+
+    [Fact]
+    public void TryPickByWindowTitleHint_PrefersMatchingProviderOverRecency()
+    {
+        var now = DateTime.UtcNow;
+        var older = now.AddMinutes(-10);
+        var newer = now.AddMinutes(-1);
+
+        var candidates = new List<(ProviderId id, DateTime started, int pid, int parentPid)>
+        {
+            (ProviderId.Grok, newer, 501, 401),   // newer overall
+            (ProviderId.Claude, older, 500, 400),
+        };
+
+        // Title of the focused WT window/tab mentions claude (common when that tab is active)
+        var picked = ActiveAppDetector.TryPickByWindowTitleHint(candidates, "C:\\src\\myproj - claude - Windows Terminal");
+        Assert.Equal(ProviderId.Claude, picked);
+
+        // If title mentions grok, prefer the (even older) grok one over a newer non-matching
+        var pickedGrok = ActiveAppDetector.TryPickByWindowTitleHint(candidates, "grok @ /home/user");
+        Assert.Equal(ProviderId.Grok, pickedGrok);
+
+        // No useful hint in title → returns null (caller falls back to normal Pick)
+        var noHint = ActiveAppDetector.TryPickByWindowTitleHint(candidates, "Windows PowerShell");
+        Assert.Null(noHint);
+
+        // Short executable names like "gh" must not match inside ordinary words.
+        var embeddedGh = ActiveAppDetector.TryPickByWindowTitleHint(candidates, "thinking through changes");
+        Assert.Null(embeddedGh);
+    }
+
+    [Fact]
+    public void PickTerminalCli_WindowsTerminalActiveTitleCanOverrideFocusedSessionTree()
+    {
+        // Windows Terminal can expose one pane in the process tree while the active surface is another
+        // reparented pane/window. The active terminal title is the best available foreground signal.
+        var parents = new Dictionary<int, int>
+        {
+            [142920] = 43492,    // claude <- powershell
+            [43492] = 148228,    // powershell <- WindowsTerminal
+            [247240] = 246964,   // grok <- cmd
+            [246964] = 9084,     // cmd <- explorer (NOT under WindowsTerminal)
+        };
+
+        var allCandidates = new List<(ProviderId id, DateTime started, int pid, int parentPid)>
+        {
+            (ProviderId.Claude, new DateTime(2026, 6, 11, 10, 0, 0, DateTimeKind.Utc), 142920, 43492),
+            (ProviderId.Grok, new DateTime(2026, 6, 11, 11, 0, 0, DateTimeKind.Utc), 247240, 246964),
+        };
+
+        // Only claude is reachable through the WT process parent tree.
+        var foregroundTree = new List<(ProviderId id, DateTime started, int pid, int parentPid)>
+        {
+            (ProviderId.Claude, new DateTime(2026, 6, 11, 10, 0, 0, DateTimeKind.Utc), 142920, 43492),
+        };
+
+        // The active foreground title says Grok, so Grok wins even though the exposed tree points at Claude.
+        var titleMentionsGrok = ActiveAppDetector.PickTerminalCli(
+            allCandidates, foregroundTree, foregroundIsWindowsTerminal: true,
+            sessionRootPid: 148228, parents, "grok");
+        Assert.Equal(ProviderId.Grok, titleMentionsGrok);
+
+        // An unrelated title also stays with the focused session tree.
+        var unrelatedTitle = ActiveAppDetector.PickTerminalCli(
+            allCandidates, foregroundTree, foregroundIsWindowsTerminal: true,
+            sessionRootPid: 148228, parents, "? Replace mistake detector with FastConformer streaming model");
+        Assert.Equal(ProviderId.Claude, unrelatedTitle);
     }
 }

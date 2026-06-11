@@ -12,6 +12,8 @@ namespace TaskbarQuota.Usage
         OpenCode,
         OpenCodeGo,
         Copilot,
+        Grok,
+        Devin,
     }
 
     /// <summary>A single rate-limit window (for example session or weekly), expressed as percent used.</summary>
@@ -72,12 +74,17 @@ namespace TaskbarQuota.Usage
         public string Display => Limit is double lim ? $"{Money(Amount)} / {Money(lim)}" : Money(Amount);
     }
 
-    /// <summary>Metered Copilot spend beyond included credits (from quota snapshot overage fields).</summary>
+    /// <summary>
+    /// Metered spend beyond included usage. Copilot reports this in USD (overage budget); Grok reports
+    /// it in credits (the on-demand / pay-as-you-go cap), so <see cref="IsCredits"/> selects the units.
+    /// </summary>
     public sealed class AdditionalUsageSnapshot
     {
         public bool Enabled { get; init; }
         public double SpentUsd { get; init; }
         public double? BudgetUsd { get; init; }
+        /// <summary>When true, the spent/budget values are credit counts rather than US dollars.</summary>
+        public bool IsCredits { get; init; }
 
         public string StatusText => Enabled ? "Enabled" : "Not enabled";
 
@@ -85,14 +92,18 @@ namespace TaskbarQuota.Usage
         {
             get
             {
-                string spent = $"${SpentUsd:0.00}";
+                string spent = Amount(SpentUsd);
+                string suffix = IsCredits ? "credits" : "budget";
                 if (!Enabled)
-                    return $"{spent} / $0 budget";
+                    return $"{spent} / {(IsCredits ? "0" : "$0")} {suffix}";
                 return BudgetUsd is double budget
-                    ? $"{spent} / ${budget:0.00} budget"
-                    : $"{spent} / — budget";
+                    ? $"{spent} / {Amount(budget)} {suffix}"
+                    : $"{spent} / — {suffix}";
             }
         }
+
+        private string Amount(double value)
+            => IsCredits ? $"{value:0}" : $"${value:0.00}";
     }
 
     /// <summary>Normalized usage data for a provider (session / weekly / model-specific windows).</summary>
@@ -135,6 +146,7 @@ namespace TaskbarQuota.Usage
     public enum ProviderErrorKind
     {
         NotInstalled,
+        NotRunning,
         AuthRequired,
         Timeout,
         RateLimited,

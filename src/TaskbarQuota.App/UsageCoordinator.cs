@@ -49,6 +49,8 @@ namespace TaskbarQuota
         public void Start()
         {
             if (_timer != null) return;
+            // Warm WMI off-thread so the first terminal detection isn't blocked by COM cold start.
+            _ = Task.Run(() => _detector.Prewarm());
             _detector.OpenCodeModelStateChanged += OnOpenCodeModelStateChanged;
             _detector.StartOpenCodeModelStateWatcher();
             // Fast tick for snappy active-app switching; usage fetches respect per-result cache TTL (60s ok, 5m on 429).
@@ -159,6 +161,8 @@ namespace TaskbarQuota
             UsageResult snapshot;
             if (_service.TryGetCached(target, out var cached))
                 snapshot = cached;
+            else if (_service.TryGetLastSuccessfulLiveResult(target, out var lastSuccess))
+                snapshot = lastSuccess;
             else if (_service.Get(target) is { } provider)
                 snapshot = UsageResult.Pending(target, provider, "Loading...");
             else
@@ -178,13 +182,15 @@ namespace TaskbarQuota
             return SortByRecentActivity(results, RecentProviders, ActiveProvider);
         }
 
-        /// <summary>Fetch all providers and report each result as soon as it arrives.</summary>
+        /// <summary>Fetch providers needed for the dashboard and report each result as it arrives.</summary>
         public async Task FetchAllProgressiveAsync(
             bool force,
             Action<UsageResult> onResult,
             CancellationToken ct = default)
         {
+            var active = ActiveProvider;
             var tasks = _service.All
+                .Where(p => force || ProviderDiscoveryService.ShouldFetch(p.Id, active))
                 .Select(p => Task.Run(() => _service.FetchAsync(p.Id, force, ct), ct))
                 .ToList();
 
@@ -243,13 +249,16 @@ namespace TaskbarQuota
                     return;
                 }
 
+                ProviderId? previousActive = _lastActive;
                 if (detected is ProviderId p)
                 {
-                    var previous = _lastActive;
                     _lastActive = p;
                     PromoteRecentProvider(p);
-                    if (previous != p)
+                    if (previousActive != p)
+                    {
                         ActiveProviderChanged?.Invoke(p);
+                        PublishImmediateState(p);
+                    }
                 }
 
                 if (detected is null && _lastActive is null)

@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
 using TaskbarQuota.Usage;
 
 namespace TaskbarQuota.ViewModels
@@ -22,12 +23,16 @@ namespace TaskbarQuota.ViewModels
         private readonly Dictionary<ProviderId, string> _cardSignatures = new();
 
         public ObservableCollection<ProviderCardViewModel> Cards { get; } = new();
+        public ObservableCollection<ProviderCardViewModel> AvailableCards { get; } = new();
 
         [ObservableProperty] public partial ProviderCardViewModel? SelectedCard { get; set; }
+        [ObservableProperty] public partial double DetailContentWidth { get; private set; }
+        [ObservableProperty] public partial Visibility AvailableCardsVisibility { get; private set; }
 
         /// <summary>Raised when the first card changes so the view can scroll back to the top.</summary>
         public event Action? ScrollToTopRequested;
         public event Action<ProviderCardViewModel?>? SelectedCardChanged;
+        public event Action<double>? DetailContentWidthChanged;
 
         [ObservableProperty] public partial bool IsRefreshing { get; set; }
         [ObservableProperty] public partial string StatusText { get; set; }
@@ -38,12 +43,19 @@ namespace TaskbarQuota.ViewModels
             StatusText = "";
             WidgetSettingsService.PercentageModeChanged += OnPercentageModeChanged;
             WidgetSettingsService.Changed += OnWidgetSettingsChanged;
+            WidgetSettingsService.DashboardCompositionChanged += OnDashboardCompositionChanged;
             UsageCoordinator.Instance.StateChanged += OnCoordinatorStateChanged;
             UsageCoordinator.Instance.ActiveProviderChanged += OnActiveProviderChanged;
         }
 
         partial void OnSelectedCardChanged(ProviderCardViewModel? value)
-            => SelectedCardChanged?.Invoke(value);
+        {
+            UpdateDetailContentWidth(value);
+            SelectedCardChanged?.Invoke(value);
+        }
+
+        partial void OnDetailContentWidthChanged(double value)
+            => DetailContentWidthChanged?.Invoke(value);
 
         public void SelectProvider(ProviderId id)
         {
@@ -56,6 +68,21 @@ namespace TaskbarQuota.ViewModels
                     SelectedCard = card;
                 return;
             }
+
+            foreach (var card in AvailableCards)
+            {
+                if (card.ProviderId != id)
+                    continue;
+
+                EnableAvailableProvider(id);
+                return;
+            }
+        }
+
+        public void EnableAvailableProvider(ProviderId id)
+        {
+            ProviderDiscoveryService.EnableProvider(id);
+            _ = RefreshAsync();
         }
 
         [RelayCommand]
@@ -81,7 +108,10 @@ namespace TaskbarQuota.ViewModels
             => _dispatcher.TryEnqueue(() => UpdateCards(_lastResults, _lastActive, force: true));
 
         private void OnWidgetSettingsChanged(object? sender, EventArgs e)
-            => _dispatcher.TryEnqueue(() => RefreshCardsVisibility());
+            => _dispatcher.TryEnqueue(RefreshCardsVisibility);
+
+        private void OnDashboardCompositionChanged(object? sender, EventArgs e)
+            => _dispatcher.TryEnqueue(() => UpdateCards(_lastResults, _lastActive, force: true));
 
         private void RefreshCardsVisibility()
         {
@@ -97,7 +127,7 @@ namespace TaskbarQuota.ViewModels
             var ct = _loadCts.Token;
 
             var active = UsageCoordinator.Instance.ActiveProvider;
-            var results = OrderResults(UsageCoordinator.Instance.Service.Snapshot(active), active).ToList();
+            var results = await Task.Run(() => BuildDashboardResults(active)).ConfigureAwait(false);
             _dispatcher.TryEnqueue(() =>
             {
                 UpdateCards(results, active);
@@ -120,17 +150,23 @@ namespace TaskbarQuota.ViewModels
                             results.Add(result);
 
                         var current = UsageCoordinator.Instance.ActiveProvider;
-                        _dispatcher.TryEnqueue(() =>
+                        var snapshot = results.ToList();
+                        _ = Task.Run(() =>
                         {
-                            UpdateCards(results, current);
+                            var merged = BuildDashboardResults(current, snapshot);
+                            _dispatcher.TryEnqueue(() => UpdateCards(merged, current));
                         });
                     },
                     ct);
 
                 if (!ct.IsCancellationRequested)
                 {
+                    var finalActive = UsageCoordinator.Instance.ActiveProvider;
+                    var finalResults = results.ToList();
+                    var merged = await Task.Run(() => BuildDashboardResults(finalActive, finalResults)).ConfigureAwait(false);
                     _dispatcher.TryEnqueue(() =>
                     {
+                        UpdateCards(merged, finalActive);
                         StatusText = $"Updated at {DateTime.Now:HH:mm:ss}";
                     });
                 }
@@ -156,20 +192,52 @@ namespace TaskbarQuota.ViewModels
 
         private void UpdateCardsCore(IReadOnlyList<UsageResult> results, ProviderId? active, bool force)
         {
-            results = OrderResults(results, active);
+            var selectedProviderId = SelectedCard?.ProviderId;
+
+            results = BuildDashboardResults(active, results);
             _lastResults = results.ToArray();
             _lastActive = active;
 
-            var ids = results.Select(r => r.Id).ToHashSet();
-            for (int i = Cards.Count - 1; i >= 0; i--)
+            var dashboardResults = results
+                .Where(r => ProviderDiscoveryService.ShouldShowInDashboard(r, active))
+                .ToList();
+            var availableResults = results
+                .Where(r => ProviderDiscoveryService.ShouldShowInAvailable(r, active))
+                .ToList();
+
+            SyncCardCollection(Cards, dashboardResults, active, force);
+            SyncCardCollection(AvailableCards, availableResults, active: null, force: force);
+
+            AvailableCardsVisibility = AvailableCards.Count > 0
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+
+            RestoreSelectedCard(selectedProviderId);
+
+            UpdateDetailContentWidth(SelectedCard);
+
+            var topProvider = dashboardResults.Count > 0 ? dashboardResults[0].Id : (ProviderId?)null;
+            if (topProvider != _lastTopProvider)
             {
-                if (!ids.Contains(Cards[i].ProviderId))
+                _lastTopProvider = topProvider;
+                ScrollToTopRequested?.Invoke();
+            }
+        }
+
+        private void SyncCardCollection(
+            ObservableCollection<ProviderCardViewModel> collection,
+            IReadOnlyList<UsageResult> results,
+            ProviderId? active,
+            bool force)
+        {
+            var ids = results.Select(r => r.Id).ToHashSet();
+            for (int i = collection.Count - 1; i >= 0; i--)
+            {
+                if (!ids.Contains(collection[i].ProviderId))
                 {
-                    var removedId = Cards[i].ProviderId;
+                    var removedId = collection[i].ProviderId;
                     _cardSignatures.Remove(removedId);
-                    Cards.RemoveAt(i);
-                    if (SelectedCard?.ProviderId == removedId)
-                        SelectedCard = Cards.Count > 0 ? Cards[0] : null;
+                    collection.RemoveAt(i);
                 }
             }
 
@@ -177,41 +245,56 @@ namespace TaskbarQuota.ViewModels
             {
                 var result = results[targetIndex];
                 var signature = BuildCardSignature(result, result.Id == active);
-                var existingIndex = IndexOfCard(result.Id);
+                var existingIndex = IndexOfCard(collection, result.Id);
 
                 if (existingIndex < 0)
                 {
                     var card = new ProviderCardViewModel(result, result.Id == active);
-                    Cards.Insert(targetIndex, card);
-                    if (SelectedCard is null || result.Id == active)
+                    collection.Insert(targetIndex, card);
+                    if (ReferenceEquals(collection, Cards) && SelectedCard is null)
                         SelectedCard = card;
                     _cardSignatures[result.Id] = signature;
                     continue;
                 }
 
                 if (existingIndex != targetIndex)
-                    Cards.Move(existingIndex, targetIndex);
+                    collection.Move(existingIndex, targetIndex);
 
                 if (force || !_cardSignatures.TryGetValue(result.Id, out var previous) || previous != signature)
                 {
                     var wasSelected = SelectedCard?.ProviderId == result.Id;
                     var card = new ProviderCardViewModel(result, result.Id == active);
-                    Cards[targetIndex] = card;
-                    if (wasSelected || SelectedCard is null || result.Id == active)
+                    collection[targetIndex] = card;
+                    if (ReferenceEquals(collection, Cards) && wasSelected)
                         SelectedCard = card;
                     _cardSignatures[result.Id] = signature;
                 }
             }
+        }
 
-            if (SelectedCard is null && Cards.Count > 0)
-                SelectedCard = Cards[0];
-
-            var topProvider = results.Count > 0 ? results[0].Id : (ProviderId?)null;
-            if (topProvider != _lastTopProvider)
+        private void RestoreSelectedCard(ProviderId? selectedProviderId)
+        {
+            if (selectedProviderId is { } preservedId)
             {
-                _lastTopProvider = topProvider;
-                ScrollToTopRequested?.Invoke();
+                foreach (var card in Cards)
+                {
+                    if (card.ProviderId == preservedId)
+                    {
+                        SelectedCard = card;
+                        return;
+                    }
+                }
             }
+
+            if (SelectedCard is null || !Cards.Any(c => c.ProviderId == SelectedCard.ProviderId))
+                SelectedCard = Cards.Count > 0 ? Cards[0] : null;
+        }
+
+        private void UpdateDetailContentWidth(ProviderCardViewModel? card)
+        {
+            double contentEstimate = card?.SuggestedDetailWidth ?? DashboardLayoutMetrics.EstimateDetailWidth(null);
+            int flyoutWidth = FlyoutLayout.ComputeLogicalWidth(Cards.Count, contentEstimate);
+            DetailContentWidth = Math.Max(contentEstimate, flyoutWidth - FlyoutLayout.FrameHorizontalPadding);
         }
 
         private void OnCoordinatorStateChanged(UsageResult result)
@@ -235,11 +318,40 @@ namespace TaskbarQuota.ViewModels
         private static IReadOnlyList<UsageResult> OrderResults(IReadOnlyList<UsageResult> results, ProviderId? active)
             => UsageCoordinator.SortByRecentActivity(results, UsageCoordinator.Instance.RecentProviders, active);
 
-        private int IndexOfCard(ProviderId id)
+        private static List<UsageResult> BuildDashboardResults(ProviderId? active, IReadOnlyList<UsageResult>? live = null)
         {
-            for (int i = 0; i < Cards.Count; i++)
+            var merged = new Dictionary<ProviderId, UsageResult>();
+            if (live is not null)
             {
-                if (Cards[i].ProviderId == id)
+                foreach (var result in live)
+                    merged[result.Id] = result;
+            }
+
+            var service = UsageCoordinator.Instance.Service;
+            foreach (var provider in service.All)
+            {
+                if (merged.ContainsKey(provider.Id))
+                    continue;
+
+                if (ProviderDiscoveryService.ShouldFetch(provider.Id, active))
+                {
+                    merged[provider.Id] = UsageResult.Pending(provider.Id, provider,
+                        active == provider.Id ? "Loading active provider..." : "Loading...");
+                    continue;
+                }
+
+                if (ProviderDiscoveryService.IsProbed(provider.Id) && service.TryGetCached(provider.Id, out var cached))
+                    merged[provider.Id] = cached;
+            }
+
+            return OrderResults(merged.Values.ToArray(), active).ToList();
+        }
+
+        private static int IndexOfCard(ObservableCollection<ProviderCardViewModel> collection, ProviderId id)
+        {
+            for (int i = 0; i < collection.Count; i++)
+            {
+                if (collection[i].ProviderId == id)
                     return i;
             }
 
@@ -251,7 +363,8 @@ namespace TaskbarQuota.ViewModels
             var sb = new StringBuilder()
                 .Append(r.Id).Append('|')
                 .Append(isActive).Append('|')
-                .Append(r.Error);
+                .Append(r.Error).Append('|')
+                .Append(r.ErrorKind);
 
             if (r.Fetch is not { } fetch)
                 return sb.ToString();
@@ -277,7 +390,8 @@ namespace TaskbarQuota.ViewModels
             {
                 sb.Append('|').Append(additional.Enabled)
                   .Append('|').Append(additional.SpentUsd)
-                  .Append('|').Append(additional.BudgetUsd);
+                  .Append('|').Append(additional.BudgetUsd)
+                  .Append('|').Append(additional.IsCredits);
             }
 
             return sb.ToString();
@@ -301,6 +415,7 @@ namespace TaskbarQuota.ViewModels
         {
             WidgetSettingsService.PercentageModeChanged -= OnPercentageModeChanged;
             WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
+            WidgetSettingsService.DashboardCompositionChanged -= OnDashboardCompositionChanged;
             UsageCoordinator.Instance.StateChanged -= OnCoordinatorStateChanged;
             UsageCoordinator.Instance.ActiveProviderChanged -= OnActiveProviderChanged;
             _loadCts?.Cancel();

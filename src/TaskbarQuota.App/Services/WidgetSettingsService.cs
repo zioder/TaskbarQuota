@@ -47,12 +47,21 @@ public static class WidgetSettingsService
     private static readonly string WidgetProvidersPath =
         Path.Combine(AppStorage.AppDataDirectory, "widget-providers.json");
 
+    private static readonly string DashboardProvidersPath =
+        Path.Combine(AppStorage.AppDataDirectory, "dashboard-providers.json");
+
+    private static readonly string AutoHideUnavailablePath =
+        Path.Combine(AppStorage.AppDataDirectory, "auto-hide-unavailable.txt");
+
     private static readonly Dictionary<string, bool> RowVisibility = LoadRowVisibility();
     private static readonly Dictionary<string, bool> ProviderVisibility = LoadProviderVisibility();
+    private static readonly Dictionary<string, bool> DashboardProviderVisibility = LoadDashboardProviderVisibility();
 
     public static WidgetDisplayMode Current { get; private set; } = LoadWidgetDisplayMode();
     public static PercentageDisplayMode CurrentPercentageMode { get; private set; } = LoadPercentageDisplayMode();
+    public static bool AutoHideUnavailable { get; private set; } = LoadAutoHideUnavailable();
     public static event EventHandler? Changed;
+    public static event EventHandler? DashboardCompositionChanged;
     public static event EventHandler? PercentageModeChanged;
 
     public static void Apply(WidgetDisplayMode mode)
@@ -99,13 +108,70 @@ public static class WidgetSettingsService
         return ProviderVisibility.TryGetValue(key, out bool visible) ? visible : true;
     }
 
+    public static bool IsProviderDashboardVisible(ProviderId provider)
+    {
+        var key = provider.ToString();
+        return DashboardProviderVisibility.TryGetValue(key, out bool visible) ? visible : true;
+    }
+
     public static void SetProviderVisible(ProviderId provider, bool visible)
     {
-        if (IsProviderVisible(provider) == visible)
+        if (!SetProviderVisibleSilent(provider, visible))
             return;
 
-        ProviderVisibility[provider.ToString()] = visible;
         SaveProviderVisibility();
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void SetProviderDashboardVisible(ProviderId provider, bool visible)
+    {
+        if (!SetProviderDashboardVisibleSilent(provider, visible))
+            return;
+
+        SaveDashboardProviderVisibility();
+        DashboardCompositionChanged?.Invoke(null, EventArgs.Empty);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    internal static bool SetProviderVisibleSilent(ProviderId provider, bool visible)
+    {
+        if (IsProviderVisible(provider) == visible)
+            return false;
+
+        ProviderVisibility[provider.ToString()] = visible;
+        return true;
+    }
+
+    internal static bool SetProviderDashboardVisibleSilent(ProviderId provider, bool visible)
+    {
+        if (IsProviderDashboardVisible(provider) == visible)
+            return false;
+
+        DashboardProviderVisibility[provider.ToString()] = visible;
+        return true;
+    }
+
+    internal static void SaveProviderVisibilityAndNotify()
+    {
+        SaveProviderVisibility();
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    internal static void SaveDashboardProviderVisibilityAndNotify()
+    {
+        SaveDashboardProviderVisibility();
+        DashboardCompositionChanged?.Invoke(null, EventArgs.Empty);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ApplyAutoHideUnavailable(bool enabled)
+    {
+        if (AutoHideUnavailable == enabled)
+            return;
+
+        AutoHideUnavailable = enabled;
+        Save(AutoHideUnavailablePath, enabled ? 1 : 0);
+        DashboardCompositionChanged?.Invoke(null, EventArgs.Empty);
         Changed?.Invoke(null, EventArgs.Empty);
     }
 
@@ -163,7 +229,8 @@ public static class WidgetSettingsService
     {
         var parts = Enum.GetValues<ProviderId>()
             .OrderBy(provider => provider.ToString())
-            .Select(provider => $"{provider}:{(IsProviderVisible(provider) ? 1 : 0)}");
+            .Select(provider =>
+                $"{provider}:{(IsProviderVisible(provider) ? 1 : 0)}:{(IsProviderDashboardVisible(provider) ? 1 : 0)}");
         return string.Join(",", parts);
     }
 
@@ -179,13 +246,21 @@ public static class WidgetSettingsService
     internal static void SetProviderVisibleForTesting(ProviderId provider, bool visible)
         => ProviderVisibility[provider.ToString()] = visible;
 
+    internal static void SetProviderDashboardVisibleForTesting(ProviderId provider, bool visible)
+        => DashboardProviderVisibility[provider.ToString()] = visible;
+
+    internal static void ResetDashboardProviderVisibilityForTesting()
+        => DashboardProviderVisibility.Clear();
+
     public static IReadOnlyList<WidgetRowOption> RowOptions(ProviderId provider)
         => provider switch
         {
             ProviderId.Antigravity =>
             [
-                new(RowPrimary, "Gemini"),
-                new(RowSecondary, "Non-Gemini"),
+                new(RowPrimary, "Gemini Weekly"),
+                new(RowModelSpecific, "Gemini 5h"),
+                new(RowSecondary, "Non-Gemini Weekly"),
+                new(RowMonthly, "Non-Gemini 5h"),
             ],
             ProviderId.OpenCode =>
             [
@@ -369,6 +444,51 @@ public static class WidgetSettingsService
         catch
         {
             // Best effort. The widget can still use the in-memory value for this run.
+        }
+    }
+
+    private static Dictionary<string, bool> LoadDashboardProviderVisibility()
+    {
+        try
+        {
+            if (!File.Exists(DashboardProvidersPath))
+                return new Dictionary<string, bool>();
+
+            var loaded = JsonSerializer.Deserialize<Dictionary<string, bool>>(File.ReadAllText(DashboardProvidersPath));
+            return loaded ?? new Dictionary<string, bool>();
+        }
+        catch
+        {
+            return new Dictionary<string, bool>();
+        }
+    }
+
+    private static void SaveDashboardProviderVisibility()
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(DashboardProvidersPath)!);
+            File.WriteAllText(DashboardProvidersPath, JsonSerializer.Serialize(DashboardProviderVisibility, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch
+        {
+            // Best effort.
+        }
+    }
+
+    private static bool LoadAutoHideUnavailable()
+    {
+        try
+        {
+            if (!File.Exists(AutoHideUnavailablePath))
+                return true;
+
+            string raw = File.ReadAllText(AutoHideUnavailablePath);
+            return !int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value) || value != 0;
+        }
+        catch
+        {
+            return true;
         }
     }
 

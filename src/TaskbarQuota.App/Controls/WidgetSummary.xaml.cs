@@ -163,9 +163,9 @@ namespace TaskbarQuota.Controls
                 ApplyAntigravityDisplay(usage);
                 return;
             }
-            if (result.Id == ProviderId.Copilot && usage.Cost is { Label: "Credits" } credits)
+            if (result.Id is ProviderId.Copilot or ProviderId.Grok && usage.Cost is { Label: "Credits" } credits)
             {
-                ApplyCopilotCreditsDisplay(result, usage, credits);
+                ApplyCreditsDisplay(result, usage, credits);
                 return;
             }
 
@@ -347,7 +347,7 @@ namespace TaskbarQuota.Controls
                 $"Balance: {(balanceText != null ? "$" + balanceText.Split(' ')[0] : "--")}");
         }
 
-        private void ApplyCopilotCreditsDisplay(UsageResult result, UsageSnapshot usage, CostSnapshot credits)
+        private void ApplyCreditsDisplay(UsageResult result, UsageSnapshot usage, CostSnapshot credits)
         {
             double limit = credits.Limit ?? 0;
             double remaining = credits.Amount;
@@ -422,16 +422,29 @@ namespace TaskbarQuota.Controls
         private void ApplyAntigravityDisplay(UsageSnapshot usage)
         {
             var rows = new List<WidgetUsageRow>();
+            // Icon already conveys the model family (Gemini vs Non-Gemini), so the widget row only needs the window.
             if (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowPrimary))
             {
-                rows.Add(new WidgetUsageRow("Gemini", WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
+                rows.Add(new WidgetUsageRow("Weekly", WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
                     WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent), usage.Primary.ResetDescription,
                     GlyphData: ProviderGlyphs.Gemini));
             }
-            if (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowSecondary))
+            if (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowModelSpecific))
             {
-                rows.Add(new WidgetUsageRow("Non-Gemini", WidgetSettingsService.DisplayPercent(usage.Secondary?.UsedPercent ?? 0),
-                    WidgetSettingsService.FormatDisplayPercent(usage.Secondary?.UsedPercent ?? 0), usage.Secondary?.ResetDescription,
+                rows.Add(new WidgetUsageRow("5h", WidgetSettingsService.DisplayPercent(usage.ModelSpecific.UsedPercent),
+                    WidgetSettingsService.FormatDisplayPercent(usage.ModelSpecific.UsedPercent), usage.ModelSpecific.ResetDescription,
+                    GlyphData: ProviderGlyphs.Gemini));
+            }
+            if (usage.Secondary != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowSecondary))
+            {
+                rows.Add(new WidgetUsageRow("Weekly", WidgetSettingsService.DisplayPercent(usage.Secondary.UsedPercent),
+                    WidgetSettingsService.FormatDisplayPercent(usage.Secondary.UsedPercent), usage.Secondary.ResetDescription,
+                    GlyphData: ProviderGlyphs.GeminiBarred));
+            }
+            if (usage.Monthly != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowMonthly))
+            {
+                rows.Add(new WidgetUsageRow("5h", WidgetSettingsService.DisplayPercent(usage.Monthly.UsedPercent),
+                    WidgetSettingsService.FormatDisplayPercent(usage.Monthly.UsedPercent), usage.Monthly.ResetDescription,
                     GlyphData: ProviderGlyphs.GeminiBarred));
             }
             _rows = rows;
@@ -612,28 +625,32 @@ namespace TaskbarQuota.Controls
         {
             int start = group * MaxRowsPerGroup;
             int count = Math.Min(MaxRowsPerGroup, rows.Count - start);
+            // Single-row groups (e.g. the Grok/Copilot credits meter) render one point larger, so
+            // measure at that size — otherwise the label ("Credits") is sized too narrow and clips.
+            bool isSingleRowGroup = rows.Count == 1 && count == 1;
+            int labelFont = isSingleRowGroup ? WidgetFontSize + 1 : WidgetFontSize;
             double widestLabel = 0;
             double widestReset = 0;
             for (int i = 0; i < count; i++)
             {
                 var row = rows[start + i];
                 double iconWidth = row.GlyphData != null ? RowLabelGlyphReserve : 0;
-                widestLabel = Math.Max(widestLabel, MeasureTextWidth(BaseLabelText(row, mode)) + iconWidth);
+                widestLabel = Math.Max(widestLabel, MeasureTextWidth(BaseLabelText(row, mode), labelFont) + iconWidth);
                 if (!string.IsNullOrWhiteSpace(row.ResetDescription))
-                    widestReset = Math.Max(widestReset, MeasureTextWidth($"({CompactResetDescription(row.ResetDescription)})"));
+                    widestReset = Math.Max(widestReset, MeasureTextWidth($"({CompactResetDescription(row.ResetDescription)})", labelFont));
             }
 
             double widestValue = 0;
             for (int i = 0; i < count; i++)
             {
                 var row = rows[start + i];
-                widestValue = Math.Max(widestValue, MeasureTextWidth(row.Value));
+                widestValue = Math.Max(widestValue, MeasureTextWidth(row.Value, labelFont));
                 if (row.Label == "Credits")
-                    widestValue = Math.Max(widestValue, MeasureTextWidth(MaxCreditValueSample));
+                    widestValue = Math.Max(widestValue, MeasureTextWidth(MaxCreditValueSample, labelFont));
             }
 
             return new WidgetLayoutMetrics(
-                Math.Max(MinLabelColumnWidth, widestLabel + 1),
+                Math.Max(MinLabelColumnWidth, widestLabel + 3),
                 widestReset == 0 ? MinResetColumnWidth : widestReset + 2,
                 Math.Max(ValueColumnWidth, widestValue + 4));
         }
@@ -867,6 +884,7 @@ namespace TaskbarQuota.Controls
             {
                 parts.Add(additional.SpentUsd.ToString(CultureInfo.InvariantCulture));
                 parts.Add(additional.BudgetUsd?.ToString(CultureInfo.InvariantCulture) ?? string.Empty);
+                parts.Add(additional.IsCredits ? "credits" : "usd");
             }
             AppendRateWindow(parts, usage.Primary);
             AppendRateWindow(parts, usage.Secondary);
@@ -911,13 +929,13 @@ namespace TaskbarQuota.Controls
         private static string BaseLabelText(WidgetUsageRow row, WidgetDisplayMode mode)
             => mode == WidgetDisplayMode.PercentagesOnly ? row.Label + ":" : row.Label;
 
-        private static double MeasureTextWidth(string text)
+        private static double MeasureTextWidth(string text, int fontSize = WidgetFontSize)
         {
             var textBlock = new TextBlock
             {
                 Text = text,
                 FontFamily = new FontFamily("Segoe UI Variable Text"),
-                FontSize = WidgetFontSize,
+                FontSize = fontSize,
                 FontWeight = Microsoft.UI.Text.FontWeights.Normal,
             };
             textBlock.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));

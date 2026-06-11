@@ -8,6 +8,8 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
+using TaskbarQuota;
+
 namespace TaskbarQuota.Usage.Providers
 {
     /// <summary>
@@ -247,7 +249,12 @@ namespace TaskbarQuota.Usage.Providers
         {
             var authPath = GetAuthPath();
             if (!File.Exists(authPath))
-                throw new ProviderException(ProviderErrorKind.NotInstalled, "Codex auth.json not found. Run `codex login`.");
+            {
+                if (!ProviderInstallDetector.IsInstalled(ProviderId.Codex))
+                    throw new ProviderException(ProviderErrorKind.NotInstalled, ProviderInstallDetector.NotInstalledMessage(ProviderId.Codex));
+
+                throw new ProviderException(ProviderErrorKind.AuthRequired, "Codex auth.json not found. Run `codex login`.");
+            }
 
             using var doc = JsonDocument.Parse(File.ReadAllText(authPath));
             var root = doc.RootElement;

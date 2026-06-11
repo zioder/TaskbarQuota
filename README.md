@@ -66,8 +66,8 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 
 This is the core behavior — everything else (widget, flyout, fetch cache) hangs off it.
 
-- **Desktop apps** — process name of the focused window: Cursor, Antigravity, Codex, Claude, VS Code / Insiders (Copilot), and similar.
-- **Terminal agents** — if a known terminal is focused, WMI/process scan looks at command lines for Claude Code, Codex, `cursor-agent`, OpenCode, `gh copilot`, Antigravity CLI, and related launchers (Windows Terminal, PowerShell, `pwsh`, WezTerm, Alacritty, …).
+- **Desktop apps** — process name of the focused window: Cursor, Antigravity, Codex, Claude, Devin, VS Code / Insiders (Copilot), and similar.
+- **Terminal agents** — if a known terminal is focused, WMI/process scan looks at command lines for Claude Code, Codex, `cursor-agent`, OpenCode, `gh copilot`, Grok, Devin, Antigravity CLI, and related launchers (Windows Terminal, PowerShell, `pwsh`, WezTerm, Alacritty, …).
 - **Fast switching** — coordinator polls about every **500 ms**, so changing app or shell updates the active provider quickly; usage API calls are cached for **60 seconds** so providers are not spammed.
 - **OpenCode model switch** — watches OpenCode model state to move between OpenCode Zen and OpenCode Go without restarting the app.
 - **Sticky last provider** — unrelated foreground apps do not clear the widget; last detected tool stays until you focus a supported app or terminal again.
@@ -84,6 +84,8 @@ This is the core behavior — everything else (widget, flyout, fetch cache) hang
 | **Cursor** | Usage summary | Cursor `state.vscdb`, browser cookies, or manual cookie header → Cursor / cursor.com APIs |
 | **OpenCode Zen** | Billing usage and balance | Browser cookies for `opencode.ai` or manual cookie → workspace billing pages |
 | **OpenCode Go** | Rolling, weekly, and monthly windows | Same cookie path as Zen → OpenCode server workspace APIs |
+| **Grok** | Credits meter and monthly window | Grok CLI token from `%USERPROFILE%\.grok\auth.json` (or `%GROK_HOME%`) → xAI CLI proxy billing API |
+| **Devin** | Weekly and daily quota, extra usage balance | Devin CLI `credentials.toml` or Devin desktop app `state.vscdb` → Codeium SeatManagement usage API |
 
 Each provider card on the dashboard shows plan name, reset times, rate windows, and optional cost or balance when the API returns it. Use **Fix** on a card when auto-detection fails to paste tokens or cookie headers into `%LOCALAPPDATA%\TaskbarQuota\credentials.json`.
 

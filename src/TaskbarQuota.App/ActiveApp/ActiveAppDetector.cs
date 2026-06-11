@@ -4,9 +4,11 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Management;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using TaskbarQuota.Interop;
 using TaskbarQuota.Usage;
+using static TaskbarQuota.Interop.User32;
 
 namespace TaskbarQuota.ActiveApp
 {
@@ -30,6 +32,8 @@ namespace TaskbarQuota.ActiveApp
             ["claude"] = ProviderId.Claude,      // Claude desktop app, if installed
             ["code"] = ProviderId.Copilot,       // Visual Studio Code (GitHub Copilot in-editor)
             ["code-insiders"] = ProviderId.Copilot,
+            ["devin"] = ProviderId.Devin,        // Devin desktop app (VS Code fork)
+            ["devin - next"] = ProviderId.Devin,
         };
 
         private static readonly HashSet<string> Terminals = new(StringComparer.OrdinalIgnoreCase)
@@ -38,13 +42,29 @@ namespace TaskbarQuota.ActiveApp
             "wezterm-gui", "wezterm", "alacritty", "mintty", "bash", "wt", "tabby", "hyper",
         };
 
+        // Shell processes that host interactive CLIs. On Windows, conhost/OpenConsole are
+        // siblings of the CLI under the shell, not ancestors — matching must include the
+        // full shell session, not just descendants of the foreground PID.
+        private static readonly HashSet<string> ShellHosts = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "powershell", "pwsh", "cmd", "bash", "wsl", "wslhost",
+        };
+
+        private static readonly HashSet<string> InteractiveClis = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "grok", "claude", "codex", "cursor", "cursor-agent", "opencode", "copilot", "antigravity", "agy", "devin",
+        };
+
         // CLI command-line markers -> provider, checked in order. Claude is checked
         // before Codex because terminal launchers and paths can contain both names.
         private static readonly (string marker, ProviderId id)[] CliMarkers =
         {
             ("claude-code", ProviderId.Claude),
             ("claude code", ProviderId.Claude),
+            ("\\agy\\bin\\agy", ProviderId.Antigravity),
+            ("/agy/bin/agy", ProviderId.Antigravity),
             ("antigravity", ProviderId.Antigravity),
+            ("agy", ProviderId.Antigravity),
             ("cursor-agent", ProviderId.Cursor),
             ("cursor agent", ProviderId.Cursor),
             ("cursor.cmd", ProviderId.Cursor),
@@ -54,19 +74,58 @@ namespace TaskbarQuota.ActiveApp
             ("gh copilot", ProviderId.Copilot),
             ("github-copilot", ProviderId.Copilot),
             ("copilot", ProviderId.Copilot),
+            (".grok\\bin\\grok", ProviderId.Grok),
+            (".grok/bin/grok", ProviderId.Grok),
+            ("grok", ProviderId.Grok),
+            ("devin", ProviderId.Devin),
             ("claude", ProviderId.Claude),
             ("codex", ProviderId.Codex),
         };
 
-        // The WMI process scan is comparatively expensive, so cache its result briefly.
-        private static readonly TimeSpan CliCacheTtl = TimeSpan.FromSeconds(3);
+        // Native CLI executables resolvable by process name alone (no CommandLine read needed).
+        // Reading Win32_Process.CommandLine forces a per-process PEB read and is the slow part of the
+        // scan, so we resolve these by Name and only pay the CommandLine cost for node-style hosts below.
+        private static readonly Dictionary<string, ProviderId> NativeCliExes = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["antigravity"] = ProviderId.Antigravity,
+            ["agy"] = ProviderId.Antigravity,
+            ["claude"] = ProviderId.Claude,
+            ["codex"] = ProviderId.Codex,
+            ["cursor"] = ProviderId.Cursor,
+            ["cursor-agent"] = ProviderId.Cursor,
+            ["opencode"] = ProviderId.OpenCode,
+            ["copilot"] = ProviderId.Copilot,
+            ["gh"] = ProviderId.Copilot,
+            ["grok"] = ProviderId.Grok,
+            ["devin"] = ProviderId.Devin,
+        };
+
+        // Script-runtime hosts that run a CLI as an argument (e.g. "node ... claude"); only these need
+        // their CommandLine inspected, and only when they sit inside the focused terminal session.
+        private static readonly HashSet<string> CmdLineHostExes = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "node", "bun", "deno", "npm", "npx", "pnpm", "yarn", "cmd",
+        };
+
+        // Bulk scan covers native CLIs + script hosts + shells/terminals (needed to build the session
+        // tree). CommandLine is deliberately excluded here — it is fetched per-PID only when required.
+        private const string BulkProcessQuery =
+            "SELECT ProcessId, ParentProcessId, Name, CreationDate FROM Win32_Process WHERE " +
+            "Name = 'node.exe' OR Name = 'antigravity.exe' OR Name = 'agy.exe' OR Name = 'claude.exe' OR Name = 'codex.exe' OR Name = 'cursor.exe' OR Name = 'cursor-agent.exe' OR Name = 'opencode.exe' OR Name = 'copilot.exe' OR Name = 'gh.exe' OR Name = 'grok.exe' OR Name = 'devin.exe' OR Name = 'bun.exe' OR Name = 'deno.exe' OR Name = 'npm.exe' OR Name = 'npx.exe' OR Name = 'pnpm.exe' OR Name = 'yarn.exe' OR Name = 'cmd.exe' OR Name = 'powershell.exe' OR Name = 'pwsh.exe' OR Name = 'windowsterminal.exe' OR Name = 'openconsole.exe' OR Name = 'conhost.exe' OR Name = 'wezterm-gui.exe' OR Name = 'wezterm.exe' OR Name = 'alacritty.exe' OR Name = 'mintty.exe' OR Name = 'tabby.exe' OR Name = 'hyper.exe' OR Name = 'wt.exe' OR Name = 'wsl.exe' OR Name = 'wslhost.exe'";
+
+        // Brief cache so tab switches inside one terminal stay responsive without hammering WMI.
+        private static readonly TimeSpan CliCacheTtl = TimeSpan.FromMilliseconds(250);
         private static readonly TimeSpan RunningToolCacheTtl = TimeSpan.FromSeconds(15);
+        private IntPtr _lastForegroundHwnd;
         private int _lastForegroundPid;
         private string? _lastForegroundProcessName;
         private ProviderId? _lastForegroundResult;
         private ProviderId? _cliCache;
         private DateTime _cliCacheAt = DateTime.MinValue;
         private int? _cliCachePid;
+        private int? _cliCacheSessionRootPid;
+        private IntPtr _cliCacheFocusHwnd;
+        private readonly Dictionary<IntPtr, ProviderId> _terminalWindowCliCache = new();
         private bool _runningToolCache;
         private DateTime _runningToolCacheAt = DateTime.MinValue;
         private volatile bool _openCodeModelStateDirty;
@@ -100,25 +159,40 @@ namespace TaskbarQuota.ActiveApp
 
         public ProviderId? Detect()
         {
-            var hwnd = User32.GetForegroundWindow();
+            var hwnd = GetForegroundWindow();
             if (hwnd == IntPtr.Zero) return null;
 
-            User32.GetWindowThreadProcessId(hwnd, out uint pid);
+            GetWindowThreadProcessId(hwnd, out uint pid);
             if (pid == 0) return null;
 
-            var processId = (int)pid;
+            var foregroundPid = (int)pid;
             var openCodeModelChanged = ConsumeOpenCodeModelStateChange();
-            if (processId == _lastForegroundPid
-                && !openCodeModelChanged
-                && (_lastForegroundProcessName is null
-                    || !Terminals.Contains(_lastForegroundProcessName)
-                    || DateTime.UtcNow - _cliCacheAt < CliCacheTtl))
-                return _lastForegroundResult;
 
-            string? procName = processId == _lastForegroundPid
+            string? procName = foregroundPid == _lastForegroundPid
                 ? _lastForegroundProcessName
-                : TryGetProcessName(processId);
-            _lastForegroundPid = processId;
+                : TryGetProcessName(foregroundPid);
+
+            var focusHwnd = GetThreadFocusHwnd(hwnd);
+            var windowTitle = TryGetWindowTitle(hwnd);
+
+            var sessionRootPid = ResolveTerminalSessionRootPid(hwnd, foregroundPid, procName);
+            string? sessionRootName = sessionRootPid == foregroundPid
+                ? procName
+                : TryGetProcessName(sessionRootPid);
+
+            bool terminalFocused = IsTerminalRelatedProcess(procName)
+                || IsTerminalRelatedProcess(sessionRootName);
+
+            if (ShouldReuseCliCache(hwnd, foregroundPid, sessionRootPid, terminalFocused, openCodeModelChanged, _cliCache, focusHwnd))
+            {
+                _lastForegroundHwnd = hwnd;
+                _lastForegroundPid = foregroundPid;
+                _lastForegroundProcessName = procName;
+                return _lastForegroundResult = _cliCache;
+            }
+
+            _lastForegroundHwnd = hwnd;
+            _lastForegroundPid = foregroundPid;
             _lastForegroundProcessName = procName;
             if (procName == null) return null;
 
@@ -126,20 +200,277 @@ namespace TaskbarQuota.ActiveApp
             if (TryResolveGuiProcess(procName) is { } gui)
                 return _lastForegroundResult = gui;
 
-            // Terminal focused: find the CLI running inside, but throttle the WMI scan.
-            if (Terminals.Contains(procName))
+            // Interactive CLI TUI focused directly (e.g. grok.exe owns the window).
+            if (InteractiveClis.Contains(procName))
             {
-                if (!openCodeModelChanged
-                    && _cliCachePid == processId
-                    && DateTime.UtcNow - _cliCacheAt < CliCacheTtl)
-                    return _lastForegroundResult = _cliCache;
-                _cliCache = DetectCliFromProcesses(processId);
-                _cliCachePid = processId;
+                if (TryDetectCliProvider($"{procName}.exe", null) is { } cli)
+                    return _lastForegroundResult = cli;
+            }
+
+            if (terminalFocused)
+            {
+                Diagnostics.Log.Debug($"[detect] terminal focused: fgPid={foregroundPid} proc={procName} rootPid={sessionRootPid} rootName={sessionRootName} title='{windowTitle}'");
+                bool hasPreferred = _terminalWindowCliCache.TryGetValue(hwnd, out var preferredProvider);
+                _cliCache = DetectCliFromProcesses(
+                    sessionRootPid,
+                    sessionRootName ?? procName,
+                    windowTitle,
+                    hasPreferred ? preferredProvider : null);
+                Diagnostics.Log.Debug($"[detect] result={_cliCache?.ToString() ?? "null"}");
+                _cliCachePid = foregroundPid;
+                _cliCacheSessionRootPid = sessionRootPid;
+                _cliCacheFocusHwnd = focusHwnd;
                 _cliCacheAt = DateTime.UtcNow;
+                if (_cliCache is { } detectedCli)
+                    _terminalWindowCliCache[hwnd] = detectedCli;
                 return _lastForegroundResult = _cliCache;
             }
 
             return _lastForegroundResult = null;
+        }
+
+        private static bool IsTerminalRelatedProcess(string? processName)
+            => processName != null
+            && (Terminals.Contains(processName)
+                || IsConsoleHostName(processName)
+                || IsShellHostName(processName)
+                || InteractiveClis.Contains(processName));
+
+        private bool ShouldReuseCliCache(
+            IntPtr hwnd,
+            int foregroundPid,
+            int sessionRootPid,
+            bool terminalFocused,
+            bool openCodeModelChanged,
+            ProviderId? cached,
+            IntPtr focusHwnd)
+            => ShouldReuseCliCacheState(
+                hwnd,
+                foregroundPid,
+                sessionRootPid,
+                terminalFocused,
+                openCodeModelChanged,
+                cached,
+                _lastForegroundHwnd,
+                _cliCachePid,
+                _cliCacheSessionRootPid,
+                _cliCacheAt,
+                CliCacheTtl,
+                focusHwnd,
+                _cliCacheFocusHwnd);
+
+        internal static bool ShouldReuseCliCacheState(
+            IntPtr hwnd,
+            int foregroundPid,
+            int sessionRootPid,
+            bool terminalFocused,
+            bool openCodeModelChanged,
+            ProviderId? cached,
+            IntPtr lastForegroundHwnd,
+            int? cachedPid,
+            int? cachedSessionRootPid,
+            DateTime cachedAt,
+            TimeSpan ttl,
+            IntPtr focusHwnd = default,
+            IntPtr lastFocusHwnd = default)
+            => terminalFocused
+            && !openCodeModelChanged
+            && cached is not null
+            && hwnd == lastForegroundHwnd
+            && foregroundPid == cachedPid
+            && sessionRootPid == cachedSessionRootPid
+            && (focusHwnd == IntPtr.Zero || lastFocusHwnd == IntPtr.Zero || focusHwnd == lastFocusHwnd)
+            && DateTime.UtcNow - cachedAt < ttl;
+
+        internal static int ResolveTerminalSessionRootPid(IntPtr hwnd, int foregroundPid, string? foregroundProcName)
+        {
+            if (hwnd == IntPtr.Zero)
+                return foregroundPid;
+
+            // Local cache to avoid repeated Process.GetProcessById during HWND ancestor/child walks.
+            var nameCache = new Dictionary<int, string?>();
+
+            foreach (var candidateHwnd in GetFocusWindowCandidates(hwnd))
+            {
+                if (TryGetTerminalSessionPidFromHwndChain(candidateHwnd, nameCache) is int sessionPid)
+                    return sessionPid;
+            }
+
+            if (IsWindowsTerminalName(foregroundProcName)
+                && TryFindFocusedTerminalPanePid(hwnd, nameCache) is int panePid)
+                return panePid;
+
+            if (IsConsoleHostName(foregroundProcName)
+                || IsShellHostName(foregroundProcName)
+                || InteractiveClis.Contains(foregroundProcName ?? ""))
+                return foregroundPid;
+
+            return foregroundPid;
+        }
+
+        private static IEnumerable<IntPtr> GetFocusWindowCandidates(IntPtr hwnd)
+        {
+            uint threadId = GetWindowThreadProcessId(hwnd, IntPtr.Zero);
+            if (threadId != 0)
+            {
+                var info = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
+                if (GetGUIThreadInfo(threadId, ref info))
+                {
+                    if (info.hwndFocus != IntPtr.Zero)
+                        yield return info.hwndFocus;
+                    if (info.hwndCaret != IntPtr.Zero && info.hwndCaret != info.hwndFocus)
+                        yield return info.hwndCaret;
+                    if (info.hwndActive != IntPtr.Zero && info.hwndActive != info.hwndFocus)
+                        yield return info.hwndActive;
+                }
+            }
+
+            yield return hwnd;
+
+            for (var current = hwnd; current != IntPtr.Zero; current = GetAncestor(current, GetAncestorFlags.GA_PARENT))
+                yield return current;
+        }
+
+        private static int? TryGetTerminalSessionPidFromHwndChain(IntPtr hwnd, Dictionary<int, string?>? cache = null)
+        {
+            cache ??= new Dictionary<int, string?>();
+            for (var current = hwnd; current != IntPtr.Zero; current = GetAncestor(current, GetAncestorFlags.GA_PARENT))
+            {
+                GetWindowThreadProcessId(current, out uint pid);
+                if (pid == 0)
+                    continue;
+
+                var name = TryGetProcessNameCached((int)pid, cache);
+                if (IsConsoleHostName(name) || IsShellHostName(name) || InteractiveClis.Contains(name ?? ""))
+                    return (int)pid;
+            }
+
+            return null;
+        }
+
+        private static int? TryFindFocusedTerminalPanePid(IntPtr hwnd, Dictionary<int, string?>? cache = null)
+        {
+            cache ??= new Dictionary<int, string?>();
+            var focusHwnd = GetThreadFocusHwnd(hwnd);
+            if (focusHwnd != IntPtr.Zero
+                && TryGetTerminalSessionPidFromHwndChain(focusHwnd, cache) is int focusedPid)
+                return focusedPid;
+
+            int? best = null;
+            int bestDepth = int.MaxValue;
+
+            void Visit(IntPtr child, int depth)
+            {
+                if (focusHwnd != IntPtr.Zero && !IsHwndInSubtree(child, focusHwnd))
+                    return;
+
+                GetWindowThreadProcessId(child, out uint childPid);
+                if (childPid == 0)
+                    return;
+
+                var name = TryGetProcessNameCached((int)childPid, cache);
+                if (!IsConsoleHostName(name) && !IsShellHostName(name))
+                    return;
+
+                if (depth < bestDepth)
+                {
+                    bestDepth = depth;
+                    best = (int)childPid;
+                }
+            }
+
+            void WalkChildren(IntPtr parent, int depth)
+            {
+                try
+                {
+                    EnumChildWindows(parent, (child, _) =>
+                    {
+                        Visit(child, depth);
+                        WalkChildren(child, depth + 1);
+                        return true;
+                    }, IntPtr.Zero);
+                }
+                catch
+                {
+                    // Best effort.
+                }
+            }
+
+            WalkChildren(hwnd, 0);
+            return best;
+        }
+
+        private static IntPtr GetThreadFocusHwnd(IntPtr hwnd)
+        {
+            uint threadId = GetWindowThreadProcessId(hwnd, IntPtr.Zero);
+            if (threadId == 0)
+                return IntPtr.Zero;
+
+            var info = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
+            return GetGUIThreadInfo(threadId, ref info) ? info.hwndFocus : IntPtr.Zero;
+        }
+
+        private static bool IsHwndInSubtree(IntPtr ancestor, IntPtr descendant)
+        {
+            for (var current = descendant; current != IntPtr.Zero; current = GetAncestor(current, GetAncestorFlags.GA_PARENT))
+            {
+                if (current == ancestor)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static string? TryGetProcessNameStatic(int pid)
+        {
+            try { return Process.GetProcessById(pid).ProcessName; }
+            catch { return null; }
+        }
+
+        private static string? TryGetProcessNameCached(int pid, Dictionary<int, string?> cache)
+        {
+            if (cache.TryGetValue(pid, out var cached))
+                return cached;
+            var name = TryGetProcessNameStatic(pid);
+            cache[pid] = name;
+            return name;
+        }
+
+        private static string? TryGetWindowTitle(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero)
+                return null;
+            try
+            {
+                var sb = new System.Text.StringBuilder(512);
+                int len = GetWindowText(hwnd, sb, sb.Capacity);
+                if (len > 0)
+                    return sb.ToString();
+            }
+            catch { }
+            return null;
+        }
+
+        private int _prewarmed;
+
+        /// <summary>
+        /// Run one throwaway WMI process scan so the process-wide COM/WMI cold start (~1-3s) happens
+        /// off the UI/timer thread at launch instead of stalling the user's first terminal detection.
+        /// Safe to call repeatedly; only the first call does work.
+        /// </summary>
+        public void Prewarm()
+        {
+            if (System.Threading.Interlocked.Exchange(ref _prewarmed, 1) != 0)
+                return;
+
+            try
+            {
+                DetectCliFromProcesses();
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Log.Warning(ex, "Active-app detector prewarm failed");
+            }
         }
 
         public bool HasAnyKnownToolRunning()
@@ -203,38 +534,44 @@ namespace TaskbarQuota.ActiveApp
             catch { return null; }
         }
 
-        private static ProviderId? DetectCliFromProcesses(int? foregroundTerminalPid = null)
+        private static ProviderId? DetectCliFromProcesses(
+            int? foregroundTerminalPid = null,
+            string? foregroundProcName = null,
+            string? windowTitleHint = null,
+            ProviderId? preferredProvider = null)
         {
-            // Inspect command lines of running processes for CLI markers.
-            // node-based CLIs show up as "node ... claude", codex/opencode may be native exes.
+            // One cheap, name-only scan builds the process tree and resolves native CLI exes. Script-host
+            // CommandLines (node/bun/npm/...) are read separately and only for the focused session, so a
+            // terminal full of unrelated node.exe children no longer stalls detection.
             var candidates = new List<(ProviderId id, DateTime started, int pid, int parentPid)>();
             var processParents = new Dictionary<int, int>();
+            var processNames = new Dictionary<int, string>();
+            var processStarts = new Dictionary<int, DateTime>();
+            var hostPids = new List<int>();
             try
             {
-                using var searcher = new ManagementObjectSearcher(
-                    "SELECT ProcessId, ParentProcessId, Name, CommandLine FROM Win32_Process WHERE " +
-                    "Name = 'node.exe' OR Name = 'antigravity.exe' OR Name = 'claude.exe' OR Name = 'codex.exe' OR Name = 'cursor.exe' OR Name = 'cursor-agent.exe' OR Name = 'opencode.exe' OR Name = 'copilot.exe' OR Name = 'gh.exe' OR Name = 'bun.exe' OR Name = 'deno.exe' OR Name = 'npm.exe' OR Name = 'npx.exe' OR Name = 'pnpm.exe' OR Name = 'yarn.exe' OR Name = 'cmd.exe' OR Name = 'powershell.exe' OR Name = 'pwsh.exe' OR Name = 'windowsterminal.exe' OR Name = 'openconsole.exe' OR Name = 'conhost.exe'");
+                using var searcher = new ManagementObjectSearcher(BulkProcessQuery);
                 foreach (ManagementObject mo in searcher.Get())
                 {
                     var pid = TryParseInt(mo["ProcessId"]);
-                    var parentPid = TryParseInt(mo["ParentProcessId"]);
-                    if (pid != null && parentPid != null)
-                        processParents[pid.Value] = parentPid.Value;
+                    if (pid is not int p) continue;
+                    var parentPid = TryParseInt(mo["ParentProcessId"]) ?? 0;
+                    processParents[p] = parentPid;
+                    var name = NormalizeProcessName(mo["Name"] as string ?? "");
+                    processNames[p] = name;
+                    var started = ParseWmiDate(mo["CreationDate"] as string);
+                    processStarts[p] = started;
 
-                    if (TryDetectCliProvider(mo["Name"] as string, mo["CommandLine"] as string) is { } id)
+                    if (NativeCliExes.TryGetValue(name, out var nativeId))
                     {
-                        var detectedId = id == ProviderId.OpenCode
+                        var detectedId = nativeId == ProviderId.OpenCode
                             ? DetectOpenCodeProviderFromModelState() ?? ProviderId.OpenCode
-                            : id;
-
-                        DateTime started = DateTime.MinValue;
-                        try
-                        {
-                            if (pid is int p)
-                                started = Process.GetProcessById(p).StartTime;
-                        }
-                        catch { }
-                        candidates.Add((detectedId, started, pid ?? 0, parentPid ?? 0));
+                            : nativeId;
+                        candidates.Add((detectedId, started, p, parentPid));
+                    }
+                    else if (CmdLineHostExes.Contains(name))
+                    {
+                        hostPids.Add(p);
                     }
                 }
             }
@@ -244,30 +581,472 @@ namespace TaskbarQuota.ActiveApp
                 return null;
             }
 
-            if (candidates.Count == 0) return null;
-
             if (foregroundTerminalPid is int rootPid)
             {
-                var foregroundTree = candidates
-                    .Where(c => c.pid == rootPid || IsDescendantOf(c.pid, rootPid, processParents))
+                var sessionPids = ExpandTerminalSessionPids(rootPid, foregroundProcName, processParents, processNames, processStarts);
+                Diagnostics.Log.Debug($"[detect] session pids=[{string.Join(",", sessionPids)}] candidates=[{string.Join(",", candidates.Select(c => $"{c.id}:{c.pid}<-{c.parentPid}"))}] hosts=[{string.Join(",", hostPids)}]");
+
+                // Only the script hosts inside the focused session warrant the costly CommandLine read.
+                var sessionHostPids = hostPids
+                    .Where(p => IsInTerminalSession(p, processParents.TryGetValue(p, out var pp) ? pp : 0, sessionPids, processParents))
                     .ToList();
-                if (foregroundTree.Count > 0)
-                    return foregroundTree.OrderByDescending(c => c.started).First().id;
+                ResolveHostCommandLines(sessionHostPids, processStarts, processParents, candidates);
+
+                var foregroundTree = candidates
+                    .Where(c => IsInTerminalSession(c.pid, c.parentPid, sessionPids, processParents))
+                    .ToList();
+                Diagnostics.Log.Debug($"[detect] foregroundTree=[{string.Join(",", foregroundTree.Select(c => $"{c.id}:{c.pid}"))}] sessionHosts=[{string.Join(",", sessionHostPids)}]");
+
+                var picked = PickTerminalCli(
+                    candidates,
+                    foregroundTree,
+                    IsWindowsTerminalName(foregroundProcName),
+                    rootPid,
+                    processParents,
+                    windowTitleHint,
+                    preferredProvider);
+                if (picked is { } pk)
+                    return pk;
+
+                // From here foregroundTree is empty (PickTerminalCli always resolves a non-null pick when it
+                // has session candidates). Node/bun hosts in this tab but no CLI resolved — don't fall back
+                // to Grok or a global pick.
+                if (sessionHostPids.Count > 0)
+                    return null;
+
+                if (TryDetectGrokFromActiveSessions(sessionPids, processParents) is { } grok)
+                    return grok;
+
+                return null;
+            }
+            else if (candidates.Count == 0)
+            {
+                // Presence probe with no native CLI found: fall back to inspecting every script host.
+                ResolveHostCommandLines(hostPids, processStarts, processParents, candidates);
             }
 
-            return candidates.OrderByDescending(c => c.started).First().id;
+            if (candidates.Count == 0) return null;
+            return PickForegroundCli(candidates, foregroundTerminalPid ?? -1, processParents);
         }
+
+        internal static ProviderId PickForegroundCli(
+            IReadOnlyList<(ProviderId id, DateTime started, int pid, int parentPid)> candidates,
+            int sessionRootPid,
+            IReadOnlyDictionary<int, int> parents)
+        {
+            return candidates
+                .OrderByDescending(c => SessionProximity(c.pid, sessionRootPid, parents))
+                .ThenByDescending(c => DescendantDepth(c.pid, sessionRootPid, parents))
+                .ThenByDescending(c => c.started)
+                .First().id;
+        }
+
+        // Resolves which CLI a focused terminal is running from process/session evidence.
+        //
+        // Window titles are ignored here because they can contain arbitrary project or prompt text.
+        // disambiguation signal. We trust it first against the in-session tree, then — for Windows
+        // Terminal only — against the global candidate list. The latter matters because separate WT
+        // windows share one WindowsTerminal.exe process and ConPTY child shells are frequently
+        // reparented away from it (e.g. under explorer.exe), so the parent-process session tree can
+        // both miss the focused window's CLI and over-include CLIs from other windows. Only when the
+        // title yields nothing do we fall back to the process-tree proximity/recency pick.
+        //
+        // Returns null only when there are no session candidates and no Windows Terminal title match,
+        // leaving the caller free to try host/Grok fallbacks.
+        internal static ProviderId? PickTerminalCli(
+            IReadOnlyList<(ProviderId id, DateTime started, int pid, int parentPid)> allCandidates,
+            IReadOnlyList<(ProviderId id, DateTime started, int pid, int parentPid)> foregroundTree,
+            bool foregroundIsWindowsTerminal,
+            int sessionRootPid,
+            IReadOnlyDictionary<int, int> parents,
+            string? windowTitleHint,
+            ProviderId? preferredProvider = null)
+        {
+            if (foregroundIsWindowsTerminal
+                && TryPickByWindowTitleHint(allCandidates, windowTitleHint) is { } activeTitlePick)
+            {
+                return activeTitlePick;
+            }
+
+            if (foregroundTree.Count > 0)
+            {
+                if (TryPickByWindowTitleHint(foregroundTree, windowTitleHint) is { } titlePick)
+                    return titlePick;
+
+                if (preferredProvider is { } preferred
+                    && foregroundTree.Any(c => c.id == preferred))
+                {
+                    return preferred;
+                }
+
+                return PickForegroundCli(foregroundTree, sessionRootPid, parents);
+            }
+
+            return null;
+        }
+
+        internal static ProviderId? TryPickByWindowTitleHint(
+            IReadOnlyList<(ProviderId id, DateTime started, int pid, int parentPid)> candidates,
+            string? windowTitle)
+        {
+            if (candidates.Count == 0 || string.IsNullOrWhiteSpace(windowTitle))
+                return null;
+
+            var haystack = windowTitle.ToLowerInvariant();
+
+            // Check command-line style markers first (Claude before Codex etc.)
+            foreach (var (marker, id) in CliMarkers)
+            {
+                if (ContainsCliMarker(haystack, marker))
+                {
+                    var matches = candidates.Where(c => c.id == id).ToList();
+                    if (matches.Count > 0)
+                        return PickForegroundCli(matches, -1, new Dictionary<int, int>());
+                }
+            }
+
+            // Also honor direct exe name mentions that may appear in terminal/tab titles.
+            foreach (var kvp in NativeCliExes)
+            {
+                if (ContainsCliMarker(haystack, kvp.Key))
+                {
+                    var matches = candidates.Where(c => c.id == kvp.Value).ToList();
+                    if (matches.Count > 0)
+                        return PickForegroundCli(matches, -1, new Dictionary<int, int>());
+                }
+            }
+
+            return null;
+        }
+
+        internal static int SessionProximity(int candidatePid, int sessionRootPid, IReadOnlyDictionary<int, int> parents)
+        {
+            if (sessionRootPid <= 0)
+                return 0;
+
+            if (candidatePid == sessionRootPid)
+                return 1_000;
+
+            if (parents.TryGetValue(candidatePid, out var parentPid) && parentPid == sessionRootPid)
+                return 900;
+
+            if (IsDescendantOf(candidatePid, sessionRootPid, parents))
+                return 800 - DescendantDepth(candidatePid, sessionRootPid, parents);
+
+            return 0;
+        }
+
+        private static int DescendantDepth(int pid, int ancestorPid, IReadOnlyDictionary<int, int> parents)
+        {
+            int depth = 0;
+            var seen = new HashSet<int>();
+            while (pid != 0 && seen.Add(pid) && parents.TryGetValue(pid, out var parentPid))
+            {
+                if (parentPid == ancestorPid)
+                    return depth + 1;
+
+                pid = parentPid;
+                depth++;
+            }
+
+            return depth;
+        }
+
+        // Reads CommandLine for a small set of script-host PIDs and adds any CLI matches as candidates.
+        private static void ResolveHostCommandLines(
+            IEnumerable<int> pids,
+            IReadOnlyDictionary<int, DateTime> starts,
+            IReadOnlyDictionary<int, int> parents,
+            List<(ProviderId id, DateTime started, int pid, int parentPid)> candidates)
+        {
+            var list = new List<int>(new HashSet<int>(pids));
+            if (list.Count == 0) return;
+
+            const int chunkSize = 60;
+            for (int i = 0; i < list.Count; i += chunkSize)
+            {
+                var where = string.Join(" OR ", list.GetRange(i, Math.Min(chunkSize, list.Count - i)).ConvertAll(p => "ProcessId = " + p));
+                try
+                {
+                    using var searcher = new ManagementObjectSearcher(
+                        "SELECT ProcessId, Name, CommandLine FROM Win32_Process WHERE " + where);
+                    foreach (ManagementObject mo in searcher.Get())
+                    {
+                        var pid = TryParseInt(mo["ProcessId"]) ?? 0;
+                        if (TryDetectCliProvider(mo["Name"] as string, mo["CommandLine"] as string) is not { } id)
+                            continue;
+                        var detectedId = id == ProviderId.OpenCode
+                            ? DetectOpenCodeProviderFromModelState() ?? ProviderId.OpenCode
+                            : id;
+                        starts.TryGetValue(pid, out var started);
+                        parents.TryGetValue(pid, out var parentPid);
+                        candidates.Add((detectedId, started, pid, parentPid));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.Log.Warning(ex, "Failed to read CLI command lines");
+                }
+            }
+        }
+
+        private static DateTime ParseWmiDate(string? wmiDate)
+        {
+            if (string.IsNullOrEmpty(wmiDate)) return DateTime.MinValue;
+            try { return ManagementDateTimeConverter.ToDateTime(wmiDate); }
+            catch { return DateTime.MinValue; }
+        }
+
+        internal static HashSet<int> ExpandTerminalSessionPids(
+            int foregroundPid,
+            string? foregroundProcName,
+            IReadOnlyDictionary<int, int> parents,
+            IReadOnlyDictionary<int, string> names,
+            IReadOnlyDictionary<int, DateTime>? starts = null)
+        {
+            var session = new HashSet<int> { foregroundPid };
+
+            void AddShellSession(int shellPid)
+            {
+                var queue = new Queue<int>();
+                queue.Enqueue(shellPid);
+                while (queue.Count > 0)
+                {
+                    var pid = queue.Dequeue();
+                    if (!session.Add(pid))
+                        continue;
+
+                    foreach (var (childPid, parentPid) in parents)
+                    {
+                        if (parentPid == pid)
+                            queue.Enqueue(childPid);
+                    }
+                }
+            }
+
+            if (IsShellHostName(foregroundProcName))
+            {
+                AddShellSession(foregroundPid);
+                return session;
+            }
+
+            if (IsConsoleHostName(foregroundProcName))
+            {
+                session.Add(foregroundPid);
+                if (parents.TryGetValue(foregroundPid, out var parentPid)
+                    && IsShellHostName(names.GetValueOrDefault(parentPid)))
+                {
+                    AddShellSession(parentPid);
+                }
+                else
+                {
+                    foreach (var (pid, ppid) in parents)
+                    {
+                        if (ppid != foregroundPid || !IsShellHostName(names.GetValueOrDefault(pid)))
+                            continue;
+
+                        AddShellSession(pid);
+                    }
+                }
+
+                return session;
+            }
+
+            if (IsWindowsTerminalName(foregroundProcName))
+            {
+                // Avoid attributing every tab in Windows Terminal to the foreground window.
+                foreach (var (pid, _) in parents)
+                {
+                    if (!names.TryGetValue(pid, out var name) || !IsConsoleHostName(name))
+                        continue;
+
+                    if (!IsDescendantOf(pid, foregroundPid, parents))
+                        continue;
+
+                    session.Add(pid);
+                    if (parents.TryGetValue(pid, out var paneShellPid) && IsShellHostName(names.GetValueOrDefault(paneShellPid)))
+                        AddShellSession(paneShellPid);
+                }
+
+                if (session.Count == 1 && starts is not null)
+                {
+                    var paneStarts = new List<DateTime>();
+                    if (parents.TryGetValue(foregroundPid, out var terminalParentPid))
+                    {
+                        foreach (var (pid, parentPid) in parents)
+                        {
+                            if (parentPid != terminalParentPid)
+                                continue;
+
+                            if (names.TryGetValue(pid, out var name)
+                                && IsConsoleHostName(name)
+                                && starts.TryGetValue(pid, out var paneStarted))
+                            {
+                                paneStarts.Add(paneStarted);
+                                session.Add(pid);
+                            }
+                        }
+                    }
+
+                    if (paneStarts.Count == 0 && starts.TryGetValue(foregroundPid, out var terminalStarted))
+                        paneStarts.Add(terminalStarted);
+
+                    foreach (var (pid, name) in names)
+                    {
+                        if (!IsShellHostName(name) || !starts.TryGetValue(pid, out var shellStarted))
+                            continue;
+
+                        if (paneStarts.Any(paneStarted => Math.Abs((shellStarted - paneStarted).TotalSeconds) <= 3))
+                            AddShellSession(pid);
+                    }
+                }
+            }
+
+            // Generic terminal GUI containers (WezTerm, Alacritty, Tabby, Hyper, mintty, etc.).
+            // Collect any hosted console hosts, direct or descendant shell hosts (so their children are included),
+            // and any interactive CLIs launched directly inside this terminal instance.
+            if (IsTerminalGuiContainer(foregroundProcName) && !IsWindowsTerminalName(foregroundProcName))
+            {
+                foreach (var (pid, _) in parents)
+                {
+                    if (!IsDescendantOf(pid, foregroundPid, parents))
+                        continue;
+
+                    var name = names.GetValueOrDefault(pid);
+                    if (IsConsoleHostName(name))
+                    {
+                        session.Add(pid);
+                        if (parents.TryGetValue(pid, out var paneShellPid) && IsShellHostName(names.GetValueOrDefault(paneShellPid)))
+                            AddShellSession(paneShellPid);
+                    }
+                    else if (IsShellHostName(name))
+                    {
+                        AddShellSession(pid);
+                    }
+                    else if (InteractiveClis.Contains(name ?? ""))
+                    {
+                        session.Add(pid);
+                    }
+                }
+            }
+
+            return session;
+        }
+
+        internal static bool IsInTerminalSession(
+            int candidatePid,
+            int candidateParentPid,
+            IReadOnlySet<int> sessionPids,
+            IReadOnlyDictionary<int, int> parents) =>
+            sessionPids.Contains(candidatePid)
+            || sessionPids.Contains(candidateParentPid)
+            || sessionPids.Any(rootPid => IsDescendantOf(candidatePid, rootPid, parents));
+
+        private static ProviderId? TryDetectGrokFromActiveSessions(
+            IReadOnlySet<int> sessionPids,
+            IReadOnlyDictionary<int, int> parents)
+        {
+            foreach (var grokPid in ReadActiveGrokSessionPids())
+            {
+                if (!IsGrokPidInFocusedSession(grokPid, sessionPids, parents))
+                    continue;
+
+                try
+                {
+                    using var process = Process.GetProcessById(grokPid);
+                    if (!process.HasExited)
+                        return ProviderId.Grok;
+                }
+                catch { }
+            }
+
+            return null;
+        }
+
+        internal static bool IsGrokPidInFocusedSession(
+            int grokPid,
+            IReadOnlySet<int> sessionPids,
+            IReadOnlyDictionary<int, int> parents)
+        {
+            if (sessionPids.Contains(grokPid))
+                return true;
+
+            return sessionPids.Any(rootPid => IsDescendantOf(grokPid, rootPid, parents));
+        }
+
+        internal static IReadOnlyList<int> ReadActiveGrokSessionPids()
+        {
+            var path = GetGrokActiveSessionsPath();
+            if (!File.Exists(path))
+                return Array.Empty<int>();
+
+            try
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                    return Array.Empty<int>();
+
+                var pids = new List<int>();
+                foreach (var item in doc.RootElement.EnumerateArray())
+                {
+                    if (item.TryGetProperty("pid", out var pidProp) && pidProp.TryGetInt32(out var pid) && pid > 0)
+                        pids.Add(pid);
+                }
+
+                return pids;
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Log.Warning(ex, "Failed to read Grok active_sessions.json");
+                return Array.Empty<int>();
+            }
+        }
+
+        internal static string GetGrokActiveSessionsPath()
+        {
+            var grokHome = Environment.GetEnvironmentVariable("GROK_HOME")?.Trim();
+            var root = !string.IsNullOrEmpty(grokHome)
+                ? grokHome
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".grok");
+            return Path.Combine(root, "active_sessions.json");
+        }
+
+        private static string NormalizeProcessName(string processName) =>
+            processName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+                ? processName[..^4]
+                : processName;
+
+        private static bool IsShellHostName(string? processName) =>
+            processName != null && ShellHosts.Contains(processName);
+
+        private static bool IsConsoleHostName(string? processName) =>
+            processName != null
+            && (processName.Equals("conhost", StringComparison.OrdinalIgnoreCase)
+                || processName.Equals("openconsole", StringComparison.OrdinalIgnoreCase));
+
+        private static bool IsWindowsTerminalName(string? processName) =>
+            processName != null
+            && (processName.Equals("windowsterminal", StringComparison.OrdinalIgnoreCase)
+                || processName.Equals("wt", StringComparison.OrdinalIgnoreCase));
+
+        private static bool IsTerminalGuiContainer(string? processName) =>
+            processName != null
+            && Terminals.Contains(processName)
+            && !IsConsoleHostName(processName)
+            && !IsShellHostName(processName);
 
         internal static ProviderId? TryDetectCliProvider(string? processName, string? commandLine)
         {
             var name = (processName ?? "").ToLowerInvariant();
-            if (name is "antigravity.exe") return ProviderId.Antigravity;
+            if (name is "antigravity.exe" or "agy.exe") return ProviderId.Antigravity;
             if (name is "claude.exe") return ProviderId.Claude;
             if (name is "codex.exe") return ProviderId.Codex;
             if (name is "cursor.exe") return ProviderId.Cursor;
             if (name is "cursor-agent.exe") return ProviderId.Cursor;
             if (name is "opencode.exe") return ProviderId.OpenCode;
             if (name is "copilot.exe" or "gh.exe") return ProviderId.Copilot;
+            if (name is "grok.exe") return ProviderId.Grok;
+            if (name is "devin.exe") return ProviderId.Devin;
 
             var haystack = ((commandLine ?? "") + " " + name).ToLowerInvariant();
             foreach (var (marker, id) in CliMarkers)

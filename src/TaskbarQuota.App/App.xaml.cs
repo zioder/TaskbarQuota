@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using TaskbarQuota.Diagnostics;
@@ -42,6 +43,12 @@ namespace TaskbarQuota
             UsageCoordinator.Instance.Start();
             QuotaAlertService.Instance.Start();
 
+            _ = Task.Run(() =>
+            {
+                ProviderInstallDetector.WarmCliCache();
+                ProviderDiscoveryService.SyncInstalledProviderVisibility();
+            });
+
             ScheduleTaskbarInitialization();
 
             var updateTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) };
@@ -63,6 +70,7 @@ namespace TaskbarQuota
                     Log.Error(ex, "Failed to open main window on launch");
                 }
             }
+
         }
 
         public void ShowMainWindow()
