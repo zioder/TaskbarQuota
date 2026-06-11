@@ -64,7 +64,8 @@ namespace TaskbarQuota.Usage.Providers
             // (remaining against the monthly limit) instead of a plain percent bar.
             if (billing.LimitUnits > 0)
             {
-                var cost = new CostSnapshot(billing.LimitUnits - billing.UsedUnits, "credits", "Credits")
+                double remainingCredits = Math.Max(0, billing.LimitUnits - billing.UsedUnits);
+                var cost = new CostSnapshot(remainingCredits, "credits", "Credits")
                     .WithLimit(billing.LimitUnits);
                 if (billing.ResetAt is { } resetsAt)
                     cost.WithResetsAt(resetsAt);

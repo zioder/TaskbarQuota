@@ -98,11 +98,10 @@ namespace TaskbarQuota
 
         private void EnsureDashboardLoaded()
         {
-            DashboardPage.UseCompactLayout = true;
             if (_dashboardLoaded)
                 return;
 
-            ContentFrame.Navigate(typeof(DashboardPage), null, new SuppressNavigationTransitionInfo());
+            ContentFrame.Navigate(typeof(DashboardPage), true, new SuppressNavigationTransitionInfo());
             _dashboardLoaded = true;
         }
 

@@ -210,12 +210,12 @@ namespace TaskbarQuota.ActiveApp
             if (terminalFocused)
             {
                 Diagnostics.Log.Debug($"[detect] terminal focused: fgPid={foregroundPid} proc={procName} rootPid={sessionRootPid} rootName={sessionRootName} title='{windowTitle}'");
-                _terminalWindowCliCache.TryGetValue(hwnd, out var preferredProvider);
+                bool hasPreferred = _terminalWindowCliCache.TryGetValue(hwnd, out var preferredProvider);
                 _cliCache = DetectCliFromProcesses(
                     sessionRootPid,
                     sessionRootName ?? procName,
                     windowTitle,
-                    preferredProvider == default ? null : preferredProvider);
+                    hasPreferred ? preferredProvider : null);
                 Diagnostics.Log.Debug($"[detect] result={_cliCache?.ToString() ?? "null"}");
                 _cliCachePid = foregroundPid;
                 _cliCacheSessionRootPid = sessionRootPid;

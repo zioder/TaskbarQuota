@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -16,8 +17,8 @@ internal static class ProviderInstallDetector
     private static readonly string[] KnownClis =
         ["antigravity", "codex", "grok", "claude", "devin", "gh", "opencode"];
 
-    private static readonly Dictionary<string, bool> CliAvailability = new(StringComparer.OrdinalIgnoreCase);
-    private static bool _cliCacheReady;
+    private static readonly ConcurrentDictionary<string, bool> CliAvailability = new(StringComparer.OrdinalIgnoreCase);
+    private static volatile bool _cliCacheReady;
 
     internal static Func<ProviderId, bool>? IsInstalledOverrideForTesting;
 
@@ -188,7 +189,11 @@ internal static class ProviderInstallDetector
                 return false;
 
             string output = process.StandardOutput.ReadToEnd();
-            process.WaitForExit(500);
+            if (!process.WaitForExit(500))
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                return false;
+            }
             return process.ExitCode == 0 && !string.IsNullOrWhiteSpace(output);
         }
         catch

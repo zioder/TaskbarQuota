@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Navigation;
 using TaskbarQuota.Usage;
 using TaskbarQuota.ViewModels;
 using Windows.System;
@@ -15,10 +16,10 @@ namespace TaskbarQuota.Views
     {
         private readonly bool _ownsViewModel;
         private static bool _suppressWidgetEvents;
+        private bool _useCompactLayout;
 
         public DashboardViewModel ViewModel { get; }
         public static DashboardViewModel? SharedViewModel { get; set; }
-        public static bool UseCompactLayout { get; set; }
 
         /// <summary>The content panel; used by the main window scroll area.</summary>
         public FrameworkElement ContentPanel => DashboardContent;
@@ -47,12 +48,22 @@ namespace TaskbarQuota.Views
             };
         }
 
+        protected override void OnNavigatedTo(NavigationEventArgs e)
+        {
+            base.OnNavigatedTo(e);
+            if (e.Parameter is bool compact)
+            {
+                _useCompactLayout = compact;
+                ApplyLayoutState();
+            }
+        }
+
         private void OnDetailContentWidthChanged(double width)
             => ApplyLayoutState();
 
         private void ApplyLayoutState()
         {
-            if (UseCompactLayout)
+            if (_useCompactLayout)
             {
                 DashboardContent.HorizontalAlignment = HorizontalAlignment.Left;
                 DashboardContent.Width = ViewModel.DetailContentWidth;
