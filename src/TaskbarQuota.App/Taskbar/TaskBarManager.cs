@@ -122,6 +122,7 @@ namespace TaskbarQuota.Taskbar
                 widget.Show();
                 _widget = widget;
                 SyncWidgetState();
+                PrewarmFlyout();
             }
             catch (Exception ex)
             {
@@ -175,6 +176,23 @@ namespace TaskbarQuota.Taskbar
                 Log.Error(ex, "Failed to toggle flyout");
                 _flyout = null;
             }
+        }
+
+        private static void PrewarmFlyout()
+        {
+            _dispatcher?.TryEnqueue(DispatcherQueuePriority.Low, () =>
+            {
+                try
+                {
+                    _flyout ??= new FlyoutWindow();
+                    _flyout.Prewarm();
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, "Failed to prewarm flyout");
+                    _flyout = null;
+                }
+            });
         }
 
         private static void OnStateChanged(UsageResult result)

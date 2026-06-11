@@ -28,6 +28,7 @@ namespace TaskbarQuota
     {
         private IntPtr _widgetHandle;
         private bool _shown;
+        private bool _prewarmed;
         private bool _dashboardLoaded;
         private bool _sizeHooksRegistered;
         private bool _applyingBounds;
@@ -75,19 +76,45 @@ namespace TaskbarQuota
             ShowAbove(widgetHandle);
         }
 
+        /// <summary>
+        /// Compose the first XAML frame and spin up the acrylic backdrop off-screen once, so the first
+        /// real open doesn't flash a black slab while WinUI warms up composition.
+        /// </summary>
+        public void Prewarm()
+        {
+            if (_prewarmed)
+                return;
+            _prewarmed = true;
+
+            EnsureDashboardLoaded();
+
+            var appWindow = GetAppWindow();
+            appWindow.Move(new PointInt32(-32000, -32000));
+            appWindow.Show(false);
+            DispatcherQueue.TryEnqueue(
+                Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                () => { if (!_shown) appWindow.Hide(); });
+        }
+
+        private void EnsureDashboardLoaded()
+        {
+            DashboardPage.UseCompactLayout = true;
+            if (_dashboardLoaded)
+                return;
+
+            ContentFrame.Navigate(typeof(DashboardPage), null, new SuppressNavigationTransitionInfo());
+            _dashboardLoaded = true;
+        }
+
         public void ShowAbove(IntPtr widgetHandle)
         {
             _widgetHandle = widgetHandle;
-            if (!_dashboardLoaded)
-            {
-                DashboardPage.UseCompactLayout = true;
-                ContentFrame.Navigate(typeof(DashboardPage), null, new SuppressNavigationTransitionInfo());
-                _dashboardLoaded = true;
-            }
-            else
-            {
-                DashboardPage.UseCompactLayout = true;
-            }
+            EnsureDashboardLoaded();
+
+            // Sync the strip selection to the provider the taskbar widget is currently showing,
+            // so opening the tray highlights/details that provider rather than a stale selection.
+            if (UsageCoordinator.Instance.ActiveProvider is { } active)
+                _dashboardViewModel.SelectProvider(active);
 
             _shown = true;
             ApplyFlyoutBounds();
