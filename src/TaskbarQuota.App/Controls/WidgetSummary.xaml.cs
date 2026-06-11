@@ -625,28 +625,32 @@ namespace TaskbarQuota.Controls
         {
             int start = group * MaxRowsPerGroup;
             int count = Math.Min(MaxRowsPerGroup, rows.Count - start);
+            // Single-row groups (e.g. the Grok/Copilot credits meter) render one point larger, so
+            // measure at that size — otherwise the label ("Credits") is sized too narrow and clips.
+            bool isSingleRowGroup = rows.Count == 1 && count == 1;
+            int labelFont = isSingleRowGroup ? WidgetFontSize + 1 : WidgetFontSize;
             double widestLabel = 0;
             double widestReset = 0;
             for (int i = 0; i < count; i++)
             {
                 var row = rows[start + i];
                 double iconWidth = row.GlyphData != null ? RowLabelGlyphReserve : 0;
-                widestLabel = Math.Max(widestLabel, MeasureTextWidth(BaseLabelText(row, mode)) + iconWidth);
+                widestLabel = Math.Max(widestLabel, MeasureTextWidth(BaseLabelText(row, mode), labelFont) + iconWidth);
                 if (!string.IsNullOrWhiteSpace(row.ResetDescription))
-                    widestReset = Math.Max(widestReset, MeasureTextWidth($"({CompactResetDescription(row.ResetDescription)})"));
+                    widestReset = Math.Max(widestReset, MeasureTextWidth($"({CompactResetDescription(row.ResetDescription)})", labelFont));
             }
 
             double widestValue = 0;
             for (int i = 0; i < count; i++)
             {
                 var row = rows[start + i];
-                widestValue = Math.Max(widestValue, MeasureTextWidth(row.Value));
+                widestValue = Math.Max(widestValue, MeasureTextWidth(row.Value, labelFont));
                 if (row.Label == "Credits")
-                    widestValue = Math.Max(widestValue, MeasureTextWidth(MaxCreditValueSample));
+                    widestValue = Math.Max(widestValue, MeasureTextWidth(MaxCreditValueSample, labelFont));
             }
 
             return new WidgetLayoutMetrics(
-                Math.Max(MinLabelColumnWidth, widestLabel + 1),
+                Math.Max(MinLabelColumnWidth, widestLabel + 3),
                 widestReset == 0 ? MinResetColumnWidth : widestReset + 2,
                 Math.Max(ValueColumnWidth, widestValue + 4));
         }
@@ -925,13 +929,13 @@ namespace TaskbarQuota.Controls
         private static string BaseLabelText(WidgetUsageRow row, WidgetDisplayMode mode)
             => mode == WidgetDisplayMode.PercentagesOnly ? row.Label + ":" : row.Label;
 
-        private static double MeasureTextWidth(string text)
+        private static double MeasureTextWidth(string text, int fontSize = WidgetFontSize)
         {
             var textBlock = new TextBlock
             {
                 Text = text,
                 FontFamily = new FontFamily("Segoe UI Variable Text"),
-                FontSize = WidgetFontSize,
+                FontSize = fontSize,
                 FontWeight = Microsoft.UI.Text.FontWeights.Normal,
             };
             textBlock.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
