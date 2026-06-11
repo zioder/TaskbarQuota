@@ -1,15 +1,30 @@
+using System;
+
 namespace TaskbarQuota
 {
     /// <summary>
-    /// Pre-measured flyout dimensions (8 provider icons + settings).
-    /// Tallest page: 3 usage bars with reset lines (Cursor / Codex / OpenCode Go).
+    /// Flyout dimensions. Width adapts to the number of visible provider icons and detail content.
     /// </summary>
     internal static class FlyoutLayout
     {
-        /// <summary>8×48 icons + provider padding/border + 8 spacing + 48 settings + border + 12×2 margin.</summary>
-        public const int LogicalWidth = 476;
+        public const int IconButtonWidth = 48;
 
-        /// <summary>Header + tallest provider detail + status (content width 396).</summary>
+        /// <summary>Minimum flyout width (roughly two providers + chrome).</summary>
+        public const int MinLogicalWidth = 320;
+
+        /// <summary>
+        /// Chrome beyond provider icons: bottom margin, strip border padding, strip/settings gap,
+        /// and the settings button.
+        /// </summary>
+        public const int StripChromeLogicalWidth = 88;
+
+        /// <summary>Extra width reserved for the dashboard detail card inside the frame.</summary>
+        public const int DetailContentPadding = 40;
+
+        /// <summary>ContentFrame left + right padding in the flyout.</summary>
+        public const int FrameHorizontalPadding = 32;
+
+        /// <summary>Header + tallest provider detail + status (content width baseline).</summary>
         public const int LogicalContentHeight = 430;
 
         /// <summary>Frame padding + scroll padding + bottom chrome (update bar is optional / collapsed).</summary>
@@ -19,5 +34,16 @@ namespace TaskbarQuota
 
         public static int LogicalHeight =>
             LogicalContentHeight + ChromeLogicalHeight + HeightMeasureBuffer;
+
+        /// <summary>
+        /// Flyout width grows with each visible provider icon and the measured detail card width.
+        /// </summary>
+        public static int ComputeLogicalWidth(int stripIconCount, double detailContentWidth)
+        {
+            int icons = Math.Max(0, stripIconCount);
+            int stripWidth = (icons * IconButtonWidth) + StripChromeLogicalWidth;
+            int contentWidth = (int)Math.Ceiling(detailContentWidth + DetailContentPadding);
+            return Math.Max(Math.Max(stripWidth, contentWidth), MinLogicalWidth);
+        }
     }
 }

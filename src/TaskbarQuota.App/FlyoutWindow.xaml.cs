@@ -6,6 +6,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Windows.Foundation;
@@ -33,6 +34,7 @@ namespace TaskbarQuota
         private RectInt32? _lastAppliedBounds;
         private readonly DashboardViewModel _dashboardViewModel;
         private readonly Dictionary<ProviderId, FlyoutProviderStripItem> _providerStripItems = new();
+        private int _stripIconCount;
 
         public bool IsShown => _shown;
 
@@ -43,6 +45,7 @@ namespace TaskbarQuota
             DashboardPage.SharedViewModel = _dashboardViewModel;
             _dashboardViewModel.Cards.CollectionChanged += DashboardCards_CollectionChanged;
             _dashboardViewModel.SelectedCardChanged += DashboardSelectedCardChanged;
+            _dashboardViewModel.DetailContentWidthChanged += DashboardDetailContentWidthChanged;
             ProviderStrip.Loaded += (_, _) => RebuildProviderStrip();
 
             SystemBackdrop = new DesktopAcrylicBackdrop();
@@ -77,8 +80,13 @@ namespace TaskbarQuota
             _widgetHandle = widgetHandle;
             if (!_dashboardLoaded)
             {
+                DashboardPage.UseCompactLayout = true;
                 ContentFrame.Navigate(typeof(DashboardPage), null, new SuppressNavigationTransitionInfo());
                 _dashboardLoaded = true;
+            }
+            else
+            {
+                DashboardPage.UseCompactLayout = true;
             }
 
             _shown = true;
@@ -109,7 +117,9 @@ namespace TaskbarQuota
             try
             {
                 var scale = Root.XamlRoot?.RasterizationScale ?? GetWindowScale();
-                int w = WindowDpi.ToPhysical(FlyoutLayout.LogicalWidth, scale);
+                int w = WindowDpi.ToPhysical(
+                    FlyoutLayout.ComputeLogicalWidth(_stripIconCount, _dashboardViewModel.DetailContentWidth),
+                    scale);
                 int h = WindowDpi.ToPhysical(FlyoutLayout.LogicalHeight, scale);
 
                 if (!User32.GetWindowRect(_widgetHandle, out RECT wr))
@@ -158,64 +168,75 @@ namespace TaskbarQuota
         private void DashboardSelectedCardChanged(ProviderCardViewModel? card)
             => SyncProviderStripSelection();
 
+        private void DashboardDetailContentWidthChanged(double _)
+            => ApplyFlyoutBounds();
+
         private void RebuildProviderStrip()
         {
             ProviderStrip.Children.Clear();
             _providerStripItems.Clear();
 
+            _stripIconCount = 0;
             foreach (var card in _dashboardViewModel.Cards)
             {
-                var icon = new ProviderAvatar
-                {
-                    Width = 24,
-                    Height = 24,
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    ProviderId = card.ProviderId,
-                    Initial = card.DisplayName.Length > 0 ? card.DisplayName[0].ToString() : "?",
-                    ForegroundBrush = GetSelectionBrush(isSelected: false),
-                };
-                var indicator = new Border
-                {
-                    Width = 24,
-                    Height = 3,
-                    CornerRadius = new CornerRadius(2),
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Bottom,
-                    Background = GetSelectionBrush(isSelected: true),
-                    Opacity = 0,
-                };
-
-                var buttonContent = new Grid
-                {
-                    Width = 48,
-                    Height = 48,
-                };
-                buttonContent.Children.Add(icon);
-                buttonContent.Children.Add(indicator);
-
-                var button = new Button
-                {
-                    Width = 48,
-                    Height = 48,
-                    MinWidth = 0,
-                    MinHeight = 0,
-                    Padding = new Thickness(0),
-                    BorderThickness = new Thickness(0),
-                    Background = new SolidColorBrush(Colors.Transparent),
-                    Tag = card.ProviderId,
-                    Content = buttonContent,
-                };
-                button.Click += ProviderStripButton_Click;
-                ToolTipService.SetToolTip(button, card.DisplayName);
-                AutomationProperties.SetName(button, card.DisplayName);
-                AutomationProperties.SetAutomationId(button, $"FlyoutProvider{card.ProviderId}Button");
-
-                _providerStripItems[card.ProviderId] = new FlyoutProviderStripItem(icon, indicator);
-                ProviderStrip.Children.Add(button);
+                ProviderStrip.Children.Add(CreateStripButton(card));
+                _stripIconCount++;
             }
 
             SyncProviderStripSelection();
+            ApplyFlyoutBounds();
+        }
+
+        private Button CreateStripButton(ProviderCardViewModel card)
+        {
+            var icon = new ProviderAvatar
+            {
+                Width = 24,
+                Height = 24,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                ProviderId = card.ProviderId,
+                Initial = card.DisplayName.Length > 0 ? card.DisplayName[0].ToString() : "?",
+                ForegroundBrush = GetSelectionBrush(isSelected: false),
+            };
+            var indicator = new Border
+            {
+                Width = 24,
+                Height = 3,
+                CornerRadius = new CornerRadius(2),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Bottom,
+                Background = GetSelectionBrush(isSelected: true),
+                Opacity = 0,
+            };
+
+            var buttonContent = new Grid
+            {
+                Width = FlyoutLayout.IconButtonWidth,
+                Height = FlyoutLayout.IconButtonWidth,
+            };
+            buttonContent.Children.Add(icon);
+            buttonContent.Children.Add(indicator);
+
+            var button = new Button
+            {
+                Width = FlyoutLayout.IconButtonWidth,
+                Height = FlyoutLayout.IconButtonWidth,
+                MinWidth = 0,
+                MinHeight = 0,
+                Padding = new Thickness(0),
+                BorderThickness = new Thickness(0),
+                Background = new SolidColorBrush(Colors.Transparent),
+                Tag = card.ProviderId,
+                Content = buttonContent,
+            };
+            button.Click += ProviderStripButton_Click;
+            ToolTipService.SetToolTip(button, card.DisplayName);
+            AutomationProperties.SetName(button, card.DisplayName);
+            AutomationProperties.SetAutomationId(button, $"FlyoutProvider{card.ProviderId}Button");
+
+            _providerStripItems[card.ProviderId] = new FlyoutProviderStripItem(icon, indicator);
+            return button;
         }
 
         private void ProviderStripButton_Click(object sender, RoutedEventArgs e)

@@ -147,7 +147,9 @@ namespace TaskbarQuota.Taskbar
                     ? last
                     : coordinator.Service.TryGetCached(target, out var cached)
                         ? cached
-                        : coordinator.LastState;
+                        : coordinator.Service.TryGetLastSuccessfulLiveResult(target, out var lastSuccess)
+                            ? lastSuccess
+                            : coordinator.LastState;
 
                 if (toApply is { } result)
                     summary.Apply(result, force: true);

@@ -30,10 +30,18 @@ namespace TaskbarQuota
             ApplyFluentChrome();
             ThemeService.Register(Root);
             _navigationBinder = new DashboardNavigationBinder(Nav, _dashboardViewModel);
-            ContentFrame.Navigate(typeof(DashboardPage), null, new SuppressNavigationTransitionInfo());
+            DashboardPage.UseCompactLayout = false;
             Root.SizeChanged += (_, _) => UpdateResponsiveNavigation();
-            Root.Loaded += (_, _) => ApplyInitialWindowSize();
+            Root.Loaded += OnRootLoaded;
+            Nav.Loaded += (_, _) => _navigationBinder?.ReapplySelection();
             UpdateResponsiveNavigation();
+        }
+
+        private void OnRootLoaded(object sender, RoutedEventArgs e)
+        {
+            Root.Loaded -= OnRootLoaded;
+            ApplyInitialWindowSize();
+            ContentFrame.Navigate(typeof(DashboardPage), null, new SuppressNavigationTransitionInfo());
         }
 
         private void ApplyInitialWindowSize()

@@ -45,15 +45,8 @@
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0"
-                               Text="{x:Bind Label}"
-                               Style="{StaticResource BodyStrongTextBlockStyle}"
-                               VerticalAlignment="Center"/>
-                    <TextBlock Grid.Column="1"
-                               Text="{x:Bind PercentText}"
-                               Foreground="{x:Bind PercentForeground}"
-                               Style="{StaticResource BodyStrongTextBlockStyle}"
-                               VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="0" Text="{x:Bind Label}" Style="{StaticResource BodyStrongTextBlockStyle}" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="1" Text="{x:Bind PercentText}" Foreground="{x:Bind PercentForeground}" Style="{StaticResource BodyStrongTextBlockStyle}" VerticalAlignment="Center"/>
                 </Grid>
 
                 <ProgressBar Grid.Column="1" Grid.Row="1"
@@ -72,8 +65,7 @@
         </DataTemplate>
 
         <DataTemplate x:Key="TextMetricTemplate" x:DataType="vm:TextMetricViewModel">
-            <Grid MinHeight="24"
-                  ColumnSpacing="12">
+            <Grid MinHeight="24" ColumnSpacing="12">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
@@ -107,6 +99,19 @@
 
         <DataTemplate x:Key="ProviderCardDetailTemplate" x:DataType="vm:ProviderCardViewModel">
             <StackPanel Spacing="16" HorizontalAlignment="Stretch">
+                <Border Visibility="{x:Bind SetupRequiredVisibility}"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="16,14">
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="Not set up" Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                        <TextBlock Text="{x:Bind SetupHint}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"/>
+                        <HyperlinkButton Content="Learn more" Tag="{x:Bind ProviderId}" Visibility="{x:Bind SetupUrlVisibility}" Click="OpenSetupUrl_Click" HorizontalAlignment="Left"/>
+                    </StackPanel>
+                </Border>
+
                 <muxc:InfoBar Visibility="{x:Bind ErrorVisibility}"
                               IsOpen="True"
                               IsClosable="False"
@@ -144,8 +149,8 @@
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                         BorderThickness="1"
                         CornerRadius="8"
-                        Padding="22,18">
-                    <Grid RowSpacing="4" ColumnSpacing="14">
+                        Padding="20,16">
+                    <Grid RowSpacing="8" ColumnSpacing="12">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
@@ -174,16 +179,14 @@
                         </Border>
                         <TextBlock Grid.Column="1" Grid.Row="0"
                                    Text="Credits"
-                                   Margin="0,0,0,8"
                                    Style="{StaticResource BodyStrongTextBlockStyle}"
                                    VerticalAlignment="Center"/>
                         <ProgressBar Grid.Column="1" Grid.Row="1"
                                      Value="{x:Bind CreditPercent}"
                                      Maximum="100"
-                                     Height="6"
-                                     CornerRadius="3"
+                                     Height="4"
                                      Foreground="{x:Bind CreditBrush}"/>
-                        <Grid Grid.Column="1" Grid.Row="2" Margin="0,2,0,0" ColumnSpacing="14">
+                        <Grid Grid.Column="1" Grid.Row="2" ColumnSpacing="12">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
@@ -203,6 +206,7 @@
                 </Border>
 
                 <Border Visibility="{x:Bind AdditionalUsageVisibility}"
+                        Opacity="{x:Bind AdditionalUsageOpacity}"
                         HorizontalAlignment="Stretch"
                         Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -291,7 +295,6 @@
                 <TextBlock Text="{x:Bind CostText}"
                            Visibility="{x:Bind CostVisibility}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-
             </StackPanel>
         </DataTemplate>
     </Page.Resources>
@@ -305,7 +308,7 @@
                       VerticalScrollMode="Disabled"
                       HorizontalScrollMode="Disabled"
                       HorizontalAlignment="Stretch"
-                      HorizontalContentAlignment="Stretch"
+                      HorizontalContentAlignment="Left"
                       VerticalAlignment="Stretch"
                       VerticalContentAlignment="Stretch">
             <StackPanel x:Name="DashboardContent"
@@ -377,6 +380,7 @@
                                           AutomationProperties.AutomationId="ProviderWidgetVisibilityToggle"
                                           AutomationProperties.Name="{x:Bind ViewModel.SelectedCard.ProviderWidgetToggleName, Mode=OneWay}"
                                           IsChecked="{x:Bind ViewModel.SelectedCard.IsProviderWidgetVisible, Mode=OneWay}"
+                                          Visibility="{x:Bind ViewModel.SelectedCard.ProviderWidgetToggleVisibility, Mode=OneWay}"
                                           Tag="{x:Bind ViewModel.SelectedCard, Mode=OneWay}"
                                           VerticalAlignment="Center"
                                           MinWidth="76"

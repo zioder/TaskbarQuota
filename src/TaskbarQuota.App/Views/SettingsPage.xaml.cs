@@ -1,5 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
 using TaskbarQuota.Helpers;
 using TaskbarQuota.ViewModels;
 
@@ -29,8 +31,98 @@ namespace TaskbarQuota.Views
             PercentageModeCombo.SelectedIndex = WidgetSettingsService.CurrentPercentageMode == PercentageDisplayMode.Remaining ? 1 : 0;
             StartupToggle.IsOn = StartupSettingsService.IsEnabled;
             ApplyQuotaAlertSettingsToControls();
+            AutoHideUnavailableToggle.IsOn = WidgetSettingsService.AutoHideUnavailable;
+            ViewModel.ReloadProviders();
+            RebuildProviderSettings();
             VersionLabel.Text = $"Version {AppVersion.GetDisplayLabel()}";
+            Loaded += (_, _) =>
+            {
+                ViewModel.ReloadProviders();
+                RebuildProviderSettings();
+            };
             _isInitializing = false;
+        }
+
+        private void RebuildProviderSettings()
+        {
+            ProviderSettingsPanel.Children.Clear();
+            foreach (var item in ViewModel.Providers)
+            {
+                var card = new CommunityToolkit.WinUI.Controls.SettingsCard
+                {
+                    Margin = new Thickness(0, 0, 0, 4),
+                };
+
+                var header = new StackPanel { Spacing = 2 };
+                header.Children.Add(new TextBlock
+                {
+                    Text = item.DisplayName,
+                    Style = (Style)Application.Current.Resources["BodyStrongTextBlockStyle"],
+                });
+                header.Children.Add(new TextBlock
+                {
+                    Text = item.StatusText,
+                    Opacity = 0.65,
+                    Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+                });
+                card.Header = header;
+
+                var content = new StackPanel { Spacing = 8, MinWidth = 180 };
+                content.Children.Add(CreateProviderToggleRow("Dashboard", item, dashboard: true));
+                content.Children.Add(CreateProviderToggleRow("Widget", item, dashboard: false));
+                card.Content = content;
+
+                ProviderSettingsPanel.Children.Add(card);
+            }
+        }
+
+        private FrameworkElement CreateProviderToggleRow(string label, ProviderSettingItemViewModel item, bool dashboard)
+        {
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            row.Children.Add(new TextBlock
+            {
+                Text = label,
+                Width = 72,
+                VerticalAlignment = VerticalAlignment.Center,
+                Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+            });
+
+            var toggle = new ToggleSwitch
+            {
+                IsOn = dashboard ? item.IsDashboardVisible : item.IsWidgetVisible,
+                Tag = item,
+            };
+            toggle.Toggled += dashboard ? OnProviderDashboardToggled : OnProviderWidgetToggled;
+            row.Children.Add(toggle);
+            return row;
+        }
+
+        private void OnAutoHideUnavailableToggled(object sender, RoutedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            WidgetSettingsService.ApplyAutoHideUnavailable(AutoHideUnavailableToggle.IsOn);
+        }
+
+        private void OnProviderDashboardToggled(object sender, RoutedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+            if (sender is not ToggleSwitch toggle || toggle.Tag is not ProviderSettingItemViewModel item)
+                return;
+
+            ViewModel.ApplyDashboardVisibility(item, toggle.IsOn);
+        }
+
+        private void OnProviderWidgetToggled(object sender, RoutedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+            if (sender is not ToggleSwitch toggle || toggle.Tag is not ProviderSettingItemViewModel item)
+                return;
+
+            ViewModel.ApplyWidgetVisibility(item, toggle.IsOn);
         }
 
         private void OnThemeChanged(object sender, SelectionChangedEventArgs e)
