@@ -8,6 +8,8 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
+using TaskbarQuota;
+
 namespace TaskbarQuota.Usage.Providers
 {
     /// <summary>
@@ -26,9 +28,11 @@ namespace TaskbarQuota.Usage.Providers
         private const string SettingsUrl = "https://cli-chat-proxy.grok.com/v1/settings";
         private const string TokenAuthHeader = "xai-grok-cli";
         // The billing proxy frequently returns a transient "Timeout expired" on a cold call and
-        // succeeds on the next try, so retry several times with a short backoff between attempts.
-        private const int BillingRetries = 6;
-        private static readonly TimeSpan BillingRetryDelay = TimeSpan.FromMilliseconds(500);
+        // succeeds on the next try; the first call right after app launch can also hit a cold
+        // TLS/DNS stall or HttpClient timeout. Retry several times with a short backoff so the
+        // first automatic fetch recovers on its own instead of needing a manual refresh.
+        private const int BillingRetries = 8;
+        private static readonly TimeSpan BillingRetryDelay = TimeSpan.FromMilliseconds(600);
 
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
 
@@ -112,8 +116,24 @@ namespace TaskbarQuota.Usage.Providers
         private static async Task<BillingSnapshot> FetchBillingOnceAsync(string accessToken, CancellationToken ct)
         {
             using var request = NewGrokRequest(BillingUrl, accessToken);
-            using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
+            HttpResponseMessage response;
+            try
+            {
+                response = await Http.SendAsync(request, ct).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) when (!ct.IsCancellationRequested)
+            {
+                // HttpClient.Timeout elapsed (cold start), not a caller cancellation — retry.
+                throw new ProviderException(ProviderErrorKind.Timeout, "Grok billing request timed out.");
+            }
+            catch (HttpRequestException)
+            {
+                // Cold DNS/TLS/connection failure right after launch — transient, retry.
+                throw new ProviderException(ProviderErrorKind.Timeout, "Grok billing connection not ready.");
+            }
 
+            using (response)
+            {
             if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
                 throw new ProviderException(ProviderErrorKind.AuthRequired, "Grok token expired. Run `grok login`.");
 
@@ -129,6 +149,7 @@ namespace TaskbarQuota.Usage.Providers
 
             using var doc = JsonDocument.Parse(bodyText);
             return ParseBilling(doc.RootElement);
+            }
         }
 
         private static bool IsTransientBody(string body)
@@ -234,7 +255,12 @@ namespace TaskbarQuota.Usage.Providers
         {
             var path = GetAuthPath();
             if (!File.Exists(path))
-                throw new ProviderException(ProviderErrorKind.NotInstalled, "Grok auth.json not found. Run `grok login`.");
+            {
+                if (!ProviderInstallDetector.IsInstalled(ProviderId.Grok))
+                    throw new ProviderException(ProviderErrorKind.NotInstalled, ProviderInstallDetector.NotInstalledMessage(ProviderId.Grok));
+
+                throw new ProviderException(ProviderErrorKind.AuthRequired, "Grok auth.json not found. Run `grok login`.");
+            }
 
             using var doc = JsonDocument.Parse(File.ReadAllText(path));
             return ReadCredentials(doc.RootElement);
