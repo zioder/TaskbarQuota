@@ -64,8 +64,11 @@ namespace TaskbarQuota.Usage
             ProviderId.Copilot => ["GitHub Copilot ", "Copilot "],
             ProviderId.OpenCode => ["OpenCode "],
             ProviderId.OpenCodeGo => ["OpenCode "],
-            ProviderId.Antigravity => ["Google AI ", "Antigravity ", "Google "],
+            // Keep the Google tier name intact ("Google AI Pro/Plus/Ultra"); only drop the app prefix
+            // so "Antigravity Starter Quota" shows as "Starter Quota".
+            ProviderId.Antigravity => ["Antigravity "],
             ProviderId.Grok => ["Grok ", "xAI "],
+            ProviderId.Devin => ["Devin "],
             _ => Array.Empty<string>(),
         };
     }

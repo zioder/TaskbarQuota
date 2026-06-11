@@ -422,16 +422,29 @@ namespace TaskbarQuota.Controls
         private void ApplyAntigravityDisplay(UsageSnapshot usage)
         {
             var rows = new List<WidgetUsageRow>();
+            // Icon already conveys the model family (Gemini vs Non-Gemini), so the widget row only needs the window.
             if (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowPrimary))
             {
-                rows.Add(new WidgetUsageRow("Gemini", WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
+                rows.Add(new WidgetUsageRow("Weekly", WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
                     WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent), usage.Primary.ResetDescription,
                     GlyphData: ProviderGlyphs.Gemini));
             }
-            if (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowSecondary))
+            if (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowModelSpecific))
             {
-                rows.Add(new WidgetUsageRow("Non-Gemini", WidgetSettingsService.DisplayPercent(usage.Secondary?.UsedPercent ?? 0),
-                    WidgetSettingsService.FormatDisplayPercent(usage.Secondary?.UsedPercent ?? 0), usage.Secondary?.ResetDescription,
+                rows.Add(new WidgetUsageRow("5h", WidgetSettingsService.DisplayPercent(usage.ModelSpecific.UsedPercent),
+                    WidgetSettingsService.FormatDisplayPercent(usage.ModelSpecific.UsedPercent), usage.ModelSpecific.ResetDescription,
+                    GlyphData: ProviderGlyphs.Gemini));
+            }
+            if (usage.Secondary != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowSecondary))
+            {
+                rows.Add(new WidgetUsageRow("Weekly", WidgetSettingsService.DisplayPercent(usage.Secondary.UsedPercent),
+                    WidgetSettingsService.FormatDisplayPercent(usage.Secondary.UsedPercent), usage.Secondary.ResetDescription,
+                    GlyphData: ProviderGlyphs.GeminiBarred));
+            }
+            if (usage.Monthly != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowMonthly))
+            {
+                rows.Add(new WidgetUsageRow("5h", WidgetSettingsService.DisplayPercent(usage.Monthly.UsedPercent),
+                    WidgetSettingsService.FormatDisplayPercent(usage.Monthly.UsedPercent), usage.Monthly.ResetDescription,
                     GlyphData: ProviderGlyphs.GeminiBarred));
             }
             _rows = rows;
@@ -867,6 +880,7 @@ namespace TaskbarQuota.Controls
             {
                 parts.Add(additional.SpentUsd.ToString(CultureInfo.InvariantCulture));
                 parts.Add(additional.BudgetUsd?.ToString(CultureInfo.InvariantCulture) ?? string.Empty);
+                parts.Add(additional.IsCredits ? "credits" : "usd");
             }
             AppendRateWindow(parts, usage.Primary);
             AppendRateWindow(parts, usage.Secondary);

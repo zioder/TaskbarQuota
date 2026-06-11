@@ -153,6 +153,8 @@ namespace TaskbarQuota.ViewModels
         public bool IsProviderWidgetVisible { get; internal set; }
         public string ProviderWidgetToggleName { get; }
         public string ProviderWidgetToggleText => IsProviderWidgetVisible ? "Widget" : "Ignored";
+        public Visibility ProviderWidgetToggleVisibility => IsSetupRequired ? Visibility.Collapsed : Visibility.Visible;
+        public Visibility WidgetOptionsVisibility => IsSetupRequired ? Visibility.Collapsed : ContentVisibility;
 
         public IReadOnlyList<BarViewModel> Bars { get; }
         public Visibility BarsVisibility { get; }
@@ -172,6 +174,14 @@ namespace TaskbarQuota.ViewModels
         public Thickness CardBorderThickness { get; }
 
         public string UsageDashboardUrl { get; }
+
+        public bool IsSetupRequired { get; }
+        public Visibility SetupRequiredVisibility { get; }
+        public string SetupHint { get; }
+        public string? SetupUrl { get; }
+        public Visibility SetupUrlVisibility { get; }
+        public bool IsCompactSetupCard { get; }
+        public double SuggestedDetailWidth { get; }
 
         public ProviderCardViewModel(UsageResult r, bool isActive)
         {
@@ -212,8 +222,10 @@ namespace TaskbarQuota.ViewModels
                 }
                 else if (r.Id == ProviderId.Antigravity)
                 {
-                    bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowPrimary, "Gemini", u.Primary));
-                    if (u.Secondary != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowSecondary, "Non-Gemini", u.Secondary));
+                    bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowPrimary, "Gemini Weekly", u.Primary));
+                    if (u.ModelSpecific != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowModelSpecific, "Gemini 5h", u.ModelSpecific));
+                    if (u.Secondary != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowSecondary, "Non-Gemini Weekly", u.Secondary));
+                    if (u.Monthly != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowMonthly, "Non-Gemini 5h", u.Monthly));
                     CostText = u.Cost != null ? $"{u.Cost.Label}: {u.Cost.Display}" : string.Empty;
                 }
                 else
@@ -286,7 +298,8 @@ namespace TaskbarQuota.ViewModels
             CostVisibility = string.IsNullOrEmpty(CostText) ? Visibility.Collapsed : Visibility.Visible;
             CreditVisibility = string.IsNullOrEmpty(CreditLeftText) ? Visibility.Collapsed : Visibility.Visible;
             SourceVisibility = string.IsNullOrEmpty(SourceText) ? Visibility.Collapsed : Visibility.Visible;
-            ErrorVisibility = ok ? Visibility.Collapsed : Visibility.Visible;
+            IsSetupRequired = !ok && r.ErrorKind == ProviderErrorKind.NotInstalled;
+            ErrorVisibility = ok || IsSetupRequired ? Visibility.Collapsed : Visibility.Visible;
             ContentVisibility = ok ? Visibility.Visible : Visibility.Collapsed;
 
             AvatarBrush = isActive ? Ui.Accent : new SolidColorBrush(Color.FromArgb(40, 128, 128, 128));
@@ -295,6 +308,12 @@ namespace TaskbarQuota.ViewModels
             CardBorderThickness = new Thickness(isActive ? 1.5 : 1);
 
             UsageDashboardUrl = ResolveLinkUrl(r, u => u.UsageDashboardUrl, DefaultUsageDashboardUrl);
+            SetupHint = IsSetupRequired ? ProviderSetupInfo.Hint(r.Id) : string.Empty;
+            SetupUrl = IsSetupRequired ? ProviderSetupInfo.SetupUrl(r.Id) : null;
+            SetupUrlVisibility = string.IsNullOrEmpty(SetupUrl) ? Visibility.Collapsed : Visibility.Visible;
+            IsCompactSetupCard = IsSetupRequired;
+            SetupRequiredVisibility = IsSetupRequired ? Visibility.Visible : Visibility.Collapsed;
+            SuggestedDetailWidth = DashboardLayoutMetrics.EstimateDetailWidth(this);
         }
 
         internal void RefreshVisibility()
@@ -329,6 +348,7 @@ namespace TaskbarQuota.ViewModels
             ProviderId.Copilot => "https://github.com/settings/billing/ai_usage",
             ProviderId.Antigravity => "https://aistudio.google.com/usage",
             ProviderId.Grok => "https://grok.com/?_s=usage",
+            ProviderId.Devin => "https://app.devin.ai",
             _ => string.Empty,
         };
 

@@ -9,6 +9,8 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
+using TaskbarQuota;
+
 namespace TaskbarQuota.Usage.Providers
 {
     /// <summary>
@@ -40,24 +42,37 @@ namespace TaskbarQuota.Usage.Providers
         public async Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
         {
             var info = DetectProcessInfo();
-            int apiPort = await FindApiPort(info, ct).ConfigureAwait(false);
+            var endpoint = await FindApiEndpoint(info, ct).ConfigureAwait(false);
 
-            var url = $"https://127.0.0.1:{apiPort}/exa.language_server_pb.LanguageServerService/GetUserStatus";
-            var body = JsonSerializer.Serialize(new
+            var baseUrl = $"{endpoint.Scheme}://127.0.0.1:{endpoint.Port}/exa.language_server_pb.LanguageServerService";
+            var meta = JsonSerializer.Serialize(new
             {
                 metadata = new { ideName = "antigravity", extensionName = "antigravity", ideVersion = "unknown", locale = "en" }
             });
 
-            string csrf = info.ExtensionServerCsrfToken ?? info.CsrfToken;
-            var json = await PostStatus(url, body, csrf, ct).ConfigureAwait(false);
-            if (json == null && info.ExtensionServerCsrfToken != null)
-                json = await PostStatus(url, body, info.CsrfToken, ct).ConfigureAwait(false); // retry with LS token
-
-            if (json == null)
+            // GetUserStatus carries the plan name + email; RetrieveUserQuotaSummary carries the
+            // plan-aware quota groups (weekly, plus a 5-hour limit on Plus/Pro/Ultra tiers).
+            var statusJson = await CallWithCsrf($"{baseUrl}/GetUserStatus", meta, info, ct).ConfigureAwait(false);
+            if (statusJson == null)
                 throw new ProviderException(ProviderErrorKind.Other, "Antigravity API request failed.");
 
-            using var doc = JsonDocument.Parse(json);
-            return new ProviderFetchResult(ParseUserStatus(doc.RootElement), "local");
+            var summaryJson = await CallWithCsrf($"{baseUrl}/RetrieveUserQuotaSummary", "{}", info, ct).ConfigureAwait(false);
+
+            using var statusDoc = JsonDocument.Parse(statusJson);
+            var snapshot = (summaryJson != null && TryParseQuotaSummary(summaryJson, out var fromSummary))
+                ? fromSummary
+                : ParseUserStatus(statusDoc.RootElement); // legacy per-model fallback
+            ApplyPlanInfo(statusDoc.RootElement, snapshot);
+            return new ProviderFetchResult(snapshot, info.IsCli ? "local-cli" : "local");
+        }
+
+        // Prefer the extension-server token, falling back to the language-server token on rejection.
+        private static async Task<string?> CallWithCsrf(string url, string body, ProcessInfo info, CancellationToken ct)
+        {
+            var json = await PostStatus(url, body, info.ExtensionServerCsrfToken ?? info.CsrfToken, ct).ConfigureAwait(false);
+            if (json == null && info.ExtensionServerCsrfToken != null)
+                json = await PostStatus(url, body, info.CsrfToken, ct).ConfigureAwait(false);
+            return json;
         }
 
         private static async Task<string?> PostStatus(string url, string body, string csrf, CancellationToken ct)
@@ -131,13 +146,84 @@ namespace TaskbarQuota.Usage.Providers
                 idx++;
             }
 
-            if (us.TryGetProperty("planStatus", out var ps) && ps.TryGetProperty("planInfo", out var pi))
-            {
-                string? plan = (pi.TryGetProperty("planDisplayName", out var pdn) ? pdn.GetString() : null)
-                            ?? (pi.TryGetProperty("planName", out var pn) ? pn.GetString() : null);
-                if (!string.IsNullOrEmpty(plan)) snapshot.LoginMethod = plan;
-            }
             return snapshot;
+        }
+
+        /// <summary>
+        /// Parse RetrieveUserQuotaSummary into Gemini / non-Gemini weekly (+ 5-hour) windows.
+        /// Free / starter tiers expose only a weekly bucket per group; Plus/Pro/Ultra add a 5-hour bucket.
+        /// </summary>
+        internal static bool TryParseQuotaSummary(string json, out UsageSnapshot snapshot)
+        {
+            snapshot = null!;
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("response", out var resp) ||
+                !resp.TryGetProperty("groups", out var groups) || groups.ValueKind != JsonValueKind.Array)
+                return false;
+
+            RateWindow? geminiWeekly = null, geminiFiveHour = null, otherWeekly = null, otherFiveHour = null;
+            bool any = false;
+            foreach (var g in groups.EnumerateArray())
+            {
+                string name = g.TryGetProperty("displayName", out var dn) ? dn.GetString() ?? "" : "";
+                bool isGemini = name.Contains("Gemini", StringComparison.OrdinalIgnoreCase);
+                if (!g.TryGetProperty("buckets", out var buckets) || buckets.ValueKind != JsonValueKind.Array) continue;
+                foreach (var b in buckets.EnumerateArray())
+                {
+                    var window = RateWindowFromQuota(b); // buckets carry remainingFraction + resetTime like quotaInfo
+                    any = true;
+                    if (IsFiveHourBucket(b))
+                    {
+                        if (isGemini) geminiFiveHour = window; else otherFiveHour = window;
+                    }
+                    else
+                    {
+                        if (isGemini) geminiWeekly = window; else otherWeekly = window;
+                    }
+                }
+            }
+
+            if (!any) return false;
+
+            snapshot = new UsageSnapshot(geminiWeekly ?? new RateWindow(0))
+            {
+                ModelSpecific = geminiFiveHour,
+                Secondary = otherWeekly,
+                Monthly = otherFiveHour,
+            };
+            return true;
+        }
+
+        private static bool IsFiveHourBucket(JsonElement bucket)
+        {
+            string window = bucket.TryGetProperty("window", out var w) ? w.GetString() ?? "" : "";
+            string id = bucket.TryGetProperty("bucketId", out var i) ? i.GetString() ?? "" : "";
+            string display = bucket.TryGetProperty("displayName", out var d) ? d.GetString() ?? "" : "";
+            var s = $"{window} {id} {display}".ToLowerInvariant();
+            return s.Contains("hour") || s.Contains("5h") || s.Contains("five");
+        }
+
+        private static void ApplyPlanInfo(JsonElement root, UsageSnapshot snapshot)
+        {
+            if (!root.TryGetProperty("userStatus", out var us) || us.ValueKind != JsonValueKind.Object)
+                return;
+
+            if (us.TryGetProperty("email", out var em) && em.ValueKind == JsonValueKind.String)
+                snapshot.Email = em.GetString();
+
+            // userTier.name is the real account plan ("Antigravity Starter Quota", "Google AI Pro/Plus/Ultra").
+            // planInfo only carries the underlying Codeium teams tier ("Pro") and is a last-resort fallback.
+            string? plan = us.TryGetProperty("userTier", out var ut) && ut.ValueKind == JsonValueKind.Object
+                && ut.TryGetProperty("name", out var tn) ? tn.GetString() : null;
+
+            if (string.IsNullOrEmpty(plan)
+                && us.TryGetProperty("planStatus", out var ps) && ps.TryGetProperty("planInfo", out var pi))
+            {
+                plan = (pi.TryGetProperty("planDisplayName", out var pdn) ? pdn.GetString() : null)
+                    ?? (pi.TryGetProperty("planName", out var pn) ? pn.GetString() : null);
+            }
+
+            if (!string.IsNullOrEmpty(plan)) snapshot.LoginMethod = plan;
         }
 
         private static bool IsGemini(string label)
@@ -157,55 +243,117 @@ namespace TaskbarQuota.Usage.Providers
             return new RateWindow((1.0 - remaining) * 100.0, null, resetAt, CodexProvider.FormatResetCountdown(resetAt));
         }
 
-        private sealed record ProcessInfo(string CsrfToken, string? ExtensionServerCsrfToken, int ExtensionPort, int? Pid);
+        internal sealed record ProcessInfo(
+            string CsrfToken,
+            string? ExtensionServerCsrfToken,
+            int ExtensionPort,
+            int? Pid,
+            bool IsCli);
 
-        private static ProcessInfo DetectProcessInfo()
+        private readonly record struct ApiEndpoint(string Scheme, int Port);
+
+        internal static ProcessInfo DetectProcessInfo()
         {
             try
             {
-                // Match both the older language_server_windows and the current language_server.exe.
+                ProcessInfo? tokenlessIde = null;
+                // Match the IDE language server and the terminal-only agy CLI server.
                 using var searcher = new ManagementObjectSearcher(
-                    "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name LIKE '%language_server%'");
+                    "SELECT ProcessId, Name, CommandLine FROM Win32_Process WHERE Name LIKE '%language_server%' OR Name = 'agy.exe' OR Name = 'antigravity-cli.exe' OR Name = 'antigravity_cli.exe'");
                 foreach (ManagementObject mo in searcher.Get())
                 {
+                    var name = mo["Name"] as string ?? "";
                     var cmd = mo["CommandLine"] as string;
-                    if (cmd == null || !cmd.Contains("--csrf_token")) continue;
+                    if (string.IsNullOrWhiteSpace(cmd)) continue;
+
+                    var kind = ClassifyProcess(name, cmd);
+                    if (kind == ProcessKind.None) continue;
 
                     var csrf = CsrfRe.Match(cmd);
-                    if (!csrf.Success) continue;
+                    if (!csrf.Success && kind == ProcessKind.Ide)
+                    {
+                        tokenlessIde ??= new ProcessInfo("", null, 0, TryReadPid(mo), false);
+                        continue;
+                    }
 
-                    // --extension_server_port is optional in current builds (HTTPS port is random);
-                    // we rely on the process's own listening ports in FindApiPort.
                     var port = PortRe.Match(cmd);
                     int extPort = port.Success ? int.Parse(port.Groups[1].Value) : 0;
 
                     var extCsrf = ExtCsrfRe.Match(cmd);
-                    int? pid = int.TryParse(mo["ProcessId"]?.ToString(), out var p) ? p : null;
-                    return new ProcessInfo(csrf.Groups[1].Value,
+                    return new ProcessInfo(
+                        csrf.Success ? csrf.Groups[1].Value : "",
                         extCsrf.Success ? extCsrf.Groups[1].Value : null,
-                        extPort, pid);
+                        extPort,
+                        TryReadPid(mo),
+                        kind == ProcessKind.Cli);
                 }
+
+                if (tokenlessIde != null)
+                    throw new ProviderException(ProviderErrorKind.NotRunning, "Antigravity language server is missing its CSRF token. Restart Antigravity and retry.");
+            }
+            catch (ProviderException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
-                throw new ProviderException(ProviderErrorKind.NotInstalled, $"Antigravity detection failed: {ex.Message}");
+                throw InstallStateException($"Antigravity detection failed: {ex.Message}");
             }
-            throw new ProviderException(ProviderErrorKind.NotInstalled, "Antigravity language server not running.");
+
+            throw InstallStateException("Antigravity language server not running.");
         }
 
-        private static async Task<int> FindApiPort(ProcessInfo info, CancellationToken ct)
+        private enum ProcessKind { None, Ide, Cli }
+
+        internal static bool IsAntigravityCliProcess(string name, string commandLine)
+            => ClassifyProcess(name, commandLine) == ProcessKind.Cli;
+
+        private static ProcessKind ClassifyProcess(string name, string commandLine)
+        {
+            var lowerName = name.ToLowerInvariant();
+            var lower = commandLine.ToLowerInvariant();
+            if (lowerName.Contains("language_server") &&
+                ((lower.Contains("--app_data_dir") && lower.Contains("antigravity")) ||
+                 lower.Contains("\\antigravity\\") ||
+                 lower.Contains("/antigravity/")))
+            {
+                return ProcessKind.Ide;
+            }
+
+            if (lowerName is "agy.exe" or "antigravity-cli.exe" or "antigravity_cli.exe")
+                return ProcessKind.Cli;
+
+            if (Regex.IsMatch(lower, @"(^|[\\/])(?:agy|antigravity-cli|antigravity_cli)(?:\.exe)?(\s|$)", RegexOptions.IgnoreCase))
+                return ProcessKind.Cli;
+
+            return ProcessKind.None;
+        }
+
+        private static int? TryReadPid(ManagementObject mo)
+            => int.TryParse(mo["ProcessId"]?.ToString(), out var p) ? p : null;
+
+        private static ProviderException InstallStateException(string runtimeDetail)
+        {
+            if (ProviderInstallDetector.IsInstalled(ProviderId.Antigravity))
+                return new ProviderException(ProviderErrorKind.NotRunning, ProviderInstallDetector.WaitingMessage(ProviderId.Antigravity));
+
+            return new ProviderException(ProviderErrorKind.NotInstalled, ProviderInstallDetector.NotInstalledMessage(ProviderId.Antigravity));
+        }
+
+        private static async Task<ApiEndpoint> FindApiEndpoint(ProcessInfo info, CancellationToken ct)
         {
             var candidates = new List<int>();
             if (info.Pid is int pid) candidates.AddRange(ListeningPortsForPid(pid));
-            if (info.ExtensionPort > 0)
+            if (!info.IsCli && info.ExtensionPort > 0)
                 for (int off = 0; off < 20; off++) candidates.Add(info.ExtensionPort + off);
-            candidates.AddRange(new[] { 53835, 53836, 53837, 53838, 53845, 53849 });
+            if (!info.IsCli)
+                candidates.AddRange(new[] { 53835, 53836, 53837, 53838, 53845, 53849 });
 
             var seen = new HashSet<int>();
             var ports = candidates.Where(port => seen.Add(port)).ToArray();
             var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             var probes = ports
-                .Select(port => ProbePortResult(port, linkedCts.Token))
+                .Select(port => ProbeEndpointResult(port, info.CsrfToken, linkedCts.Token))
                 .ToList();
 
             while (probes.Count > 0)
@@ -214,11 +362,11 @@ namespace TaskbarQuota.Usage.Providers
                 probes.Remove(completed);
 
                 var result = await completed.ConfigureAwait(false);
-                if (result.Available)
+                if (result is ApiEndpoint found)
                 {
                     linkedCts.Cancel();
                     _ = Task.WhenAll(probes).ContinueWith(_ => linkedCts.Dispose(), TaskScheduler.Default);
-                    return result.Port;
+                    return found;
                 }
             }
 
@@ -226,21 +374,28 @@ namespace TaskbarQuota.Usage.Providers
             throw new ProviderException(ProviderErrorKind.Other, "Could not find Antigravity API port.");
         }
 
-        private static async Task<(int Port, bool Available)> ProbePortResult(int port, CancellationToken ct)
-            => (port, await ProbePort(port, ct).ConfigureAwait(false));
-
-        private static async Task<bool> ProbePort(int port, CancellationToken ct)
+        private static async Task<ApiEndpoint?> ProbeEndpointResult(int port, string csrf, CancellationToken ct)
         {
-            var url = $"https://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/GetUnleashData";
+            if (await ProbePort("https", port, csrf, ct).ConfigureAwait(false))
+                return new ApiEndpoint("https", port);
+            if (await ProbePort("http", port, csrf, ct).ConfigureAwait(false))
+                return new ApiEndpoint("http", port);
+            return null;
+        }
+
+        private static async Task<bool> ProbePort(string scheme, int port, string csrf, CancellationToken ct)
+        {
+            var url = $"{scheme}://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/GetUnleashData";
             using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent("{}", Encoding.UTF8, "application/json") };
             req.Headers.TryAddWithoutValidation("Connect-Protocol-Version", "1");
+            req.Headers.TryAddWithoutValidation("X-Codeium-Csrf-Token", csrf);
             try
             {
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 cts.CancelAfter(TimeSpan.FromSeconds(2));
                 using var resp = await Local.SendAsync(req, cts.Token).ConfigureAwait(false);
                 int code = (int)resp.StatusCode;
-                return code == 200 || code == 401;
+                return code == 200 || code == 400 || code == 401 || code == 403;
             }
             catch { return false; }
         }
