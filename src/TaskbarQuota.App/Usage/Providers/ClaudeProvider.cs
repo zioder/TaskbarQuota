@@ -9,6 +9,8 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
+using TaskbarQuota;
+
 namespace TaskbarQuota.Usage.Providers
 {
     /// <summary>
@@ -132,7 +134,12 @@ namespace TaskbarQuota.Usage.Providers
 
             var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", ".credentials.json");
             if (!File.Exists(path))
-                throw new ProviderException(ProviderErrorKind.AuthRequired, "Claude credentials not found. Run `claude` to authenticate.");
+            {
+                if (!ProviderInstallDetector.IsInstalled(ProviderId.Claude))
+                    throw new ProviderException(ProviderErrorKind.NotInstalled, ProviderInstallDetector.NotInstalledMessage(ProviderId.Claude));
+
+                throw new ProviderException(ProviderErrorKind.NotRunning, ProviderInstallDetector.WaitingMessage(ProviderId.Claude));
+            }
 
             using var doc = JsonDocument.Parse(File.ReadAllText(path));
             return ReadCredentials(doc.RootElement);
