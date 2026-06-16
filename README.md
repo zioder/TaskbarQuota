@@ -11,9 +11,13 @@
   <a href="https://apps.microsoft.com/detail/9n3kl49vfpvn?hl=en-US&amp;gl=US&amp;mode=direct">
     <img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200" alt="Get TaskbarQuota from Microsoft Store" />
   </a>
-  <a href="https://github.com/zioder/TaskbarQuota/releases/latest">
-    <img src="https://img.shields.io/github/v/release/zioder/TaskbarQuota?label=Download%20from%20GitHub&logo=github&logoColor=white&color=24292f&labelColor=57606a" height="32" alt="Download from GitHub Releases" />
-  </a>
+<a href="https://github.com/zioder/TaskbarQuota/releases/latest">
+  <img
+    src="https://img.shields.io/badge/Download%20from-GitHub-24292f?logo=github&logoColor=white&labelColor=57606a"
+    height="32"
+    alt="Download from GitHub Releases"
+  />
+</a>
 </p>
 
 <p align="center">
