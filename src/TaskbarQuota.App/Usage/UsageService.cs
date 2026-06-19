@@ -191,6 +191,7 @@ namespace TaskbarQuota.Usage
                 || left.Email != right.Email
                 || !SameCost(left.Cost, right.Cost)
                 || !SameAdditional(left.AdditionalUsage, right.AdditionalUsage)
+                || !SameResetCredits(left.ResetCredits, right.ResetCredits)
                 || left.UsageDashboardUrl != right.UsageDashboardUrl
                 || left.ExtraRateWindows.Count != right.ExtraRateWindows.Count)
                 return false;
@@ -241,6 +242,24 @@ namespace TaskbarQuota.Usage
                     && NullableNearlyEqual(l.BudgetUsd, r.BudgetUsd),
                 _ => false,
             };
+
+        private static bool SameResetCredits(ResetCreditsSnapshot? left, ResetCreditsSnapshot? right)
+        {
+            if (left is null || right is null)
+                return left is null && right is null;
+            if (left.AvailableCount != right.AvailableCount || left.Credits.Count != right.Credits.Count)
+                return false;
+
+            for (int i = 0; i < left.Credits.Count; i++)
+            {
+                var l = left.Credits[i];
+                var r = right.Credits[i];
+                if (l.Status != r.Status || l.GrantedAt != r.GrantedAt || l.ExpiresAt != r.ExpiresAt)
+                    return false;
+            }
+
+            return true;
+        }
 
         private static bool NullableNearlyEqual(double? left, double? right)
             => (left, right) switch

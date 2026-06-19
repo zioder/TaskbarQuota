@@ -106,6 +106,51 @@ namespace TaskbarQuota.Usage
             => IsCredits ? $"{value:0}" : $"${value:0.00}";
     }
 
+    /// <summary>Codex rate-limit reset credits granted by the Codex backend.</summary>
+    public sealed class ResetCreditsSnapshot
+    {
+        public int AvailableCount { get; }
+        public IReadOnlyList<ResetCreditGrant> Credits { get; }
+
+        public ResetCreditsSnapshot(int availableCount, IReadOnlyList<ResetCreditGrant> credits)
+        {
+            AvailableCount = Math.Max(0, availableCount);
+            Credits = credits;
+        }
+
+        public DateTimeOffset? EarliestExpiresAt
+        {
+            get
+            {
+                DateTimeOffset? earliest = null;
+                foreach (var credit in Credits)
+                {
+                    if (credit.ExpiresAt is not { } expiresAt)
+                        continue;
+
+                    if (earliest is null || expiresAt < earliest)
+                        earliest = expiresAt;
+                }
+
+                return earliest;
+            }
+        }
+    }
+
+    public sealed class ResetCreditGrant
+    {
+        public string Status { get; }
+        public DateTimeOffset? GrantedAt { get; }
+        public DateTimeOffset? ExpiresAt { get; }
+
+        public ResetCreditGrant(string status, DateTimeOffset? grantedAt, DateTimeOffset? expiresAt)
+        {
+            Status = status;
+            GrantedAt = grantedAt;
+            ExpiresAt = expiresAt;
+        }
+    }
+
     /// <summary>Normalized usage data for a provider (session / weekly / model-specific windows).</summary>
     public sealed class UsageSnapshot
     {
@@ -118,6 +163,7 @@ namespace TaskbarQuota.Usage
         public string? Email { get; set; }
         public CostSnapshot? Cost { get; set; }
         public AdditionalUsageSnapshot? AdditionalUsage { get; set; }
+        public ResetCreditsSnapshot? ResetCredits { get; set; }
         /// <summary>Provider-specific usage dashboard link when known (e.g. OpenCode workspace /go or /usage).</summary>
         public string? UsageDashboardUrl { get; set; }
 

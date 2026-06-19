@@ -114,6 +114,29 @@ namespace TaskbarQuota.ViewModels
         }
     }
 
+    public sealed class ResetCreditViewModel
+    {
+        public string TokenTitle { get; }
+        public string GrantedText { get; }
+        public string ExpiresText { get; }
+
+        public ResetCreditViewModel(int index, ResetCreditGrant credit)
+        {
+            TokenTitle = $"Reset {index}";
+            GrantedText = FormatNullableLocalDateTime(credit.GrantedAt);
+            ExpiresText = FormatNullableLocalDateTime(credit.ExpiresAt);
+        }
+
+        private static string FormatNullableLocalDateTime(DateTimeOffset? timestamp)
+            => timestamp is { } value ? FormatLocalDateTime(value) : "Unknown";
+
+        private static string FormatLocalDateTime(DateTimeOffset timestamp)
+        {
+            var local = timestamp.ToLocalTime();
+            return $"{local:MMM d, yyyy 'at' h:mm tt}";
+        }
+    }
+
     /// <summary>Everything the dashboard card template binds to, computed once from a fetch result.</summary>
     public sealed class ProviderCardViewModel
     {
@@ -162,11 +185,19 @@ namespace TaskbarQuota.ViewModels
         public Visibility TextMetricsVisibility { get; }
         public WidgetRowToggleViewModel CreditWidgetToggle { get; }
         public WidgetRowToggleViewModel AdditionalUsageWidgetToggle { get; }
+        public WidgetRowToggleViewModel ResetCreditsWidgetToggle { get; }
 
         public string AdditionalUsageStatusText { get; }
         public string AdditionalUsageSpendText { get; }
         public Visibility AdditionalUsageVisibility { get; }
         public double AdditionalUsageOpacity { get; }
+
+        public string ResetCreditsCountText { get; }
+        public string ResetCreditsGrantedText { get; }
+        public string ResetCreditsExpiresText { get; }
+        public IReadOnlyList<ResetCreditViewModel> ResetCreditItems { get; }
+        public Visibility ResetCreditsVisibility { get; }
+        public double ResetCreditsOpacity { get; }
 
         public Brush AvatarBrush { get; }
         public Brush AvatarForeground { get; }
@@ -182,6 +213,7 @@ namespace TaskbarQuota.ViewModels
         public Visibility SetupUrlVisibility { get; }
         public bool IsCompactSetupCard { get; }
         public double SuggestedDetailWidth { get; }
+        public double SuggestedDetailHeight { get; }
 
         public ProviderCardViewModel(UsageResult r, bool isActive)
         {
@@ -195,10 +227,16 @@ namespace TaskbarQuota.ViewModels
 
             var bars = new List<BarViewModel>();
             var textMetrics = new List<TextMetricViewModel>();
+            var resetCreditItems = new List<ResetCreditViewModel>();
             AdditionalUsageStatusText = string.Empty;
             AdditionalUsageSpendText = string.Empty;
             AdditionalUsageVisibility = Visibility.Collapsed;
             AdditionalUsageOpacity = 1.0;
+            ResetCreditsCountText = string.Empty;
+            ResetCreditsGrantedText = string.Empty;
+            ResetCreditsExpiresText = string.Empty;
+            ResetCreditsVisibility = Visibility.Collapsed;
+            ResetCreditsOpacity = 1.0;
             CreditLeftText = string.Empty;
             CreditLimitText = string.Empty;
             CreditPercent = 0;
@@ -206,6 +244,7 @@ namespace TaskbarQuota.ViewModels
             CreditOpacity = 1.0;
             CreditWidgetToggle = new WidgetRowToggleViewModel(r.Id, new WidgetRowOption(WidgetSettingsService.RowCredits, "Credits"));
             AdditionalUsageWidgetToggle = new WidgetRowToggleViewModel(r.Id, new WidgetRowOption(WidgetSettingsService.RowAdditionalUsage, "Additional usage"));
+            ResetCreditsWidgetToggle = new WidgetRowToggleViewModel(r.Id, new WidgetRowOption(WidgetSettingsService.RowResetCredits, "Reset credits"));
             if (r.Ok && r.Fetch is { } f)
             {
                 var u = f.Usage;
@@ -265,6 +304,17 @@ namespace TaskbarQuota.ViewModels
                         AdditionalUsageVisibility = Visibility.Visible;
                         AdditionalUsageOpacity = muted ? 0.55 : 1.0;
                     }
+
+                    if (r.Id == ProviderId.Codex && u.ResetCredits is { } resetCredits)
+                    {
+                        ResetCreditsCountText = FormatAvailableResetCredits(resetCredits.AvailableCount);
+                        ResetCreditsGrantedText = FormatResetCreditTimes(resetCredits.Credits, static c => c.GrantedAt);
+                        ResetCreditsExpiresText = FormatResetCreditTimes(resetCredits.Credits, static c => c.ExpiresAt);
+                        for (int i = 0; i < resetCredits.Credits.Count; i++)
+                            resetCreditItems.Add(new ResetCreditViewModel(i + 1, resetCredits.Credits[i]));
+                        ResetCreditsVisibility = Visibility.Visible;
+                        ResetCreditsOpacity = resetCredits.AvailableCount > 0 ? 1.0 : 0.55;
+                    }
                 }
 
                 Plan = PlanDisplayNames.ForTitle(r.Id, r.DisplayName, u.LoginMethod);
@@ -283,6 +333,7 @@ namespace TaskbarQuota.ViewModels
             BarsVisibility = bars.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
             TextMetrics = textMetrics;
             TextMetricsVisibility = textMetrics.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            ResetCreditItems = resetCreditItems;
 
             bool ok = r.Ok;
             IsFixable = !ok && r.Id is ProviderId.Copilot or ProviderId.Cursor or ProviderId.OpenCode or ProviderId.OpenCodeGo;
@@ -314,6 +365,7 @@ namespace TaskbarQuota.ViewModels
             IsCompactSetupCard = IsSetupRequired;
             SetupRequiredVisibility = IsSetupRequired ? Visibility.Visible : Visibility.Collapsed;
             SuggestedDetailWidth = DashboardLayoutMetrics.EstimateDetailWidth(this);
+            SuggestedDetailHeight = DashboardLayoutMetrics.EstimateDetailHeight(this);
         }
 
         internal void RefreshVisibility()
@@ -323,6 +375,7 @@ namespace TaskbarQuota.ViewModels
             foreach (var metric in TextMetrics) metric.RefreshVisibility();
             CreditWidgetToggle.RefreshVisibility();
             AdditionalUsageWidgetToggle.RefreshVisibility();
+            ResetCreditsWidgetToggle.RefreshVisibility();
         }
 
         private static string ResolveLinkUrl(
@@ -364,6 +417,36 @@ namespace TaskbarQuota.ViewModels
             }
 
             return resetCountdown is { Length: > 0 } countdown ? $"resets in {countdown}" : string.Empty;
+        }
+
+        private static string FormatAvailableResetCredits(int count)
+            => count == 1 ? "1 available" : $"{count.ToString("N0", CultureInfo.CurrentCulture)} available";
+
+        private static string FormatResetCreditTimes(IReadOnlyList<ResetCreditGrant> credits, Func<ResetCreditGrant, DateTimeOffset?> selector)
+        {
+            var values = new List<string>();
+            int datedCount = 0;
+            foreach (var credit in credits)
+            {
+                if (selector(credit) is not DateTimeOffset timestamp)
+                    continue;
+
+                datedCount++;
+                if (values.Count < 3)
+                    values.Add(FormatLocalDateTime(timestamp));
+            }
+
+            if (values.Count == 0)
+                return "—";
+            if (datedCount > values.Count)
+                values.Add($"+{datedCount - values.Count} more");
+            return string.Join("; ", values);
+        }
+
+        private static string FormatLocalDateTime(DateTimeOffset timestamp)
+        {
+            var local = timestamp.ToLocalTime();
+            return $"{local:MMM d h:mm tt}";
         }
 
         private static string ModelSpecificLabel(ProviderId id) => id switch

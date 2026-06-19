@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Navigation;
 using TaskbarQuota.Usage;
 using TaskbarQuota.ViewModels;
@@ -17,6 +18,10 @@ namespace TaskbarQuota.Views
         private readonly bool _ownsViewModel;
         private static bool _suppressWidgetEvents;
         private bool _useCompactLayout;
+        private bool _heightReportQueued;
+        private Storyboard? _selectionStoryboard;
+        private TranslateTransform? _dashboardTranslate;
+        private ProviderId? _lastAnimatedProvider;
 
         public DashboardViewModel ViewModel { get; }
         public static DashboardViewModel? SharedViewModel { get; set; }
@@ -32,17 +37,25 @@ namespace TaskbarQuota.Views
             ViewModel = SharedViewModel ?? new DashboardViewModel(DispatcherQueue);
             _ownsViewModel = SharedViewModel is null;
             InitializeComponent();
+            _dashboardTranslate = new TranslateTransform();
+            DashboardContent.RenderTransform = _dashboardTranslate;
             ViewModel.ScrollToTopRequested += OnScrollToTopRequested;
+            ViewModel.SelectedCardChanged += OnSelectedCardChanged;
             ViewModel.DetailContentWidthChanged += OnDetailContentWidthChanged;
+            DashboardContent.SizeChanged += DashboardContent_SizeChanged;
             Loaded += (_, _) =>
             {
+                _lastAnimatedProvider = ViewModel.SelectedCard?.ProviderId;
                 ApplyLayoutState();
+                QueueMeasuredHeightReport();
                 DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => _ = ViewModel.LoadAsync());
             };
             Unloaded += (_, _) =>
             {
                 ViewModel.ScrollToTopRequested -= OnScrollToTopRequested;
+                ViewModel.SelectedCardChanged -= OnSelectedCardChanged;
                 ViewModel.DetailContentWidthChanged -= OnDetailContentWidthChanged;
+                DashboardContent.SizeChanged -= DashboardContent_SizeChanged;
                 if (_ownsViewModel)
                     ViewModel.Dispose();
             };
@@ -59,7 +72,10 @@ namespace TaskbarQuota.Views
         }
 
         private void OnDetailContentWidthChanged(double width)
-            => ApplyLayoutState();
+        {
+            ApplyLayoutState();
+            QueueMeasuredHeightReport();
+        }
 
         private void ApplyLayoutState()
         {
@@ -75,6 +91,71 @@ namespace TaskbarQuota.Views
                 DashboardContent.HorizontalAlignment = HorizontalAlignment.Stretch;
                 MainScrollViewer.HorizontalContentAlignment = HorizontalAlignment.Stretch;
             }
+        }
+
+        private void DashboardContent_SizeChanged(object sender, SizeChangedEventArgs e)
+            => QueueMeasuredHeightReport();
+
+        private void OnSelectedCardChanged(ProviderCardViewModel? card)
+        {
+            QueueMeasuredHeightReport();
+            if (card is null)
+                return;
+
+            if (_lastAnimatedProvider == card.ProviderId)
+                return;
+
+            bool shouldAnimate = _lastAnimatedProvider is not null;
+            _lastAnimatedProvider = card.ProviderId;
+            if (shouldAnimate)
+                AnimateProviderSelection();
+        }
+
+        private void AnimateProviderSelection()
+        {
+            if (_dashboardTranslate is null)
+                return;
+
+            _selectionStoryboard?.Stop();
+            DashboardContent.Opacity = 0.86;
+            _dashboardTranslate.Y = 8;
+
+            _selectionStoryboard = new Storyboard();
+            _selectionStoryboard.Children.Add(CreateDoubleAnimation(DashboardContent, "Opacity", 1, 180));
+            _selectionStoryboard.Children.Add(CreateDoubleAnimation(_dashboardTranslate, "Y", 0, 220));
+            _selectionStoryboard.Begin();
+        }
+
+        private static DoubleAnimation CreateDoubleAnimation(
+            DependencyObject target,
+            string property,
+            double to,
+            int milliseconds)
+        {
+            var animation = new DoubleAnimation
+            {
+                To = to,
+                Duration = TimeSpan.FromMilliseconds(milliseconds),
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                EnableDependentAnimation = true,
+            };
+            Storyboard.SetTarget(animation, target);
+            Storyboard.SetTargetProperty(animation, property);
+            return animation;
+        }
+
+        private void QueueMeasuredHeightReport()
+        {
+            if (!_useCompactLayout || _heightReportQueued)
+                return;
+
+            _heightReportQueued = true;
+            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+            {
+                _heightReportQueued = false;
+                if (_useCompactLayout && DashboardContent.ActualHeight > 0)
+                    ViewModel.ReportMeasuredDetailHeight(DashboardContent.ActualHeight);
+            });
         }
 
         private void OnScrollToTopRequested()

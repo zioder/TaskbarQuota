@@ -21,6 +21,7 @@ namespace TaskbarQuota.Taskbar
         private static DispatcherTimer? _widgetHealthTimer;
         private static bool _initialized;
         private static bool _isCreatingWidget;
+        private static ProviderId? _lastLoggedWidgetApplyProvider;
 
         public static void Initialize(DispatcherQueue dispatcher, Action showMainWindow)
         {
@@ -150,10 +151,15 @@ namespace TaskbarQuota.Taskbar
                         ? cached
                         : coordinator.Service.TryGetLastSuccessfulLiveResult(target, out var lastSuccess)
                             ? lastSuccess
-                            : coordinator.LastState;
+                            : coordinator.Service.Get(target) is { } provider
+                                ? UsageResult.Pending(target, provider, "Loading...")
+                                : null;
 
                 if (toApply is { } result)
+                {
                     summary.Apply(result, force: true);
+                    LogWidgetApply(result.Id, "sync");
+                }
 
                 bool isVisible = coordinator.IsActiveToolPresent && WidgetSettingsService.IsProviderVisible(target);
                 summary.SetActiveToolVisible(isVisible);
@@ -204,15 +210,27 @@ namespace TaskbarQuota.Taskbar
             if (result.Id != active)
                 return;
 
-            widget.Summary.DispatcherQueue.TryEnqueue(() =>
+            widget.Summary.DispatcherQueue.TryEnqueue(DispatcherQueuePriority.High, () =>
             {
                 widget.Summary.Apply(result);
+                LogWidgetApply(result.Id, "state");
                 bool isVisible = UsageCoordinator.Instance.IsActiveToolPresent && WidgetSettingsService.IsProviderVisible(active);
                 widget.Summary.SetActiveToolVisible(isVisible);
             });
         }
 
-        private static void OnActiveProviderChanged(ProviderId? _) => SyncWidgetState();
+        private static void LogWidgetApply(ProviderId provider, string source)
+        {
+            if (_lastLoggedWidgetApplyProvider == provider)
+                return;
+
+            _lastLoggedWidgetApplyProvider = provider;
+            Log.Debug($"[synara] widget {source} applied provider={provider}");
+        }
+
+        // Provider switches always publish StateChanged immediately after ActiveProviderChanged,
+        // so updating the widget here would only duplicate dispatcher work and add latency.
+        private static void OnActiveProviderChanged(ProviderId? _) { }
 
         private static void OnActiveToolPresenceChanged(bool isPresent)
         {

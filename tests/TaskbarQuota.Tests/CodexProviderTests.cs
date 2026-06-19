@@ -43,12 +43,84 @@ public class CodexProviderTests
     }
 
     [Fact]
+    public void BuildResult_WithResetCredits_SurfacesAvailableCountAndTimes()
+    {
+        using var usage = JsonDocument.Parse(CodexUsageJson("pro"));
+        using var resetCredits = JsonDocument.Parse("""
+            {
+              "credits": [
+                {
+                  "status": "available",
+                  "granted_at": "2026-06-12T03:43:26.144717Z",
+                  "expires_at": "2026-07-12T03:43:26.144717Z"
+                },
+                {
+                  "status": "redeemed",
+                  "granted_at": "2026-06-10T03:43:26.144717Z",
+                  "expires_at": "2026-07-10T03:43:26.144717Z"
+                },
+                {
+                  "status": "available",
+                  "granted_at": "2026-06-18T00:14:18.923019Z",
+                  "expires_at": "2026-07-18T00:14:18.923019Z"
+                }
+              ],
+              "available_count": 2
+            }
+            """);
+
+        var result = CodexProvider.BuildResult(usage.RootElement, resetCreditsJson: resetCredits.RootElement);
+
+        Assert.NotNull(result.Usage.ResetCredits);
+        Assert.Equal(2, result.Usage.ResetCredits!.AvailableCount);
+        Assert.Equal(2, result.Usage.ResetCredits.Credits.Count);
+        Assert.Equal(DateTimeOffset.Parse("2026-06-12T03:43:26.144717Z"), result.Usage.ResetCredits.Credits[0].GrantedAt);
+        Assert.Equal(DateTimeOffset.Parse("2026-07-18T00:14:18.923019Z"), result.Usage.ResetCredits.Credits[1].ExpiresAt);
+    }
+
+    [Fact]
     public void WidgetRows_ForCodex_HidesExtraRowsByDefault()
     {
         WidgetSettingsService.ResetRowVisibilityForTesting();
         try
         {
             var result = CodexWidgetResultWithExtraRows();
+
+            var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch!.Usage);
+
+            Assert.Equal(new[] { "Session", "Weekly" }, labels);
+        }
+        finally
+        {
+            WidgetSettingsService.ResetRowVisibilityForTesting();
+        }
+    }
+
+    [Fact]
+    public void WidgetRows_ForCodex_ShowsResetCreditsByDefault()
+    {
+        WidgetSettingsService.ResetRowVisibilityForTesting();
+        try
+        {
+            var result = CodexWidgetResultWithResetCredits();
+
+            var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch!.Usage);
+
+            Assert.Equal(new[] { "Session", "Weekly", "Resets" }, labels);
+        }
+        finally
+        {
+            WidgetSettingsService.ResetRowVisibilityForTesting();
+        }
+    }
+
+    [Fact]
+    public void WidgetRows_ForCodex_HidesResetCreditsWhenNoneAvailable()
+    {
+        WidgetSettingsService.ResetRowVisibilityForTesting();
+        try
+        {
+            var result = CodexWidgetResultWithResetCredits(0);
 
             var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch!.Usage);
 
@@ -136,6 +208,24 @@ public class CodexProviderTests
         result.Fetch!.Usage.ExtraRateWindows.Add(new NamedRateWindow("Spark-session", "Spark Session", new RateWindow(25)));
         result.Fetch!.Usage.ExtraRateWindows.Add(new NamedRateWindow("Spark-weekly", "Spark Weekly", new RateWindow(40)));
         return result;
+    }
+
+    private static UsageResult CodexWidgetResultWithResetCredits()
+        => CodexWidgetResultWithResetCredits(2);
+
+    private static UsageResult CodexWidgetResultWithResetCredits(int availableCount)
+    {
+        return UsageResult.Success(ProviderId.Codex, new TestProvider(), new ProviderFetchResult(
+            new UsageSnapshot(new RateWindow(10))
+            {
+                Secondary = new RateWindow(20),
+                ResetCredits = new ResetCreditsSnapshot(availableCount,
+                [
+                    new ResetCreditGrant("available", DateTimeOffset.Parse("2026-06-12T03:43:26Z"), DateTimeOffset.Parse("2026-07-12T03:43:26Z")),
+                    new ResetCreditGrant("available", DateTimeOffset.Parse("2026-06-18T00:14:18Z"), DateTimeOffset.Parse("2026-07-18T00:14:18Z")),
+                ]),
+            },
+            "oauth"));
     }
 
     private sealed class TestProvider : IUsageProvider

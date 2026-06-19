@@ -29,4 +29,12 @@ public class AppStartupTests
         Assert.True(App.TaskbarInitializationMaxAttempts > 1);
         Assert.False(App.ShouldRetryTaskbarInitialization(App.TaskbarInitializationMaxAttempts));
     }
+
+    [Fact]
+    public void ShouldRetryTaskbarInitialization_BoundaryConditions()
+    {
+        Assert.True(App.ShouldRetryTaskbarInitialization(0));
+        Assert.True(App.ShouldRetryTaskbarInitialization(App.TaskbarInitializationMaxAttempts - 1));
+        Assert.False(App.ShouldRetryTaskbarInitialization(App.TaskbarInitializationMaxAttempts + 1));
+    }
 }

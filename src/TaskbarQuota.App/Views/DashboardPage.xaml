@@ -97,6 +97,47 @@
             </Grid>
         </DataTemplate>
 
+        <DataTemplate x:Key="ResetCreditTemplate" x:DataType="vm:ResetCreditViewModel">
+            <Border Background="{ThemeResource ControlFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="6"
+                    Padding="12,10">
+                <Grid RowSpacing="8" ColumnSpacing="16">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Grid.Row="0"
+                               Text="{x:Bind TokenTitle}"
+                               Style="{StaticResource BodyStrongTextBlockStyle}"
+                               VerticalAlignment="Center"/>
+                    <Grid Grid.Row="1" ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Granted"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"/>
+                            <TextBlock Text="{x:Bind GrantedText}"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="2">
+                            <TextBlock Text="Expires"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"/>
+                            <TextBlock Text="{x:Bind ExpiresText}"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+            </Border>
+        </DataTemplate>
+
         <DataTemplate x:Key="ProviderCardDetailTemplate" x:DataType="vm:ProviderCardViewModel">
             <StackPanel Spacing="16" HorizontalAlignment="Stretch">
                 <Border Visibility="{x:Bind SetupRequiredVisibility}"
@@ -205,6 +246,69 @@
                     </Grid>
                 </Border>
 
+                <Border Visibility="{x:Bind ResetCreditsVisibility}"
+                        Opacity="{x:Bind ResetCreditsOpacity}"
+                        HorizontalAlignment="Stretch"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="20,16">
+                    <Grid RowSpacing="12" ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <Border Grid.Column="0" Grid.Row="0" Grid.RowSpan="2"
+                                VerticalAlignment="Stretch"
+                                HorizontalAlignment="Center">
+                            <ToggleButton VerticalAlignment="Center"
+                                          AutomationProperties.Name="{x:Bind ResetCreditsWidgetToggle.WidgetToggleName}"
+                                          IsChecked="{x:Bind ResetCreditsWidgetToggle.IsWidgetVisible, Mode=OneTime}"
+                                          IsEnabled="{x:Bind ResetCreditsWidgetToggle.IsWidgetToggleEnabled, Mode=OneTime}"
+                                          Tag="{x:Bind ResetCreditsWidgetToggle}"
+                                          Padding="6"
+                                          MinWidth="32"
+                                          MinHeight="32"
+                                          ToolTipService.ToolTip="Show in taskbar widget"
+                                          Click="WidgetRowVisibility_Click">
+                                <FontIcon Glyph="&#xE890;" FontSize="12"/>
+                            </ToggleButton>
+                        </Border>
+
+                        <Grid Grid.Column="1" Grid.Row="0" MinHeight="24" ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="Reset credits"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="1"
+                                       Text="{x:Bind ResetCreditsCountText}"
+                                       Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                                       TextAlignment="Right"
+                                       VerticalAlignment="Center"/>
+                        </Grid>
+
+                        <muxc:ItemsRepeater Grid.Column="1"
+                                            Grid.Row="1"
+                                            ItemsSource="{x:Bind ResetCreditItems}"
+                                            ItemTemplate="{StaticResource ResetCreditTemplate}">
+                            <muxc:ItemsRepeater.Layout>
+                                <muxc:StackLayout Spacing="8"/>
+                            </muxc:ItemsRepeater.Layout>
+                        </muxc:ItemsRepeater>
+                    </Grid>
+                </Border>
+
                 <Border Visibility="{x:Bind AdditionalUsageVisibility}"
                         Opacity="{x:Bind AdditionalUsageOpacity}"
                         HorizontalAlignment="Stretch"
@@ -303,9 +407,9 @@
           HorizontalAlignment="Stretch"
           VerticalAlignment="Stretch">
         <ScrollViewer x:Name="MainScrollViewer"
-                      Padding="0,4,0,24"
-                      VerticalScrollBarVisibility="Hidden"
-                      VerticalScrollMode="Disabled"
+                      Padding="0,4,0,32"
+                      VerticalScrollBarVisibility="Auto"
+                      VerticalScrollMode="Enabled"
                       HorizontalScrollMode="Disabled"
                       HorizontalAlignment="Stretch"
                       HorizontalContentAlignment="Left"

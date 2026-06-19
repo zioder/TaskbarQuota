@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using Microsoft.UI;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -32,10 +33,13 @@ namespace TaskbarQuota
         private bool _dashboardLoaded;
         private bool _sizeHooksRegistered;
         private bool _applyingBounds;
+        private DispatcherQueueTimer? _boundsUpdateTimer;
         private RectInt32? _lastAppliedBounds;
+        private double _lastObservedScale = -1;
         private readonly DashboardViewModel _dashboardViewModel;
         private readonly Dictionary<ProviderId, FlyoutProviderStripItem> _providerStripItems = new();
         private int _stripIconCount;
+        private static readonly TimeSpan BoundsCoalesceDelay = TimeSpan.FromMilliseconds(80);
 
         public bool IsShown => _shown;
 
@@ -47,11 +51,19 @@ namespace TaskbarQuota
             _dashboardViewModel.Cards.CollectionChanged += DashboardCards_CollectionChanged;
             _dashboardViewModel.SelectedCardChanged += DashboardSelectedCardChanged;
             _dashboardViewModel.DetailContentWidthChanged += DashboardDetailContentWidthChanged;
+            _dashboardViewModel.DetailContentHeightChanged += DashboardDetailContentHeightChanged;
             ProviderStrip.Loaded += (_, _) => RebuildProviderStrip();
 
             SystemBackdrop = new DesktopAcrylicBackdrop();
             ThemeService.Register(Root);
             Root.Loaded += (_, _) => RegisterWindowSizeHooks();
+            _boundsUpdateTimer = DispatcherQueue.CreateTimer();
+            _boundsUpdateTimer.Interval = BoundsCoalesceDelay;
+            _boundsUpdateTimer.Tick += (_, _) =>
+            {
+                _boundsUpdateTimer.Stop();
+                ApplyFlyoutBounds();
+            };
 
             var presenter = OverlappedPresenter.CreateForContextMenu();
             presenter.IsAlwaysOnTop = true;
@@ -119,7 +131,7 @@ namespace TaskbarQuota
             ApplyFlyoutBounds();
             GetAppWindow().Show();
             Activate();
-            ApplyFlyoutBounds();
+            ScheduleFlyoutBoundsUpdate();
 
             _ = UpdateAvailabilityService.Instance.CheckSilentlyAsync();
         }
@@ -131,7 +143,34 @@ namespace TaskbarQuota
 
             _sizeHooksRegistered = true;
             if (Root.XamlRoot is { } xamlRoot)
-                xamlRoot.Changed += (_, _) => ApplyFlyoutBounds();
+            {
+                _lastObservedScale = xamlRoot.RasterizationScale;
+                xamlRoot.Changed += (_, _) =>
+                {
+                    double scale = xamlRoot.RasterizationScale;
+                    if (Math.Abs(scale - _lastObservedScale) <= 0.001)
+                        return;
+
+                    _lastObservedScale = scale;
+                    ScheduleFlyoutBoundsUpdate();
+                };
+            }
+        }
+
+        private void ScheduleFlyoutBoundsUpdate()
+        {
+            if (!_shown)
+                return;
+
+            if (_boundsUpdateTimer is null)
+            {
+                DispatcherQueue.TryEnqueue(ApplyFlyoutBounds);
+                return;
+            }
+
+            _boundsUpdateTimer.Interval = BoundsCoalesceDelay;
+            _boundsUpdateTimer.Stop();
+            _boundsUpdateTimer.Start();
         }
 
         private void ApplyFlyoutBounds()
@@ -146,10 +185,15 @@ namespace TaskbarQuota
                 int w = WindowDpi.ToPhysical(
                     FlyoutLayout.ComputeLogicalWidth(_stripIconCount, _dashboardViewModel.DetailContentWidth),
                     scale);
-                int h = WindowDpi.ToPhysical(FlyoutLayout.LogicalHeight, scale);
+                int h = WindowDpi.ToPhysical(
+                    FlyoutLayout.ComputeLogicalHeight(_dashboardViewModel.DetailContentHeight),
+                    scale);
 
                 if (!User32.GetWindowRect(_widgetHandle, out RECT wr))
                     return;
+
+                int maxHeight = Math.Max(WindowDpi.ToPhysical(320, scale), wr.top - WindowDpi.ToPhysical(8, scale));
+                h = Math.Min(h, maxHeight);
 
                 int x = wr.right - w;
                 int y = wr.top - h - WindowDpi.ToPhysical(8, scale);
@@ -189,13 +233,32 @@ namespace TaskbarQuota
         }
 
         private void DashboardCards_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
-            => RebuildProviderStrip();
+        {
+            if ((e.Action == NotifyCollectionChangedAction.Replace
+                    || e.Action == NotifyCollectionChangedAction.Move)
+                && ProviderStripStillMatchesCards())
+            {
+                SyncProviderStripSelection(animate: true);
+                return;
+            }
+
+            RebuildProviderStrip();
+        }
 
         private void DashboardSelectedCardChanged(ProviderCardViewModel? card)
-            => SyncProviderStripSelection();
+        {
+            // Option A: the flyout is sized to the tallest provider and grows only. Switching
+            // providers leaves bounds unchanged (ApplyFlyoutBounds early-returns on equal bounds),
+            // so the content cross-fades inside a fixed frame with no native resize.
+            SyncProviderStripSelection(animate: true);
+            ScheduleFlyoutBoundsUpdate();
+        }
 
         private void DashboardDetailContentWidthChanged(double _)
-            => ApplyFlyoutBounds();
+            => ScheduleFlyoutBoundsUpdate();
+
+        private void DashboardDetailContentHeightChanged(double _)
+            => ScheduleFlyoutBoundsUpdate();
 
         private void RebuildProviderStrip()
         {
@@ -209,8 +272,8 @@ namespace TaskbarQuota
                 _stripIconCount++;
             }
 
-            SyncProviderStripSelection();
-            ApplyFlyoutBounds();
+            SyncProviderStripSelection(animate: false);
+            ScheduleFlyoutBoundsUpdate();
         }
 
         private Button CreateStripButton(ProviderCardViewModel card)
@@ -224,6 +287,7 @@ namespace TaskbarQuota
                 ProviderId = card.ProviderId,
                 Initial = card.DisplayName.Length > 0 ? card.DisplayName[0].ToString() : "?",
                 ForegroundBrush = GetSelectionBrush(isSelected: false),
+                Opacity = 0.78,
             };
             var indicator = new Border
             {
@@ -278,19 +342,64 @@ namespace TaskbarQuota
                 app.ShowSettings();
         }
 
-        private void SyncProviderStripSelection()
+        private void SyncProviderStripSelection(bool animate = false)
         {
             var selected = _dashboardViewModel.SelectedCard?.ProviderId;
             foreach (var pair in _providerStripItems)
             {
                 bool isSelected = selected is ProviderId id && id == pair.Key;
                 ApplyIconBrush(pair.Value.Icon, isSelected);
-                pair.Value.Indicator.Opacity = isSelected ? 1 : 0;
+                double iconOpacity = isSelected ? 1 : 0.78;
+                double indicatorOpacity = isSelected ? 1 : 0;
+                if (animate)
+                {
+                    AnimateOpacity(pair.Value.Icon, iconOpacity, 140);
+                    AnimateOpacity(pair.Value.Indicator, indicatorOpacity, 160);
+                }
+                else
+                {
+                    pair.Value.Icon.Opacity = iconOpacity;
+                    pair.Value.Indicator.Opacity = indicatorOpacity;
+                }
             }
         }
 
         private static void ApplyIconBrush(ProviderAvatar icon, bool isSelected)
             => icon.ForegroundBrush = GetSelectionBrush(isSelected);
+
+        private static void AnimateOpacity(UIElement target, double to, int milliseconds)
+        {
+            if (Math.Abs(target.Opacity - to) <= 0.001)
+                return;
+
+            var storyboard = new Storyboard();
+            var animation = new DoubleAnimation
+            {
+                From = target.Opacity,
+                To = to,
+                Duration = TimeSpan.FromMilliseconds(milliseconds),
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                EnableDependentAnimation = true,
+            };
+            Storyboard.SetTarget(animation, target);
+            Storyboard.SetTargetProperty(animation, "Opacity");
+            storyboard.Children.Add(animation);
+            storyboard.Begin();
+        }
+
+        private bool ProviderStripStillMatchesCards()
+        {
+            if (_providerStripItems.Count != _dashboardViewModel.Cards.Count)
+                return false;
+
+            foreach (var card in _dashboardViewModel.Cards)
+            {
+                if (!_providerStripItems.ContainsKey(card.ProviderId))
+                    return false;
+            }
+
+            return true;
+        }
 
         private static Brush GetSelectionBrush(bool isSelected) => isSelected
             ? (Brush)Application.Current.Resources["AccentTextFillColorPrimaryBrush"]
