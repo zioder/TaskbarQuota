@@ -22,6 +22,7 @@ namespace TaskbarQuota.Usage.Providers
         private const string DefaultBaseUrl = "https://chatgpt.com/backend-api";
         private const string UsagePath = "/wham/usage";
         private const string ResetCreditsPath = "/wham/rate-limit-reset-credits";
+        private static readonly TimeSpan ResetCreditsTimeout = TimeSpan.FromSeconds(3);
         private static readonly Regex CodexModelPrefix = new(@"^GPT-[\d.]+-Codex-", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         private static readonly HttpClient Http = new(new HttpClientHandler())
@@ -100,11 +101,13 @@ namespace TaskbarQuota.Usage.Providers
         {
             try
             {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(ResetCreditsTimeout);
                 using var request = CreateRequest(creds, ResetCreditsPath);
                 request.Headers.TryAddWithoutValidation("OpenAI-Beta", "codex-1");
                 request.Headers.TryAddWithoutValidation("originator", "Codex Desktop");
 
-                using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
+                using var response = await Http.SendAsync(request, timeout.Token).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
                     return null;
 

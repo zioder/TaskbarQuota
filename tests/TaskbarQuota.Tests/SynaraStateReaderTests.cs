@@ -91,6 +91,10 @@ public class SynaraStateReaderTests
     [InlineData("Synara", true)]
     [InlineData("Synara (Dev)", true)]
     [InlineData("synara-desktop", true)]
+    [InlineData("dpcode", true)]
+    [InlineData("dpcode-dev", true)]
+    [InlineData("t3code", true)]
+    [InlineData("t3code-dev", true)]
     [InlineData("cursor", false)]
     [InlineData(null, false)]
     public void IsSynaraProcessName_matches_synara_only(string? name, bool expected)

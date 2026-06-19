@@ -422,6 +422,7 @@ namespace TaskbarQuota.ActiveApp
                         {
                             // Overlap one block so a record split across the previous tail boundary is not missed.
                             var readFrom = Math.Max(0, lastSize - LevelDbBlockSize);
+                            readFrom = (readFrom / LevelDbBlockSize) * LevelDbBlockSize;
                             bytes = ReadRangeShared(log.FullName, readFrom, currentSize - readFrom);
                         }
                     }

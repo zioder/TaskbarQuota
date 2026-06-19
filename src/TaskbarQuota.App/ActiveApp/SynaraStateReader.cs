@@ -55,7 +55,11 @@ namespace TaskbarQuota.ActiveApp
             processName != null
             && (processName.Equals("synara", StringComparison.OrdinalIgnoreCase)
                 || processName.Equals("synara (dev)", StringComparison.OrdinalIgnoreCase)
-                || processName.Equals("synara-desktop", StringComparison.OrdinalIgnoreCase));
+                || processName.Equals("synara-desktop", StringComparison.OrdinalIgnoreCase)
+                || processName.Equals("dpcode", StringComparison.OrdinalIgnoreCase)
+                || processName.Equals("dpcode-dev", StringComparison.OrdinalIgnoreCase)
+                || processName.Equals("t3code", StringComparison.OrdinalIgnoreCase)
+                || processName.Equals("t3code-dev", StringComparison.OrdinalIgnoreCase));
 
         /// <summary>
         /// Resolve the active thread's provider from Synara's state DB, or null when Synara is not
