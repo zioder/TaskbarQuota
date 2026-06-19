@@ -1,5 +1,5 @@
 using System;
-using Interop.UIAutomationClient;
+using global::Interop.UIAutomationClient;
 
 namespace TaskbarQuota.ActiveApp
 {
