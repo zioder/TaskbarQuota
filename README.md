@@ -58,6 +58,21 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 
 ## Features
 
+### What's new in 1.0.13
+
+#### New features
+
+- **[Synara](https://github.com/Emanuele-web04/synara) active-provider detection** — when Synara is the focused app, TaskbarQuota reads the active thread/composer selection and attributes usage to its inner provider (Codex, Claude, Cursor, Grok, OpenCode, or OpenCode Go). The widget adds a Synara host badge with the selected model and thread context.
+- **Codex reset-credit tracking** — the Codex widget now shows the number of available reset credits and when the oldest available credit expires. The dashboard includes a **Reset credits** section with each available credit's grant and expiry details.
+- **Expiry notifications** — TaskbarQuota notifies you when the oldest available Codex reset credit is within five days of expiring. Alerts are throttled per expiry so the same credit does not repeatedly notify you.
+
+#### Improvements and fixes
+
+- **Better flyout and dashboard sizing** — layouts adapt their width and height to the current provider content for a cleaner fit.
+- **Smoother widget updates** — provider switches and dashboard selection changes render more responsively with less flicker.
+- **More resilient Synara state reads** — incremental LevelDB reads are block-aligned, legacy Synara process names are recognised, and background state changes are handled without delaying active-provider updates.
+- **Non-blocking reset-credit lookup** — the optional Codex reset-credit request has its own short timeout, so it cannot hold up the primary usage refresh.
+
 ### Taskbar widget
 
 - **In-taskbar compact UI** — usage bars and/or percentages injected beside the system tray (reparents a layered WinUI island into `Shell_TrayWnd`).
