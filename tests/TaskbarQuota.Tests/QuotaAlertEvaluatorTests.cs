@@ -127,6 +127,43 @@ public class QuotaAlertEvaluatorTests
         Assert.Equal(1, settings.CooldownMinutes);
     }
 
+    [Fact]
+    public void Evaluate_CodexResetCreditWithinFiveDays_Alerts()
+    {
+        var state = new QuotaAlertState();
+        var expiresAt = Now().AddDays(5);
+
+        var alerts = QuotaAlertEvaluator.Evaluate(CodexResetCreditResult(expiresAt), Settings(), state, Now()).ToArray();
+
+        var alert = Assert.Single(alerts);
+        Assert.Contains("reset credit expires soon", alert.Title);
+        Assert.Contains("Oldest reset credit expires in 5d", alert.Body);
+    }
+
+    [Fact]
+    public void Evaluate_CodexResetCreditBeyondFiveDays_DoesNotAlert()
+    {
+        var state = new QuotaAlertState();
+        var expiresAt = Now().AddDays(5).AddMinutes(1);
+
+        var alerts = QuotaAlertEvaluator.Evaluate(CodexResetCreditResult(expiresAt), Settings(), state, Now()).ToArray();
+
+        Assert.Empty(alerts);
+    }
+
+    [Fact]
+    public void Evaluate_CodexResetCreditExpiry_AlertsOncePerExpiry()
+    {
+        var state = new QuotaAlertState();
+        var expiresAt = Now().AddDays(4);
+
+        var first = QuotaAlertEvaluator.Evaluate(CodexResetCreditResult(expiresAt), Settings(), state, Now()).ToArray();
+        var second = QuotaAlertEvaluator.Evaluate(CodexResetCreditResult(expiresAt), Settings(), state, Now().AddHours(1)).ToArray();
+
+        Assert.Single(first);
+        Assert.Empty(second);
+    }
+
     private static QuotaAlertSettings Settings(bool enabled = true) => new()
     {
         Enabled = enabled,
@@ -145,10 +182,36 @@ public class QuotaAlertEvaluatorTests
         return UsageResult.Success(provider.Id, provider, new ProviderFetchResult(usage, "test"));
     }
 
+    private static UsageResult CodexResetCreditResult(DateTimeOffset expiresAt)
+    {
+        var provider = new CodexAlertTestProvider();
+        var usage = new UsageSnapshot(new RateWindow(10, resetAt: Now().AddHours(1)))
+        {
+            ResetCredits = new ResetCreditsSnapshot(1,
+            [
+                new ResetCreditGrant("available", Now().AddDays(-25), expiresAt),
+            ]),
+        };
+
+        return UsageResult.Success(provider.Id, provider, new ProviderFetchResult(usage, "test"));
+    }
+
     private sealed class AlertTestProvider : IUsageProvider
     {
         public ProviderId Id => ProviderId.Claude;
         public string DisplayName => "Claude";
+        public string SessionLabel => "Session";
+        public string WeeklyLabel => "Weekly";
+        public BillingKind Billing => BillingKind.Subscription;
+
+        public Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
+            => throw new NotSupportedException();
+    }
+
+    private sealed class CodexAlertTestProvider : IUsageProvider
+    {
+        public ProviderId Id => ProviderId.Codex;
+        public string DisplayName => "Codex";
         public string SessionLabel => "Session";
         public string WeeklyLabel => "Weekly";
         public BillingKind Billing => BillingKind.Subscription;

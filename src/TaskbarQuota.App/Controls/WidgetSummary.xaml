@@ -32,6 +32,20 @@
                 </Viewbox>
                 <TextBlock x:Name="BadgeText" Text="?" FontSize="15" FontWeight="SemiBold"
                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
+
+                <!-- Synara host mark: shown bottom-right over the inner provider glyph when the active
+                     provider was resolved through the Synara meta-app. -->
+                <Border x:Name="HostBadgeBox" Visibility="Collapsed"
+                        Width="13" Height="13" CornerRadius="6.5"
+                        Padding="2"
+                        HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                        Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
+                    <Viewbox HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <Canvas Width="100" Height="100">
+                            <Path x:Name="HostBadgeGlyph"/>
+                        </Canvas>
+                    </Viewbox>
+                </Border>
             </Grid>
         </Grid>
     </Grid>

@@ -130,6 +130,120 @@ namespace TaskbarQuota.ActiveApp
         private DateTime _runningToolCacheAt = DateTime.MinValue;
         private volatile bool _openCodeModelStateDirty;
         private OpenCodeModelStateWatcher? _modelStateWatcher;
+        private SynaraStateWatcher? _synaraStateWatcher;
+        private SynaraStateReader.SynaraSelection? _synaraHost;
+        private readonly SynaraUiaReader _synaraUia = new();
+
+        /// <summary>Raised when Synara's localStorage changes (provider switch / thread navigation).</summary>
+        public event Action? SynaraStateChanged;
+
+        public void StartSynaraStateWatcher()
+        {
+            if (_synaraStateWatcher != null) return;
+
+            _synaraStateWatcher = new SynaraStateWatcher();
+            _synaraStateWatcher.StateChanged += () =>
+            {
+                SynaraStateReader.InvalidateDraftCache();
+                SynaraStateChanged?.Invoke();
+            };
+            _synaraStateWatcher.Start();
+        }
+
+        /// <summary>
+        /// When the last <see cref="Detect"/> resolved a provider via the Synara host app, the active
+        /// thread's selection (inner provider + model); null otherwise. Lets the UI show a Synara badge
+        /// over the inner provider's icon.
+        /// </summary>
+        public SynaraStateReader.SynaraSelection? ActiveSynaraHost => _synaraHost;
+
+        /// <summary>
+        /// Lightweight Synara-only detection: checks if Synara is foreground and reads its active
+        /// selection directly from LevelDB. Skips the full <see cref="Detect"/> pipeline (WMI, terminal
+        /// session resolution, CLI cache) so the file-watcher hot path resolves in microseconds.
+        /// Returns null when Synara is not foreground or has no usable selection.
+        /// </summary>
+        public SynaraStateReader.SynaraSelection? DetectSynaraSelectionFast(string? onScreenModel = null)
+        {
+            var hwnd = GetForegroundWindow();
+            if (hwnd == IntPtr.Zero) return null;
+
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            if (pid == 0) return null;
+
+            var foregroundPid = (int)pid;
+            string? procName;
+            lock (_detectGate)
+            {
+                procName = foregroundPid == _lastForegroundPid
+                    ? _lastForegroundProcessName
+                    : null;
+            }
+
+            procName ??= TryGetProcessName(foregroundPid);
+            if (!SynaraStateReader.IsSynaraProcessName(procName))
+                return null;
+
+            // Read outside the detect lock so a slow full Detect() (WMI/terminal scan) never blocks
+            // the Synara file-watcher hot path.
+            var selection = SynaraStateReader.GetActiveSelection(
+                includeThreadTitle: false,
+                preferStickyComposerSelection: true,
+                onScreenModel: onScreenModel);
+
+            lock (_detectGate)
+            {
+                _lastForegroundHwnd = hwnd;
+                _lastForegroundPid = foregroundPid;
+                _lastForegroundProcessName = procName;
+                _synaraHost = selection;
+            }
+
+            return selection;
+        }
+
+        /// <summary>
+        /// The foreground window handle when Synara is the focused app, else <see cref="IntPtr.Zero"/>.
+        /// Lets the UIA reader attach to the right window without running the full detect pipeline.
+        /// </summary>
+        public IntPtr TryGetForegroundSynaraWindow()
+        {
+            var hwnd = GetForegroundWindow();
+            if (hwnd == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            if (pid == 0)
+                return IntPtr.Zero;
+
+            var foregroundPid = (int)pid;
+            string? procName;
+            lock (_detectGate)
+            {
+                procName = foregroundPid == _lastForegroundPid
+                    ? _lastForegroundProcessName
+                    : null;
+            }
+            procName ??= TryGetProcessName(foregroundPid);
+
+            return SynaraStateReader.IsSynaraProcessName(procName) ? hwnd : IntPtr.Zero;
+        }
+
+        /// <summary>
+        /// The model name shown live on Synara's composer (via UI Automation) when Synara is foreground,
+        /// else null. Used to disambiguate which stored selection is the active one. Releases the UIA
+        /// reader's cached handles when Synara is not foreground.
+        /// </summary>
+        public string? TryReadForegroundSynaraModel()
+        {
+            var hwnd = TryGetForegroundSynaraWindow();
+            if (hwnd == IntPtr.Zero)
+            {
+                _synaraUia.Reset();
+                return null;
+            }
+            return _synaraUia.TryReadActiveModelName(hwnd);
+        }
 
         public event Action? OpenCodeModelStateChanged;
 
@@ -157,7 +271,18 @@ namespace TaskbarQuota.ActiveApp
             return true;
         }
 
+        // Detect() mutates per-instance caches (_synaraHost, _cliCache, _lastForeground*). It is called
+        // from the poll timer AND the OpenCode/Synara file-watcher handlers on different threads, so
+        // serialize it — concurrent runs corrupt that state and make the active provider flip-flop.
+        private readonly object _detectGate = new();
+
         public ProviderId? Detect()
+        {
+            lock (_detectGate)
+                return DetectCore();
+        }
+
+        private ProviderId? DetectCore()
         {
             var hwnd = GetForegroundWindow();
             if (hwnd == IntPtr.Zero) return null;
@@ -194,7 +319,25 @@ namespace TaskbarQuota.ActiveApp
             _lastForegroundHwnd = hwnd;
             _lastForegroundPid = foregroundPid;
             _lastForegroundProcessName = procName;
+            _synaraHost = null;
             if (procName == null) return null;
+
+            // Synara host: a meta-app wrapping many providers. Resolve the inner provider from the active
+            // thread's persisted model selection. A null selection (unsupported provider / no thread) falls
+            // through to the last-active provider, so we don't show Synara for providers we can't track.
+            if (SynaraStateReader.IsSynaraProcessName(procName))
+            {
+                // Same parameters as the dedicated Synara poll (DetectSynaraSelectionFast) so this tick
+                // path resolves the identical provider — otherwise the two fight and the widget flaps.
+                var selection = SynaraStateReader.GetActiveSelection(
+                    includeThreadTitle: true,
+                    preferStickyComposerSelection: true,
+                    onScreenModel: _synaraUia.TryReadActiveModelName(hwnd));
+                _synaraHost = selection;
+                if (selection is { } s)
+                    return _lastForegroundResult = s.Provider;
+                return _lastForegroundResult = null;
+            }
 
             // Fast path: GUI desktop apps resolve from the foreground process name (~instant).
             if (TryResolveGuiProcess(procName) is { } gui)
@@ -491,7 +634,8 @@ namespace TaskbarQuota.ActiveApp
                 {
                     using (process)
                     {
-                        if (IsKnownGuiProcessName(process.ProcessName))
+                        if (IsKnownGuiProcessName(process.ProcessName)
+                            || SynaraStateReader.IsSynaraProcessName(process.ProcessName))
                             return true;
                     }
                 }

@@ -27,12 +27,14 @@ namespace TaskbarQuota.ViewModels
 
         [ObservableProperty] public partial ProviderCardViewModel? SelectedCard { get; set; }
         [ObservableProperty] public partial double DetailContentWidth { get; private set; }
+        [ObservableProperty] public partial double DetailContentHeight { get; private set; }
         [ObservableProperty] public partial Visibility AvailableCardsVisibility { get; private set; }
 
         /// <summary>Raised when the first card changes so the view can scroll back to the top.</summary>
         public event Action? ScrollToTopRequested;
         public event Action<ProviderCardViewModel?>? SelectedCardChanged;
         public event Action<double>? DetailContentWidthChanged;
+        public event Action<double>? DetailContentHeightChanged;
 
         [ObservableProperty] public partial bool IsRefreshing { get; set; }
         [ObservableProperty] public partial string StatusText { get; set; }
@@ -50,12 +52,29 @@ namespace TaskbarQuota.ViewModels
 
         partial void OnSelectedCardChanged(ProviderCardViewModel? value)
         {
-            UpdateDetailContentWidth(value);
+            UpdateDetailContentMetrics(value);
             SelectedCardChanged?.Invoke(value);
         }
 
         partial void OnDetailContentWidthChanged(double value)
             => DetailContentWidthChanged?.Invoke(value);
+
+        partial void OnDetailContentHeightChanged(double value)
+            => DetailContentHeightChanged?.Invoke(value);
+
+        public void ReportMeasuredDetailHeight(double height)
+        {
+            if (double.IsNaN(height) || double.IsInfinity(height) || height <= 0)
+                return;
+
+            height = Math.Ceiling(height);
+            // Grow-only: a shorter provider must not shrink the fixed flyout (Option A). Only a
+            // taller-than-estimated measurement enlarges it, and once settled it stops changing.
+            if (height <= DetailContentHeight + 1)
+                return;
+
+            DetailContentHeight = height;
+        }
 
         public void SelectProvider(ProviderId id)
         {
@@ -214,7 +233,7 @@ namespace TaskbarQuota.ViewModels
 
             RestoreSelectedCard(selectedProviderId);
 
-            UpdateDetailContentWidth(SelectedCard);
+            UpdateDetailContentMetrics(SelectedCard);
 
             var topProvider = dashboardResults.Count > 0 ? dashboardResults[0].Id : (ProviderId?)null;
             if (topProvider != _lastTopProvider)
@@ -290,11 +309,21 @@ namespace TaskbarQuota.ViewModels
                 SelectedCard = Cards.Count > 0 ? Cards[0] : null;
         }
 
-        private void UpdateDetailContentWidth(ProviderCardViewModel? card)
+        private void UpdateDetailContentMetrics(ProviderCardViewModel? card)
         {
-            double contentEstimate = card?.SuggestedDetailWidth ?? DashboardLayoutMetrics.EstimateDetailWidth(null);
-            int flyoutWidth = FlyoutLayout.ComputeLogicalWidth(Cards.Count, contentEstimate);
-            DetailContentWidth = Math.Max(contentEstimate, flyoutWidth - FlyoutLayout.FrameHorizontalPadding);
+            // Option A: fixed flyout. Width is driven purely by the provider strip (icons + settings
+            // gear) so the flyout fits the bottom bar exactly and never grows wider for content.
+            // Content wraps inside that width instead of pushing the window out.
+            int flyoutWidth = FlyoutLayout.ComputeLogicalWidth(Cards.Count, 0);
+            DetailContentWidth = flyoutWidth - FlyoutLayout.DetailContentPadding;
+
+            // Size to the tallest provider so switching never resizes the native window. Estimate
+            // from all cards, then grow-only (never shrink) below.
+            double selectedHeightEstimate = card?.SuggestedDetailHeight ?? DashboardLayoutMetrics.EstimateDetailHeight(null);
+            double heightEstimate = Cards.Count > 0
+                ? Math.Max(selectedHeightEstimate, Cards.Max(c => c.SuggestedDetailHeight))
+                : selectedHeightEstimate;
+            DetailContentHeight = Math.Max(DetailContentHeight, heightEstimate);
         }
 
         private void OnCoordinatorStateChanged(UsageResult result)
@@ -392,6 +421,17 @@ namespace TaskbarQuota.ViewModels
                   .Append('|').Append(additional.SpentUsd)
                   .Append('|').Append(additional.BudgetUsd)
                   .Append('|').Append(additional.IsCredits);
+            }
+
+            if (usage.ResetCredits is { } resetCredits)
+            {
+                sb.Append('|').Append(resetCredits.AvailableCount);
+                foreach (var credit in resetCredits.Credits)
+                {
+                    sb.Append('|').Append(credit.Status)
+                      .Append('|').Append(credit.GrantedAt)
+                      .Append('|').Append(credit.ExpiresAt);
+                }
             }
 
             return sb.ToString();

@@ -123,6 +123,9 @@ internal sealed class AppNotificationQuotaAlertNotifier : IQuotaAlertNotifier
 
 internal static class QuotaAlertEvaluator
 {
+    private static readonly TimeSpan ResetCreditExpiryWarningWindow = TimeSpan.FromDays(5);
+    private static readonly TimeSpan ResetCreditRepeatCooldown = TimeSpan.FromDays(3650);
+
     public static IEnumerable<QuotaAlertNotification> Evaluate(
         UsageResult result,
         QuotaAlertSettings settings,
@@ -148,6 +151,19 @@ internal static class QuotaAlertEvaluator
 
             state.MarkAlerted(key, now);
             yield return QuotaAlertNotification.From(result.DisplayName, window, crossed);
+        }
+
+        if (result.Id == ProviderId.Codex
+            && usage.ResetCredits?.EarliestExpiresAt is { } oldestExpiry
+            && oldestExpiry > now
+            && oldestExpiry - now <= ResetCreditExpiryWarningWindow)
+        {
+            var key = QuotaAlertStateKey.ForResetCreditExpiry(result.Id, oldestExpiry);
+            if (state.ShouldAlert(key, now, ResetCreditRepeatCooldown))
+            {
+                state.MarkAlerted(key, now);
+                yield return QuotaAlertNotification.FromResetCreditExpiry(result.DisplayName, oldestExpiry, now);
+            }
         }
     }
 
@@ -250,6 +266,38 @@ internal sealed record QuotaAlertNotification(string Title, string Body)
             $"{providerName} {window.Title.ToLowerInvariant()} quota is at {used:0}%",
             $"{threshold.Severity.ToUpperInvariant()} threshold crossed ({threshold.Value:0}%).{reset}");
     }
+
+    public static QuotaAlertNotification FromResetCreditExpiry(
+        string providerName,
+        DateTimeOffset expiresAt,
+        DateTimeOffset now)
+    {
+        var local = expiresAt.ToLocalTime();
+        return new QuotaAlertNotification(
+            $"{providerName} reset credit expires soon",
+            $"Oldest reset credit expires in {FormatTimeUntil(expiresAt, now)} ({local:MMM d 'at' h:mm tt}). Use it before it expires.");
+    }
+
+    private static string FormatTimeUntil(DateTimeOffset target, DateTimeOffset now)
+    {
+        var diff = target - now;
+        if (diff <= TimeSpan.Zero)
+            return "now";
+
+        int hours = (int)diff.TotalHours;
+        int minutes = diff.Minutes;
+        if (hours >= 24)
+        {
+            int days = hours / 24;
+            int remHours = hours % 24;
+            return remHours == 0 ? $"{days}d" : $"{days}d {remHours}h";
+        }
+
+        if (hours > 0)
+            return minutes == 0 ? $"{hours}h" : $"{hours}h {minutes}m";
+
+        return $"{minutes}m";
+    }
 }
 
 internal static class QuotaAlertStateKey
@@ -261,4 +309,7 @@ internal static class QuotaAlertStateKey
 
         return $"{provider}:{windowId}:{threshold:0}:{reset}";
     }
+
+    public static string ForResetCreditExpiry(ProviderId provider, DateTimeOffset expiresAt)
+        => $"{provider}:reset-credit-expiry:{expiresAt.ToUnixTimeSeconds()}";
 }

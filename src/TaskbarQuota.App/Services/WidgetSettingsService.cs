@@ -34,6 +34,7 @@ public static class WidgetSettingsService
     public const string RowBalance = "balance";
     public const string RowCredits = "credits";
     public const string RowAdditionalUsage = "additional";
+    public const string RowResetCredits = "reset_credits";
 
     private static readonly string WidgetDisplayModePath =
         Path.Combine(AppStorage.AppDataDirectory, "widget-display-mode.txt");
@@ -217,6 +218,7 @@ public static class WidgetSettingsService
             RowBalance,
             RowCredits,
             RowAdditionalUsage,
+            RowResetCredits,
         ];
 
         var parts = new List<string>(rowIds.Length);
@@ -288,6 +290,7 @@ public static class WidgetSettingsService
                 new(RowSecondary, "Weekly"),
                 new(RowModelSpecific, "Model"),
                 new(RowMonthly, "Monthly"),
+                new(RowResetCredits, "Reset credits"),
                 new(RowExtra, "Extra model rows"),
             ],
             _ =>
@@ -496,5 +499,8 @@ public static class WidgetSettingsService
         => $"{provider}:{rowId}";
 
     private static bool DefaultRowVisible(ProviderId provider, string rowId)
-        => provider != ProviderId.Codex || rowId == RowPrimary || rowId == RowSecondary;
+        => provider != ProviderId.Codex
+        || rowId == RowPrimary
+        || rowId == RowSecondary
+        || rowId == RowResetCredits;
 }

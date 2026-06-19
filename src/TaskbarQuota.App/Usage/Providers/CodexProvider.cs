@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -20,6 +21,8 @@ namespace TaskbarQuota.Usage.Providers
     {
         private const string DefaultBaseUrl = "https://chatgpt.com/backend-api";
         private const string UsagePath = "/wham/usage";
+        private const string ResetCreditsPath = "/wham/rate-limit-reset-credits";
+        private static readonly TimeSpan ResetCreditsTimeout = TimeSpan.FromSeconds(3);
         private static readonly Regex CodexModelPrefix = new(@"^GPT-[\d.]+-Codex-", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         private static readonly HttpClient Http = new(new HttpClientHandler())
@@ -37,13 +40,7 @@ namespace TaskbarQuota.Usage.Providers
         {
             var creds = LoadCredentials();
 
-            using var request = new HttpRequestMessage(HttpMethod.Get, ResolveBaseUrl() + UsagePath);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", creds.AccessToken);
-            request.Headers.UserAgent.ParseAdd("TaskbarQuota");
-            request.Headers.Accept.ParseAdd("application/json");
-            if (!string.IsNullOrEmpty(creds.AccountId))
-                request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", creds.AccountId);
-
+            using var request = CreateRequest(creds, UsagePath);
             using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
 
             if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
@@ -58,11 +55,17 @@ namespace TaskbarQuota.Usage.Providers
 
             using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
             using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+            using var resetCreditsDoc = await FetchResetCreditsAsync(creds, ct).ConfigureAwait(false);
 
-            return BuildResult(doc.RootElement, headerPrimary, headerSecondary, headerCredits);
+            return BuildResult(doc.RootElement, headerPrimary, headerSecondary, headerCredits, resetCreditsDoc?.RootElement);
         }
 
-        internal static ProviderFetchResult BuildResult(JsonElement json, double? headerPrimary = null, double? headerSecondary = null, double? headerCredits = null)
+        internal static ProviderFetchResult BuildResult(
+            JsonElement json,
+            double? headerPrimary = null,
+            double? headerSecondary = null,
+            double? headerCredits = null,
+            JsonElement? resetCreditsJson = null)
         {
             var (primary, secondary, codeReview) = ExtractRateLimits(json);
             if (headerPrimary is double hp) primary = WithUsedPercent(primary, hp);
@@ -89,8 +92,47 @@ namespace TaskbarQuota.Usage.Providers
                 usage.Email = emailEl.GetString();
 
             usage.Cost = ExtractCredits(json, headerCredits);
+            usage.ResetCredits = ExtractResetCredits(resetCreditsJson);
 
             return new ProviderFetchResult(usage, "oauth");
+        }
+
+        private static async Task<JsonDocument?> FetchResetCreditsAsync(Credentials creds, CancellationToken ct)
+        {
+            try
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(ResetCreditsTimeout);
+                using var request = CreateRequest(creds, ResetCreditsPath);
+                request.Headers.TryAddWithoutValidation("OpenAI-Beta", "codex-1");
+                request.Headers.TryAddWithoutValidation("originator", "Codex Desktop");
+
+                using var response = await Http.SendAsync(request, timeout.Token).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                    return null;
+
+                using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+                return await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static HttpRequestMessage CreateRequest(Credentials creds, string path)
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, ResolveBaseUrl() + path);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", creds.AccessToken);
+            request.Headers.UserAgent.ParseAdd("TaskbarQuota");
+            request.Headers.Accept.ParseAdd("application/json");
+            if (!string.IsNullOrEmpty(creds.AccountId))
+                request.Headers.TryAddWithoutValidation("ChatGPT-Account-Id", creds.AccountId);
+            return request;
         }
 
         private static (RateWindow primary, RateWindow? secondary, RateWindow? codeReview) ExtractRateLimits(JsonElement json)
@@ -186,6 +228,40 @@ namespace TaskbarQuota.Usage.Providers
             return balance is null ? null : new CostSnapshot(balance.Value, "credits", "Credits").WithLimit(1000);
         }
 
+        private static ResetCreditsSnapshot? ExtractResetCredits(JsonElement? maybeJson)
+        {
+            if (maybeJson is not JsonElement json || json.ValueKind != JsonValueKind.Object)
+                return null;
+
+            var credits = new List<ResetCreditGrant>();
+            if (json.TryGetProperty("credits", out var creditsEl) && creditsEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var entry in creditsEl.EnumerateArray())
+                {
+                    if (entry.ValueKind != JsonValueKind.Object)
+                        continue;
+
+                    string status = entry.TryGetProperty("status", out var statusEl) && statusEl.ValueKind == JsonValueKind.String
+                        ? statusEl.GetString() ?? string.Empty
+                        : string.Empty;
+                    if (!string.Equals(status, "available", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    credits.Add(new ResetCreditGrant(
+                        status,
+                        TryDateTimeOffset(entry, "granted_at"),
+                        TryDateTimeOffset(entry, "expires_at")));
+                }
+            }
+
+            int? availableCount = TryInt32(json, "available_count");
+            if (availableCount is null && credits.Count == 0)
+                return null;
+
+            credits.Sort(static (left, right) => Nullable.Compare(left.ExpiresAt, right.ExpiresAt));
+            return new ResetCreditsSnapshot(availableCount ?? credits.Count, credits);
+        }
+
         private static double? TryHeaderF64(HttpResponseMessage response, string name)
         {
             if (!response.Headers.TryGetValues(name, out var values)) return null;
@@ -206,6 +282,28 @@ namespace TaskbarQuota.Usage.Providers
                 JsonValueKind.String when double.TryParse(el.GetString(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var v) => v,
                 _ => null,
             };
+        }
+
+        private static int? TryInt32(JsonElement parent, string name)
+        {
+            if (!parent.TryGetProperty(name, out var el)) return null;
+            if (el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out int value)) return value;
+            if (el.ValueKind == JsonValueKind.String && int.TryParse(el.GetString(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out value)) return value;
+            return null;
+        }
+
+        private static DateTimeOffset? TryDateTimeOffset(JsonElement parent, string name)
+        {
+            if (!parent.TryGetProperty(name, out var el) || el.ValueKind != JsonValueKind.String)
+                return null;
+
+            return DateTimeOffset.TryParse(
+                el.GetString(),
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var parsed)
+                ? parsed
+                : null;
         }
 
         internal static string? FormatResetCountdown(DateTimeOffset? resetAt)

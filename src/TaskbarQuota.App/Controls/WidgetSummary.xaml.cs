@@ -11,6 +11,7 @@ using Microsoft.UI.Xaml.Shapes;
 using Windows.Foundation;
 using Windows.UI;
 using TaskbarQuota.Usage;
+using TaskbarQuota.Usage.Providers;
 
 namespace TaskbarQuota.Controls
 {
@@ -47,6 +48,7 @@ namespace TaskbarQuota.Controls
         private List<WidgetUsageRow> _rows = new();
         private bool _forcePercentagesOnly;
         private UsageResult? _lastResult;
+        private ProviderId? _lastAppliedProvider;
         private string? _lastRenderSignature;
         private bool _hasRevealed;
         private bool _isActiveToolVisible = true;
@@ -118,6 +120,8 @@ namespace TaskbarQuota.Controls
                 return;
 
             var isFirstReveal = !_hasRevealed;
+            var providerChanged = _lastAppliedProvider != result.Id;
+            _lastAppliedProvider = result.Id;
             _lastRenderSignature = signature;
             _lastResult = result;
             ApplyTaskbarForeground();
@@ -138,6 +142,8 @@ namespace TaskbarQuota.Controls
                 BadgeText.Visibility = Visibility.Visible;
             }
 
+            ApplySynaraHostBadge(result.Id);
+
             _forcePercentagesOnly = false;
             if (!result.Ok || result.Fetch is null)
             {
@@ -147,7 +153,7 @@ namespace TaskbarQuota.Controls
                     new WidgetUsageRow(CompactLabel(result.Provider?.WeeklyLabel ?? "Usage"), 100, "!"),
                 };
                 RenderRows();
-                AnimateRender(isFirstReveal);
+                AnimateRender(isFirstReveal, instant: providerChanged);
                 ToolTipService.SetToolTip(this, $"{widgetName}: {result.Error ?? "Unavailable"}");
                 return;
             }
@@ -155,17 +161,17 @@ namespace TaskbarQuota.Controls
             var usage = result.Fetch.Usage;
             if (result.Id == ProviderId.OpenCode)
             {
-                ApplyZenDisplay(usage);
+                ApplyZenDisplay(usage, providerChanged);
                 return;
             }
             if (result.Id == ProviderId.Antigravity)
             {
-                ApplyAntigravityDisplay(usage);
+                ApplyAntigravityDisplay(usage, providerChanged);
                 return;
             }
             if (result.Id is ProviderId.Copilot or ProviderId.Grok && usage.Cost is { Label: "Credits" } credits)
             {
-                ApplyCreditsDisplay(result, usage, credits);
+                ApplyCreditsDisplay(result, usage, credits, providerChanged);
                 return;
             }
 
@@ -177,15 +183,44 @@ namespace TaskbarQuota.Controls
             }
             RenderRows();
             SetBars();
-            AnimateRender(isFirstReveal);
+            AnimateRender(isFirstReveal, instant: providerChanged);
 
             var tooltipLines = _rows.Select(FormatTooltipLine);
             var plan = FormatPlanLabel(result.Id, widgetName, usage.LoginMethod);
             var costTooltip = WidgetCostTooltipLine(result.Id, usage.Cost);
+            var resetCreditsTooltip = WidgetResetCreditsTooltipLine(usage.ResetCredits);
             ToolTipService.SetToolTip(this,
                 string.IsNullOrEmpty(plan)
-                    ? $"{widgetName}\n{string.Join("\n", tooltipLines)}{costTooltip}"
-                    : $"{widgetName} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}");
+                    ? $"{widgetName}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}"
+                    : $"{widgetName} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}");
+        }
+
+        /// <summary>
+        /// Badge the provider glyph with the Synara host mark when the active provider was resolved
+        /// through Synara's active thread. Hovering the mark shows the thread/model it came from.
+        /// </summary>
+        private void ApplySynaraHostBadge(ProviderId id)
+        {
+            var host = UsageCoordinator.Instance.ActiveSynaraHost;
+            bool show = host is { } h
+                && h.Provider == id
+                && UsageCoordinator.Instance.ActiveProvider == id;
+
+            if (!show)
+            {
+                HostBadgeBox.Visibility = Visibility.Collapsed;
+                ToolTipService.SetToolTip(HostBadgeBox, null);
+                return;
+            }
+
+            if (ViewModels.Ui.ParseFreshGeometry(ProviderGlyphs.Synara) is { } synara)
+                SetNormalizedGlyph(HostBadgeGlyph, synara, Foreground);
+            HostBadgeBox.Visibility = Visibility.Visible;
+
+            var tip = host!.Model is { Length: > 0 } model ? $"Synara · {model}" : "Synara";
+            if (host.ThreadTitle is { Length: > 0 } title)
+                tip += $"\n{title}";
+            ToolTipService.SetToolTip(HostBadgeBox, tip);
         }
 
         public void SetActiveToolVisible(bool isVisible)
@@ -217,6 +252,17 @@ namespace TaskbarQuota.Controls
             if (result.Id == ProviderId.Codex)
             {
                 var rows = BuildBaseRows(result, usage);
+                if (usage.ResetCredits is { AvailableCount: > 0 } resetCredits && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowResetCredits))
+                {
+                    string? expiresIn = CodexProvider.FormatResetCountdown(resetCredits.EarliestExpiresAt);
+                    rows.Add(new WidgetUsageRow(
+                        "Resets",
+                        0,
+                        resetCredits.AvailableCount.ToString("N0", CultureInfo.InvariantCulture),
+                        expiresIn,
+                        HasBar: false));
+                }
+
                 if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
                 {
                     rows.AddRange(usage.ExtraRateWindows.Select(w => new WidgetUsageRow(
@@ -319,7 +365,7 @@ namespace TaskbarQuota.Controls
             return rows;
         }
 
-        private void ApplyZenDisplay(UsageSnapshot usage)
+        private void ApplyZenDisplay(UsageSnapshot usage, bool providerChanged = false)
         {
             _forcePercentagesOnly = true;
             var balanceText = usage.Secondary?.ResetDescription;
@@ -339,7 +385,7 @@ namespace TaskbarQuota.Controls
                 return;
             }
             RenderRows();
-            AnimateRender(!_hasRevealed);
+            AnimateRender(!_hasRevealed, instant: providerChanged);
 
             ToolTipService.SetToolTip(this,
                 $"{usage.LoginMethod}\n" +
@@ -347,7 +393,7 @@ namespace TaskbarQuota.Controls
                 $"Balance: {(balanceText != null ? "$" + balanceText.Split(' ')[0] : "--")}");
         }
 
-        private void ApplyCreditsDisplay(UsageResult result, UsageSnapshot usage, CostSnapshot credits)
+        private void ApplyCreditsDisplay(UsageResult result, UsageSnapshot usage, CostSnapshot credits, bool providerChanged = false)
         {
             double limit = credits.Limit ?? 0;
             double remaining = credits.Amount;
@@ -387,7 +433,7 @@ namespace TaskbarQuota.Controls
             }
             RenderRows();
             SetBars();
-            AnimateRender(!_hasRevealed);
+            AnimateRender(!_hasRevealed, instant: providerChanged);
 
             var plan = FormatPlanLabel(result.Id, widgetName, usage.LoginMethod);
             var tooltip = string.IsNullOrEmpty(plan)
@@ -419,7 +465,33 @@ namespace TaskbarQuota.Controls
             return $"\n{cost.Label}: {cost.Display}";
         }
 
-        private void ApplyAntigravityDisplay(UsageSnapshot usage)
+        private static string WidgetResetCreditsTooltipLine(ResetCreditsSnapshot? resetCredits)
+        {
+            if (resetCredits is null)
+                return string.Empty;
+
+            var lines = new List<string>
+            {
+                $"Reset credits: {resetCredits.AvailableCount.ToString("N0", CultureInfo.InvariantCulture)} available",
+            };
+
+            int shown = 0;
+            for (int i = 0; i < resetCredits.Credits.Count && shown < 3; i++)
+            {
+                var credit = resetCredits.Credits[i];
+                string granted = FormatLocalDateTime(credit.GrantedAt);
+                string expires = FormatLocalDateTime(credit.ExpiresAt);
+                lines.Add($"Reset {shown + 1}: granted {granted}, expires {expires}");
+                shown++;
+            }
+
+            if (resetCredits.Credits.Count > shown)
+                lines.Add($"+{resetCredits.Credits.Count - shown} more reset credits");
+
+            return "\n" + string.Join("\n", lines);
+        }
+
+        private void ApplyAntigravityDisplay(UsageSnapshot usage, bool providerChanged = false)
         {
             var rows = new List<WidgetUsageRow>();
             // Icon already conveys the model family (Gemini vs Non-Gemini), so the widget row only needs the window.
@@ -454,7 +526,7 @@ namespace TaskbarQuota.Controls
                 return;
             }
             RenderRows();
-            AnimateRender(!_hasRevealed);
+            AnimateRender(!_hasRevealed, instant: providerChanged);
 
             var plan = FormatPlanLabel(ProviderId.Antigravity, "Antigravity", usage.LoginMethod);
             ToolTipService.SetToolTip(this,
@@ -473,11 +545,16 @@ namespace TaskbarQuota.Controls
                 RenderRows();
         }
 
-        private void AnimateRender(bool isFirstReveal)
+        private void AnimateRender(bool isFirstReveal, bool instant = false)
         {
             _hasRevealed = true;
             if (isFirstReveal)
                 AnimateFirstReveal();
+            else if (instant)
+            {
+                _softRefreshStoryboard?.Stop();
+                Panel.Opacity = 1;
+            }
             else
                 AnimateSoftRefresh();
         }
@@ -667,7 +744,12 @@ namespace TaskbarQuota.Controls
         {
             int rowSpan = isSingleRowGroup ? MaxRowsPerGroup : 1;
             int textSize = isSingleRowGroup ? WidgetFontSize + 1 : WidgetFontSize;
-            var value = CreateText(usageRow.Value, 0.86, TextAlignment.Center, textSize);
+            bool compactTextOnlyValue = !usageRow.HasBar && mode != WidgetDisplayMode.PercentagesOnly;
+            var value = CreateText(
+                usageRow.Value,
+                0.86,
+                compactTextOnlyValue ? TextAlignment.Left : TextAlignment.Center,
+                textSize);
             var reset = CreateResetText(usageRow, textSize);
 
             FrameworkElement label;
@@ -717,18 +799,33 @@ namespace TaskbarQuota.Controls
 
                 case WidgetDisplayMode.BarsAndPercentages:
                     value.Visibility = showPercentages ? Visibility.Visible : Visibility.Collapsed;
-                    barHost.Visibility = showBars && usageRow.HasBar ? Visibility.Visible : Visibility.Collapsed;
                     AddToPanel(label, row, firstColumn, rowSpan);
                     AddToPanel(reset, row, firstColumn + 1, rowSpan);
-                    AddToPanel(barHost, row, firstColumn + 2, rowSpan);
-                    AddToPanel(value, row, firstColumn + 3, rowSpan);
+                    if (usageRow.HasBar)
+                    {
+                        barHost.Visibility = showBars ? Visibility.Visible : Visibility.Collapsed;
+                        AddToPanel(barHost, row, firstColumn + 2, rowSpan);
+                        AddToPanel(value, row, firstColumn + 3, rowSpan);
+                    }
+                    else
+                    {
+                        Grid.SetColumnSpan(value, 2);
+                        AddToPanel(value, row, firstColumn + 2, rowSpan);
+                    }
                     break;
 
                 default:
-                    barHost.Visibility = showBars && usageRow.HasBar ? Visibility.Visible : Visibility.Collapsed;
                     AddToPanel(label, row, firstColumn, rowSpan);
                     AddToPanel(reset, row, firstColumn + 1, rowSpan);
-                    AddToPanel(barHost, row, firstColumn + 2, rowSpan);
+                    if (usageRow.HasBar)
+                    {
+                        barHost.Visibility = showBars ? Visibility.Visible : Visibility.Collapsed;
+                        AddToPanel(barHost, row, firstColumn + 2, rowSpan);
+                    }
+                    else
+                    {
+                        AddToPanel(value, row, firstColumn + 2, rowSpan);
+                    }
                     break;
             }
 
@@ -886,6 +983,16 @@ namespace TaskbarQuota.Controls
                 parts.Add(additional.BudgetUsd?.ToString(CultureInfo.InvariantCulture) ?? string.Empty);
                 parts.Add(additional.IsCredits ? "credits" : "usd");
             }
+            if (usage.ResetCredits is { } resetCredits)
+            {
+                parts.Add(resetCredits.AvailableCount.ToString(CultureInfo.InvariantCulture));
+                foreach (var credit in resetCredits.Credits)
+                {
+                    parts.Add(credit.Status);
+                    parts.Add(credit.GrantedAt?.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty);
+                    parts.Add(credit.ExpiresAt?.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty);
+                }
+            }
             AppendRateWindow(parts, usage.Primary);
             AppendRateWindow(parts, usage.Secondary);
             AppendRateWindow(parts, usage.ModelSpecific);
@@ -920,6 +1027,14 @@ namespace TaskbarQuota.Controls
             if (string.IsNullOrWhiteSpace(row.ResetDescription))
                 return $"{row.Label}: {row.Value}";
 
+            if (row.Label == "Resets")
+            {
+                string expiry = row.ResetDescription == "now"
+                    ? "oldest expires now"
+                    : $"oldest expires in {row.ResetDescription}";
+                return $"{row.Label}: {row.Value} - {expiry}";
+            }
+
             string reset = row.ResetDescription == "now"
                 ? "resets now"
                 : $"resets in {row.ResetDescription}";
@@ -944,6 +1059,15 @@ namespace TaskbarQuota.Controls
 
         private static string CompactResetDescription(string resetDescription)
             => resetDescription == "now" ? "now" : resetDescription.Replace(" ", "", StringComparison.Ordinal);
+
+        private static string FormatLocalDateTime(DateTimeOffset? timestamp)
+        {
+            if (timestamp is not DateTimeOffset value)
+                return "unknown";
+
+            var local = value.ToLocalTime();
+            return $"{local:MMM d h:mm tt}";
+        }
 
         private static Brush ResetBrush(string resetDescription)
         {

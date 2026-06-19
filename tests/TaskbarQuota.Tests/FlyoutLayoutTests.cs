@@ -4,7 +4,15 @@ public class FlyoutLayoutTests
 {
     [Fact]
     public void LogicalHeight_IsSizedForTheExpandedFlyout()
-        => Assert.Equal(556, FlyoutLayout.LogicalHeight);
+        => Assert.Equal(482, FlyoutLayout.LogicalHeight);
+
+    [Fact]
+    public void ComputeLogicalHeight_GrowsWithDetailContent()
+        => Assert.Equal(782, FlyoutLayout.ComputeLogicalHeight(620));
+
+    [Fact]
+    public void ComputeLogicalHeight_ClampsTallContent()
+        => Assert.Equal(922, FlyoutLayout.ComputeLogicalHeight(1200));
 
     [Fact]
     public void ComputeLogicalWidth_UsesWiderOfStripAndDetailContent()
@@ -17,7 +25,7 @@ public class FlyoutLayoutTests
     public void ComputeLogicalWidth_GrowsWithInstalledProviders()
     {
         int width = FlyoutLayout.ComputeLogicalWidth(stripIconCount: 9, detailContentWidth: 300);
-        Assert.Equal(520, width);
+        Assert.Equal(532, width);
     }
 
     [Fact]
