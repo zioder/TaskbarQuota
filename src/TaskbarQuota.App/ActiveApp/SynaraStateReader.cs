@@ -44,7 +44,7 @@ namespace TaskbarQuota.ActiveApp
         private static DateTime _cachedDbWriteUtc = DateTime.MinValue;
         private static SynaraSelection? _cachedSelection;
         // Thread titles change rarely; cache so the draft fast-path never has to open SQLite per tick.
-        private static readonly Dictionary<string, string?> ThreadTitleCache = new(StringComparer.Ordinal);
+        private static readonly Dictionary<(HostApp Host, string ThreadId), string?> ThreadTitleCache = new();
 
         /// <summary>Invalidate cached state so the next resolve re-reads (called by the file watcher).</summary>
         public static void InvalidateDraftCache()
@@ -141,7 +141,7 @@ namespace TaskbarQuota.ActiveApp
                 {
                     ctx = GetThreadLockContext(dbPath, focusedThreadId);
                     if (ctx != null)
-                        focusedSel = ResolveFocusedSelection(focusedThreadId, draft, ctx, includeThreadTitle);
+                        focusedSel = ResolveFocusedSelection(focusedThreadId, draft, ctx, includeThreadTitle, host);
                 }
 
                 // Candidate B — the global sticky composer selection, authoritative for a new/unsaved
@@ -164,7 +164,7 @@ namespace TaskbarQuota.ActiveApp
                 // Codex/Cursor/OpenCode) is ambiguous and intentionally NOT resolved here — it falls
                 // through to the authoritative selection so we never confidently show the wrong provider.
                 if (!string.IsNullOrEmpty(onScreenModel)
-                    && ResolveFromCatalog(onScreenModel, focusedThreadId, ctx, includeThreadTitle) is { } fast)
+                    && ResolveFromCatalog(onScreenModel, focusedThreadId, ctx, includeThreadTitle, host) is { } fast)
                 {
                     return fast;
                 }
@@ -304,7 +304,7 @@ namespace TaskbarQuota.ActiveApp
         /// null (shared/unknown), so the caller falls back to the authoritative active-provider selection.
         /// </summary>
         private static SynaraSelection? ResolveFromCatalog(
-            string onScreenModel, string? focusedThreadId, ThreadLockContext? ctx, bool includeThreadTitle)
+            string onScreenModel, string? focusedThreadId, ThreadLockContext? ctx, bool includeThreadTitle, HostApp host)
         {
             var core = ModelCore(onScreenModel);
             if (core.Length == 0)
@@ -353,7 +353,7 @@ namespace TaskbarQuota.ActiveApp
 
             LogByModel(onScreenModel, core, 1, $"{provider}/{modelId}");
             var title = focusedThreadId is { Length: > 0 }
-                ? (includeThreadTitle ? GetThreadTitle(focusedThreadId) : TryGetCachedThreadTitle(focusedThreadId))
+                ? (includeThreadTitle ? GetThreadTitle(focusedThreadId, host) : TryGetCachedThreadTitle(focusedThreadId, host))
                 : null;
             return new SynaraSelection(provider, literal, modelId, title);
         }
@@ -393,18 +393,18 @@ namespace TaskbarQuota.ActiveApp
         }
 
         /// <summary>Thread title for tooltips, cached per id (titles rarely change; avoids per-tick SQLite).</summary>
-        private static string? GetThreadTitle(string threadId)
+        private static string? GetThreadTitle(string threadId, HostApp host)
         {
             lock (Gate)
             {
-                if (ThreadTitleCache.TryGetValue(threadId, out var cached))
+                if (ThreadTitleCache.TryGetValue((host, threadId), out var cached))
                     return cached;
             }
 
             string? title = null;
             try
             {
-                var dbPath = GetStateDbPath();
+                var dbPath = GetStateDbPath(host);
                 if (dbPath != null)
                 {
                     using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadWrite;Cache=Private");
@@ -419,21 +419,21 @@ namespace TaskbarQuota.ActiveApp
             catch { /* title is cosmetic */ }
 
             lock (Gate)
-                ThreadTitleCache[threadId] = title;
+                ThreadTitleCache[(host, threadId)] = title;
             return title;
         }
 
-        private static string? TryGetCachedThreadTitle(string threadId)
+        private static string? TryGetCachedThreadTitle(string threadId, HostApp host)
         {
             lock (Gate)
-                return ThreadTitleCache.TryGetValue(threadId, out var cached) ? cached : null;
+                return ThreadTitleCache.TryGetValue((host, threadId), out var cached) ? cached : null;
         }
 
         /// <summary>
         /// Locate <c>state.sqlite</c>. The base dir is the host's <c>*_HOME</c> env (else <c>~/.synara</c>
         /// for Synara, <c>~/.t3</c> for upstream T3 Code); the desktop build writes to <c>userdata</c> and
-        /// the dev build to <c>dev</c>. When both forks are installed, <paramref name="host"/> orders the
-        /// roots so the foreground app's DB wins.
+        /// the dev build to <c>dev</c>. Roots remain host-scoped so one fork can never supply the other's
+        /// selection when both are installed.
         /// </summary>
         internal static string? GetStateDbPath(HostApp host = HostApp.Synara)
         {
@@ -471,11 +471,8 @@ namespace TaskbarQuota.ActiveApp
                 yield return Path.Combine(userProfile, ".t3code"); // legacy
             }
 
-            var roots = host == HostApp.T3Code
-                ? T3CodeRoots().Concat(SynaraRoots())
-                : SynaraRoots().Concat(T3CodeRoots());
-
-            return roots.Distinct(StringComparer.OrdinalIgnoreCase);
+            return (host == HostApp.T3Code ? T3CodeRoots() : SynaraRoots())
+                .Distinct(StringComparer.OrdinalIgnoreCase);
         }
 
         private static DateTime LatestWriteUtc(string dbPath)
@@ -616,7 +613,8 @@ namespace TaskbarQuota.ActiveApp
             string threadId,
             SynaraComposerDraftReader.DraftSelection? draft,
             ThreadLockContext ctx,
-            bool includeThreadTitle)
+            bool includeThreadTitle,
+            HostApp host)
         {
             var draftActive = draft?.ProviderLiteral is { Length: > 0 } dp ? dp : null;
             var threadProvider = ctx.ThreadProvider ?? ctx.ProjectProvider;
@@ -635,7 +633,7 @@ namespace TaskbarQuota.ActiveApp
             if (MapProvider(effective, model) is not { } provider)
                 return null;
 
-            var title = includeThreadTitle ? (ctx.Title ?? GetThreadTitle(threadId)) : TryGetCachedThreadTitle(threadId);
+            var title = includeThreadTitle ? (ctx.Title ?? GetThreadTitle(threadId, host)) : TryGetCachedThreadTitle(threadId, host);
             return new SynaraSelection(provider, effective, model, title);
         }
 

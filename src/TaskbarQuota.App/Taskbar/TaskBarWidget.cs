@@ -439,7 +439,7 @@ namespace TaskbarQuota.Taskbar
         {
             if (IsRtlUI)
             {
-                if (wbRect is { } wb && wb.left > 0)
+                if (wbRect is { } wb && wb.right > wb.left)
                     return wb.left - WidgetHostWidth;
                 return taskbarRect.right - WidgetHostWidth;
             }
