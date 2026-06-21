@@ -181,7 +181,7 @@ namespace TaskbarQuota.ActiveApp
             }
 
             procName ??= TryGetProcessName(foregroundPid);
-            if (!SynaraStateReader.IsSynaraProcessName(procName))
+            if (SynaraStateReader.ResolveHost(procName) is not { } host)
                 return null;
 
             // Read outside the detect lock so a slow full Detect() (WMI/terminal scan) never blocks
@@ -189,7 +189,8 @@ namespace TaskbarQuota.ActiveApp
             var selection = SynaraStateReader.GetActiveSelection(
                 includeThreadTitle: false,
                 preferStickyComposerSelection: true,
-                onScreenModel: onScreenModel);
+                onScreenModel: onScreenModel,
+                host: host);
 
             lock (_detectGate)
             {
@@ -227,6 +228,30 @@ namespace TaskbarQuota.ActiveApp
             procName ??= TryGetProcessName(foregroundPid);
 
             return SynaraStateReader.IsSynaraProcessName(procName) ? hwnd : IntPtr.Zero;
+        }
+
+        /// <summary>Which host fork (Synara / T3 Code) is foreground right now, or null when neither is.</summary>
+        public HostApp? TryGetForegroundHost()
+        {
+            var hwnd = GetForegroundWindow();
+            if (hwnd == IntPtr.Zero)
+                return null;
+
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            if (pid == 0)
+                return null;
+
+            var foregroundPid = (int)pid;
+            string? procName;
+            lock (_detectGate)
+            {
+                procName = foregroundPid == _lastForegroundPid
+                    ? _lastForegroundProcessName
+                    : null;
+            }
+            procName ??= TryGetProcessName(foregroundPid);
+
+            return SynaraStateReader.ResolveHost(procName);
         }
 
         /// <summary>
@@ -325,14 +350,15 @@ namespace TaskbarQuota.ActiveApp
             // Synara host: a meta-app wrapping many providers. Resolve the inner provider from the active
             // thread's persisted model selection. A null selection (unsupported provider / no thread) falls
             // through to the last-active provider, so we don't show Synara for providers we can't track.
-            if (SynaraStateReader.IsSynaraProcessName(procName))
+            if (SynaraStateReader.ResolveHost(procName) is { } host)
             {
                 // Same parameters as the dedicated Synara poll (DetectSynaraSelectionFast) so this tick
                 // path resolves the identical provider — otherwise the two fight and the widget flaps.
                 var selection = SynaraStateReader.GetActiveSelection(
                     includeThreadTitle: true,
                     preferStickyComposerSelection: true,
-                    onScreenModel: _synaraUia.TryReadActiveModelName(hwnd));
+                    onScreenModel: _synaraUia.TryReadActiveModelName(hwnd),
+                    host: host);
                 _synaraHost = selection;
                 if (selection is { } s)
                     return _lastForegroundResult = s.Provider;

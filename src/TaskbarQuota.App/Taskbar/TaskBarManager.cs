@@ -144,7 +144,12 @@ namespace TaskbarQuota.Taskbar
             var coordinator = UsageCoordinator.Instance;
             summary.DispatcherQueue.TryEnqueue(() =>
             {
-                var target = coordinator.ActiveProvider ?? ProviderId.Codex;
+                // No enabled+available provider -> hide instead of falling back to a disabled default (#7).
+                if (coordinator.WidgetDisplayProvider is not { } target)
+                {
+                    summary.SetActiveToolVisible(false);
+                    return;
+                }
                 UsageResult? toApply = coordinator.LastState is { } last && last.Id == target
                     ? last
                     : coordinator.Service.TryGetCached(target, out var cached)
@@ -161,7 +166,7 @@ namespace TaskbarQuota.Taskbar
                     LogWidgetApply(result.Id, "sync");
                 }
 
-                bool isVisible = coordinator.IsActiveToolPresent && WidgetSettingsService.IsProviderVisible(target);
+                bool isVisible = coordinator.IsActiveToolPresent;
                 summary.SetActiveToolVisible(isVisible);
 
                 if (toApply is null)
@@ -206,15 +211,15 @@ namespace TaskbarQuota.Taskbar
             var widget = _widget;
             if (widget?.Summary is null) return;
 
-            var active = UsageCoordinator.Instance.ActiveProvider ?? ProviderId.Codex;
-            if (result.Id != active)
+            var active = UsageCoordinator.Instance.WidgetDisplayProvider;
+            if (active is null || result.Id != active)
                 return;
 
             widget.Summary.DispatcherQueue.TryEnqueue(DispatcherQueuePriority.High, () =>
             {
                 widget.Summary.Apply(result);
                 LogWidgetApply(result.Id, "state");
-                bool isVisible = UsageCoordinator.Instance.IsActiveToolPresent && WidgetSettingsService.IsProviderVisible(active);
+                bool isVisible = UsageCoordinator.Instance.IsActiveToolPresent;
                 widget.Summary.SetActiveToolVisible(isVisible);
             });
         }
@@ -236,8 +241,7 @@ namespace TaskbarQuota.Taskbar
         {
             var widget = _widget;
             if (widget?.Summary is null) return;
-            var active = UsageCoordinator.Instance.ActiveProvider ?? ProviderId.Codex;
-            bool isVisible = isPresent && WidgetSettingsService.IsProviderVisible(active);
+            bool isVisible = isPresent && UsageCoordinator.Instance.WidgetDisplayProvider is not null;
             widget.Summary.DispatcherQueue.TryEnqueue(() => widget.Summary.SetActiveToolVisible(isVisible));
         }
 

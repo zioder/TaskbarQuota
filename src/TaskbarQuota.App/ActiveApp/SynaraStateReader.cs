@@ -8,6 +8,15 @@ using TaskbarQuota.Usage;
 
 namespace TaskbarQuota.ActiveApp
 {
+    /// <summary>Which fork of the t3 meta-app a selection / detection came from (drives the host badge).</summary>
+    public enum HostApp
+    {
+        /// <summary>Synara (productName "Synara"; base dir <c>~/.synara</c>; localStorage prefix <c>synara:</c>).</summary>
+        Synara,
+        /// <summary>Upstream T3 Code (productName "T3 Code (Alpha)"; base dir <c>~/.t3</c>; localStorage prefix <c>t3code:</c>).</summary>
+        T3Code,
+    }
+
     /// <summary>
     /// Synara is a meta-app that wraps many coding agents (Codex, Claude, Cursor, Grok, OpenCode, ...)
     /// behind one window, with a per-thread provider/model selection. When Synara is the focused app we
@@ -26,7 +35,8 @@ namespace TaskbarQuota.ActiveApp
             ProviderId Provider,
             string ProviderLiteral,
             string? Model,
-            string? ThreadTitle);
+            string? ThreadTitle,
+            HostApp Host = HostApp.Synara);
 
         // Short cache keyed off the DB's last-write time so rapid taskbar ticks don't reopen SQLite.
         private static readonly object Gate = new();
@@ -51,15 +61,34 @@ namespace TaskbarQuota.ActiveApp
             }
         }
 
-        public static bool IsSynaraProcessName(string? processName) =>
-            processName != null
-            && (processName.Equals("synara", StringComparison.OrdinalIgnoreCase)
-                || processName.Equals("synara (dev)", StringComparison.OrdinalIgnoreCase)
-                || processName.Equals("synara-desktop", StringComparison.OrdinalIgnoreCase)
-                || processName.Equals("dpcode", StringComparison.OrdinalIgnoreCase)
-                || processName.Equals("dpcode-dev", StringComparison.OrdinalIgnoreCase)
-                || processName.Equals("t3code", StringComparison.OrdinalIgnoreCase)
-                || processName.Equals("t3code-dev", StringComparison.OrdinalIgnoreCase));
+        // Process (executable, no extension) names per host. Synara/DP Code are the rebranded fork; T3 Code
+        // is upstream pingdotgg/t3code — its Windows build ships executableName "t3code" while the macOS/dev
+        // builds surface the productName "T3 Code (Alpha|Nightly|Dev)".
+        private static readonly string[] SynaraProcessNames =
+        {
+            "synara", "synara (dev)", "synara-desktop", "dpcode", "dpcode-dev",
+        };
+        private static readonly string[] T3CodeProcessNames =
+        {
+            "t3code", "t3code-dev",
+            "T3 Code (Alpha)", "T3 Code (Nightly)", "T3 Code (Dev)",
+        };
+
+        public static bool IsSynaraProcessName(string? processName) => ResolveHost(processName) != null;
+
+        /// <summary>Which host a foreground process belongs to, or null when it is neither Synara nor T3 Code.</summary>
+        public static HostApp? ResolveHost(string? processName)
+        {
+            if (processName == null)
+                return null;
+            foreach (var name in T3CodeProcessNames)
+                if (processName.Equals(name, StringComparison.OrdinalIgnoreCase))
+                    return HostApp.T3Code;
+            foreach (var name in SynaraProcessNames)
+                if (processName.Equals(name, StringComparison.OrdinalIgnoreCase))
+                    return HostApp.Synara;
+            return null;
+        }
 
         /// <summary>
         /// Resolve the active thread's provider from Synara's state DB, or null when Synara is not
@@ -68,19 +97,40 @@ namespace TaskbarQuota.ActiveApp
         public static SynaraSelection? GetActiveSelection(
             bool includeThreadTitle = true,
             bool preferStickyComposerSelection = false,
-            string? onScreenModel = null)
+            string? onScreenModel = null,
+            HostApp host = HostApp.Synara)
         {
             try
             {
-                var dbPath = GetStateDbPath();
-                var focusedThreadId = SynaraComposerDraftReader.GetFocusedThreadId();
+                return Stamp(GetActiveSelectionCore(includeThreadTitle, preferStickyComposerSelection, onScreenModel, host), host);
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Log.Debug($"Synara state read failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>Tag a resolved selection with the host it came from so the UI can badge it (Synara vs T3 Code).</summary>
+        private static SynaraSelection? Stamp(SynaraSelection? selection, HostApp host) =>
+            selection is null ? null : selection with { Host = host };
+
+        private static SynaraSelection? GetActiveSelectionCore(
+            bool includeThreadTitle,
+            bool preferStickyComposerSelection,
+            string? onScreenModel,
+            HostApp host)
+        {
+            {
+                var dbPath = GetStateDbPath(host);
+                var focusedThreadId = SynaraComposerDraftReader.GetFocusedThreadId(host);
 
                 var draft = focusedThreadId is { Length: > 0 }
-                    ? SynaraComposerDraftReader.TryGetDraft(focusedThreadId)
+                    ? SynaraComposerDraftReader.TryGetDraft(focusedThreadId, host)
                     : null;
                 var sticky = preferStickyComposerSelection
-                    ? SynaraComposerDraftReader.TryGetStickySelectionFast()
-                        ?? SynaraComposerDraftReader.GetStickySelection()
+                    ? SynaraComposerDraftReader.TryGetStickySelectionFast(host)
+                        ?? SynaraComposerDraftReader.GetStickySelection(host)
                     : null;
 
                 // Candidate A — the focused thread, resolved with Synara's real lock precedence
@@ -144,7 +194,7 @@ namespace TaskbarQuota.ActiveApp
                     if (_cachedDbPath == dbPath && _cachedDbWriteUtc == writeUtc)
                         return _cachedSelection;
                 }
-                var newest = ReadNewestSelection(dbPath);
+                var newest = ReadNewestSelection(dbPath, host);
                 lock (Gate)
                 {
                     _cachedDbPath = dbPath;
@@ -152,11 +202,6 @@ namespace TaskbarQuota.ActiveApp
                     _cachedSelection = newest;
                 }
                 return newest;
-            }
-            catch (Exception ex)
-            {
-                Diagnostics.Log.Debug($"Synara state read failed: {ex.Message}");
-                return null;
             }
         }
 
@@ -385,13 +430,14 @@ namespace TaskbarQuota.ActiveApp
         }
 
         /// <summary>
-        /// Locate <c>state.sqlite</c>. Synara's base dir is <c>$SYNARA_HOME</c> with legacy
-        /// <c>DPCODE_HOME</c> / <c>T3CODE_HOME</c> fallbacks; the desktop build writes to
-        /// <c>userdata</c> and the dev build to <c>dev</c>.
+        /// Locate <c>state.sqlite</c>. The base dir is the host's <c>*_HOME</c> env (else <c>~/.synara</c>
+        /// for Synara, <c>~/.t3</c> for upstream T3 Code); the desktop build writes to <c>userdata</c> and
+        /// the dev build to <c>dev</c>. When both forks are installed, <paramref name="host"/> orders the
+        /// roots so the foreground app's DB wins.
         /// </summary>
-        internal static string? GetStateDbPath()
+        internal static string? GetStateDbPath(HostApp host = HostApp.Synara)
         {
-            foreach (var home in GetStateRoots())
+            foreach (var home in GetStateRoots(host))
             {
                 foreach (var profile in new[] { "userdata", "dev" })
                 {
@@ -404,20 +450,30 @@ namespace TaskbarQuota.ActiveApp
             return null;
         }
 
-        private static IEnumerable<string> GetStateRoots()
+        private static IEnumerable<string> GetStateRoots(HostApp host = HostApp.Synara)
         {
-            var roots = new List<string>();
-            foreach (var envName in new[] { "SYNARA_HOME", "DPCODE_HOME", "T3CODE_HOME" })
+            var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+            // Each host's roots in priority order: its own env override, then its home dir(s).
+            IEnumerable<string> SynaraRoots()
             {
-                var value = Environment.GetEnvironmentVariable(envName)?.Trim();
-                if (!string.IsNullOrEmpty(value))
-                    roots.Add(value);
+                foreach (var envName in new[] { "SYNARA_HOME", "DPCODE_HOME" })
+                    if (Environment.GetEnvironmentVariable(envName)?.Trim() is { Length: > 0 } v)
+                        yield return v;
+                yield return Path.Combine(userProfile, ".synara");
+                yield return Path.Combine(userProfile, ".dpcode");
+            }
+            IEnumerable<string> T3CodeRoots()
+            {
+                if (Environment.GetEnvironmentVariable("T3CODE_HOME")?.Trim() is { Length: > 0 } v)
+                    yield return v;
+                yield return Path.Combine(userProfile, ".t3");
+                yield return Path.Combine(userProfile, ".t3code"); // legacy
             }
 
-            var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            roots.Add(Path.Combine(userProfile, ".synara"));
-            roots.Add(Path.Combine(userProfile, ".dpcode"));
-            roots.Add(Path.Combine(userProfile, ".t3code"));
+            var roots = host == HostApp.T3Code
+                ? T3CodeRoots().Concat(SynaraRoots())
+                : SynaraRoots().Concat(T3CodeRoots());
 
             return roots.Distinct(StringComparer.OrdinalIgnoreCase);
         }
@@ -583,7 +639,11 @@ namespace TaskbarQuota.ActiveApp
             return new SynaraSelection(provider, effective, model, title);
         }
 
-        /// <summary>Parse <c>{"provider":"...","model":"..."}</c> into (provider, model); nulls when absent.</summary>
+        /// <summary>
+        /// Parse <c>{"provider"|"instanceId":"...","model":"..."}</c> into (provider, model); nulls when
+        /// absent. Synara stores the provider under <c>provider</c>; upstream T3 Code's post-migration
+        /// ModelSelection uses <c>instanceId</c> (pre-migration <c>provider</c>) — so both are read.
+        /// </summary>
         private static (string? Provider, string? Model) ParseProviderModel(string? json)
         {
             if (string.IsNullOrWhiteSpace(json))
@@ -593,8 +653,7 @@ namespace TaskbarQuota.ActiveApp
                 using var doc = JsonDocument.Parse(json);
                 if (doc.RootElement.ValueKind != JsonValueKind.Object)
                     return (null, null);
-                string? provider = doc.RootElement.TryGetProperty("provider", out var p) && p.ValueKind == JsonValueKind.String
-                    ? p.GetString() : null;
+                string? provider = ReadProviderLiteral(doc.RootElement);
                 string? model = doc.RootElement.TryGetProperty("model", out var m) && m.ValueKind == JsonValueKind.String
                     ? m.GetString() : null;
                 return (provider, model);
@@ -605,7 +664,7 @@ namespace TaskbarQuota.ActiveApp
             }
         }
 
-        private static SynaraSelection? ReadNewestSelection(string dbPath)
+        private static SynaraSelection? ReadNewestSelection(string dbPath, HostApp host = HostApp.Synara)
         {
             using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadWrite;Cache=Private");
             conn.Open();
@@ -633,7 +692,7 @@ namespace TaskbarQuota.ActiveApp
                 modelJson = reader.IsDBNull(2) ? null : reader.GetString(2);
             }
 
-            return ResolveSelection(threadId, modelJson, title, requireKnownThread: true);
+            return ResolveSelection(threadId, modelJson, title, requireKnownThread: true, host: host);
         }
 
         /// <summary>
@@ -648,10 +707,11 @@ namespace TaskbarQuota.ActiveApp
             string? threadId,
             string? modelSelectionJson,
             string? threadTitle,
-            bool requireKnownThread = true)
+            bool requireKnownThread = true,
+            HostApp host = HostApp.Synara)
         {
             if (threadId is { Length: > 0 }
-                && SynaraComposerDraftReader.TryGetDraft(threadId) is { } draft
+                && SynaraComposerDraftReader.TryGetDraft(threadId, host) is { } draft
                 && MapProvider(draft.ProviderLiteral, draft.Model) is { } draftProvider)
             {
                 return new SynaraSelection(draftProvider, draft.ProviderLiteral, draft.Model, threadTitle);
@@ -661,25 +721,41 @@ namespace TaskbarQuota.ActiveApp
         }
 
         /// <summary>
-        /// Parse Synara's <c>model_selection_json</c> (<c>{"provider":"opencode","model":"opencode-go/kimi"}</c>)
-        /// into a Win-CodexBar provider. Pure for unit testing. Returns null for unsupported providers.
+        /// Read the provider literal from a <c>model_selection_json</c> object: Synara stores it under
+        /// <c>provider</c>; upstream T3 Code's post-migration ModelSelection uses <c>instanceId</c>
+        /// (pre-migration <c>provider</c>). Returns null when neither is a non-empty string.
+        /// </summary>
+        private static string? ReadProviderLiteral(JsonElement obj)
+        {
+            foreach (var key in new[] { "provider", "instanceId" })
+                if (obj.TryGetProperty(key, out var p) && p.ValueKind == JsonValueKind.String
+                    && p.GetString() is { Length: > 0 } literal)
+                    return literal;
+            return null;
+        }
+
+        /// <summary>
+        /// Parse a thread's <c>model_selection_json</c> into a Win-CodexBar provider. Synara writes
+        /// <c>{"provider":"opencode","model":"opencode-go/kimi"}</c>; T3 Code writes
+        /// <c>{"instanceId":"opencode","model":"...","options":[...]}</c>. Pure for unit testing.
+        /// Returns null for unsupported providers.
         /// </summary>
         internal static SynaraSelection? ParseSelection(string? modelSelectionJson, string? threadTitle)
         {
             if (string.IsNullOrWhiteSpace(modelSelectionJson))
                 return null;
 
-            string providerLiteral;
+            string? providerLiteral;
             string? model = null;
             try
             {
                 using var doc = JsonDocument.Parse(modelSelectionJson);
-                if (doc.RootElement.ValueKind != JsonValueKind.Object
-                    || !doc.RootElement.TryGetProperty("provider", out var providerProp)
-                    || providerProp.ValueKind != JsonValueKind.String)
+                if (doc.RootElement.ValueKind != JsonValueKind.Object)
                     return null;
 
-                providerLiteral = providerProp.GetString() ?? string.Empty;
+                providerLiteral = ReadProviderLiteral(doc.RootElement);
+                if (providerLiteral is null)
+                    return null;
                 if (doc.RootElement.TryGetProperty("model", out var modelProp) && modelProp.ValueKind == JsonValueKind.String)
                     model = modelProp.GetString();
             }
