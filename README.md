@@ -58,6 +58,11 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 
 ## Features
 
+### What's new in 1.0.14
+
+- **T3 Code detection** — TaskbarQuota now recognises upstream T3 Code and attributes the active thread's usage to its selected provider, with a dedicated T3 Code badge in the taskbar widget.
+- **More stable taskbar placement** — the widget's resting position stays steady as taskbar app buttons change, and provider-widget fallback respects the enabled provider settings.
+
 ### What's new in 1.0.13
 
 #### New features
