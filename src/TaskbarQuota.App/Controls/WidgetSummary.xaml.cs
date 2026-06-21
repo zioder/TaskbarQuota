@@ -213,11 +213,14 @@ namespace TaskbarQuota.Controls
                 return;
             }
 
-            if (ViewModels.Ui.ParseFreshGeometry(ProviderGlyphs.Synara) is { } synara)
-                SetNormalizedGlyph(HostBadgeGlyph, synara, Foreground);
+            var isT3Code = host!.Host == ActiveApp.HostApp.T3Code;
+            var glyphPath = isT3Code ? ProviderGlyphs.T3Code : ProviderGlyphs.Synara;
+            if (ViewModels.Ui.ParseFreshGeometry(glyphPath) is { } hostGlyph)
+                SetNormalizedGlyph(HostBadgeGlyph, hostGlyph, Foreground);
             HostBadgeBox.Visibility = Visibility.Visible;
 
-            var tip = host!.Model is { Length: > 0 } model ? $"Synara · {model}" : "Synara";
+            var hostName = isT3Code ? "T3 Code" : "Synara";
+            var tip = host.Model is { Length: > 0 } model ? $"{hostName} · {model}" : hostName;
             if (host.ThreadTitle is { Length: > 0 } title)
                 tip += $"\n{title}";
             ToolTipService.SetToolTip(HostBadgeBox, tip);

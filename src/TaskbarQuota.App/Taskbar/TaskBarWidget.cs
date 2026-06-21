@@ -31,6 +31,9 @@ namespace TaskbarQuota.Taskbar
 
         private static readonly bool IsRtlUI = System.Globalization.CultureInfo.CurrentUICulture.TextInfo.IsRightToLeft;
 
+        // Minimum horizontal recompute delta (logical px, DPI-scaled) before the resting widget is moved.
+        private int RepositionDeadbandPx => (int)Math.Ceiling(2 * dpiScale);
+
         private readonly double dpiScale;
         private readonly IntPtr hwndShell;
         private readonly IntPtr hwndTrayNotify;
@@ -205,39 +208,44 @@ namespace TaskbarQuota.Taskbar
             User32.GetWindowRect(hwndShell, out RECT taskbarRect);
 
             int offsetX = LoadCustomPosition();
+            bool useDefault = offsetX == -1;
             User32.GetWindowRect(hwndTrayNotify, out RECT trayNotifyRect);
-            if (offsetX == -1)
+            User32.GetWindowRect(hwndReBar, out RECT barRect);
+            // Resting position uses the stable lanes (no running-app buttons) so it doesn't jitter as apps
+            // open/close; manual drag (MoveWidgetWithCursor) keeps the full band-avoiding lanes.
+            var lanes = GetWidgetLanes(taskbarRect, trayNotifyRect, barRect, stableOnly: true);
+
+            if (useDefault)
             {
                 _ = isWidgetsEnabled;
+                // Default anchor: FAR LEFT of the items area — immediately right of the Widgets button (it's
+                // always pinned far-left on Win11) or, on a left-aligned taskbar, right of the Start button;
+                // otherwise the very left edge. (Previously this anchored near the tray / centred cluster.)
                 RECT? wbRect = await taskbarWatcher.GetWidgetsButtonRectAsync();
-
-                if (isCentered)
-                {
-                    offsetX = IsRtlUI ? (wbRect?.left ?? taskbarRect.right) - WidgetHostWidth : (wbRect?.right ?? 0);
-                }
-                else
-                {
-                    if (IsRtlUI)
-                        offsetX = (wbRect is { } r && (r.left - trayNotifyRect.right) < WidgetHostWidth) ? r.right : trayNotifyRect.right;
-                    else
-                        offsetX = (wbRect is { } r && (trayNotifyRect.left - r.right) < WidgetHostWidth) ? r.left - WidgetHostWidth : trayNotifyRect.left - WidgetHostWidth;
-                }
+                offsetX = ComputeFarLeftAnchor(taskbarRect, trayNotifyRect, wbRect, isCentered);
 
                 try
                 {
+                    // Step right past any other injected widget we'd overlap so two add-ons don't stack.
                     foreach (var wnd in GetOtherInjectedWindows())
                     {
                         User32.GetWindowRect(wnd, out var injectedBounds);
                         if (injectedBounds.right < offsetX || injectedBounds.left > (offsetX + WidgetHostWidth)) continue;
-                        offsetX = (isCentered == IsRtlUI) ? injectedBounds.left - WidgetHostWidth : injectedBounds.right;
+                        offsetX = IsRtlUI ? injectedBounds.left - WidgetHostWidth : injectedBounds.right;
                     }
                 }
                 catch (Exception ex) { Log.Warning(ex, "overlap scan failed"); }
+
+                // Keep it on the taskbar and clear of the tray, but do NOT snap to the right lane.
+                int minX = Math.Max(0, taskbarRect.left);
+                int maxX = Math.Max(minX, trayNotifyRect.left - WidgetHostWidth);
+                offsetX = Math.Clamp(offsetX, minX, maxX);
+            }
+            else
+            {
+                offsetX = NormalizeWidgetX(offsetX, lanes, preferRightLane: true);
             }
 
-            User32.GetWindowRect(hwndReBar, out RECT barRect);
-            var lanes = GetWidgetLanes(taskbarRect, trayNotifyRect, barRect);
-            offsetX = NormalizeWidgetX(offsetX, lanes, preferRightLane: true);
             int offsetY = barRect.top - taskbarRect.top;
 
             if (currentOffsetY != offsetY)
@@ -245,8 +253,10 @@ namespace TaskbarQuota.Taskbar
                 appWindow.MoveAndResize(new RectInt32(offsetX, offsetY, WidgetHostWidth, barRect.bottom - barRect.top));
                 currentOffsetX = offsetX; currentOffsetY = offsetY;
             }
-            else if (currentOffsetX != offsetX)
+            else if (Math.Abs(currentOffsetX - offsetX) >= RepositionDeadbandPx)
             {
+                // Deadband: ignore sub-threshold recompute deltas (rounding / transient tray width changes)
+                // so the widget doesn't visibly twitch on routine taskbar events.
                 appWindow.Move(new PointInt32(offsetX, offsetY));
                 currentOffsetX = offsetX;
             }
@@ -378,7 +388,12 @@ namespace TaskbarQuota.Taskbar
             lastCursorPositionX = cursorX;
         }
 
-        private TaskbarLanes GetWidgetLanes(RECT taskbarRect, RECT trayNotifyRect, RECT barRect)
+        // stableOnly: when true the forbidden band excludes the running-apps button list, whose bounds
+        // grow/shrink every time an app is opened or focused. Including them in the RESTING-position
+        // computation makes the widget hop around as you switch apps (most visible on a centered Win11
+        // taskbar) — issue #7 case 1. Manual dragging still avoids them, so the user can't drop the widget
+        // on top of the app buttons.
+        private TaskbarLanes GetWidgetLanes(RECT taskbarRect, RECT trayNotifyRect, RECT barRect, bool stableOnly = false)
         {
             int forbiddenLeft = barRect.left;
             int forbiddenRight = barRect.right;
@@ -387,7 +402,7 @@ namespace TaskbarQuota.Taskbar
                 forbiddenLeft = Math.Min(forbiddenLeft, startRect.left);
                 forbiddenRight = Math.Max(forbiddenRight, startRect.right);
             }
-            foreach (var bounds in GetTaskbarItemBandWindows())
+            foreach (var bounds in GetTaskbarItemBandWindows(includeAppButtons: !stableOnly))
             {
                 forbiddenLeft = Math.Min(forbiddenLeft, bounds.left);
                 forbiddenRight = Math.Max(forbiddenRight, bounds.right);
@@ -417,6 +432,27 @@ namespace TaskbarQuota.Taskbar
             return new TaskbarLanes(leftMin, leftMax, rightMin, rightMax);
         }
 
+        // The default "far left" X: hugging the left end of the taskbar's item area. On Win11 the Widgets
+        // button is pinned far-left, so we sit just right of it; on a left-aligned classic taskbar we sit
+        // right of the Start button; otherwise the very left edge. RTL mirrors to the visual start (right).
+        private int ComputeFarLeftAnchor(RECT taskbarRect, RECT trayNotifyRect, RECT? wbRect, bool isCentered)
+        {
+            if (IsRtlUI)
+            {
+                if (wbRect is { } wb && wb.right > wb.left)
+                    return wb.left - WidgetHostWidth;
+                return taskbarRect.right - WidgetHostWidth;
+            }
+
+            int anchor = Math.Max(0, taskbarRect.left);
+            if (wbRect is { } w && w.right > w.left)
+                anchor = Math.Max(anchor, w.right);
+            else if (!isCentered && hwndStart != IntPtr.Zero
+                     && User32.GetWindowRect(hwndStart, out RECT startRect) && startRect.right > startRect.left)
+                anchor = Math.Max(anchor, startRect.right);
+            return anchor;
+        }
+
         private int NormalizeWidgetX(int x, TaskbarLanes lanes, bool preferRightLane)
         {
             if (x <= lanes.LeftMax)
@@ -442,8 +478,9 @@ namespace TaskbarQuota.Taskbar
             return cursorDelta < 0 ? lanes.RightMin : lanes.LeftMax;
         }
 
-        private List<RECT> GetTaskbarItemBandWindows()
+        private List<RECT> GetTaskbarItemBandWindows(bool includeAppButtons = true)
         {
+            _enumIncludeAppButtons = includeAppButtons;
             var windows = new List<RECT>();
             var gc = GCHandle.Alloc(windows);
             try { User32.EnumChildWindows(hwndShell, EnumTaskbarItemBandWindow, GCHandle.ToIntPtr(gc)); }
@@ -451,11 +488,19 @@ namespace TaskbarQuota.Taskbar
             return windows;
         }
 
+        // Set by GetTaskbarItemBandWindows just before each EnumChildWindows pass (UI thread, not reentrant).
+        private bool _enumIncludeAppButtons = true;
+
         private bool EnumTaskbarItemBandWindow(IntPtr hWnd, IntPtr lParam)
         {
             var builder = new StringBuilder(256);
             User32.GetClassName(hWnd, builder, builder.Capacity);
             string className = builder.ToString();
+            // MSTaskSwWClass / MSTaskListWClass are the running-app buttons (volatile width). Skip them when
+            // computing the stable resting position so opening/focusing an app never nudges the widget.
+            bool isVolatileAppButton = className is "MSTaskSwWClass" or "MSTaskListWClass";
+            if (isVolatileAppButton && !_enumIncludeAppButtons)
+                return true;
             if (className is not ("Start" or "TrayDummySearchControl" or "ReBarWindow32" or "MSTaskSwWClass" or "MSTaskListWClass"))
                 return true;
 

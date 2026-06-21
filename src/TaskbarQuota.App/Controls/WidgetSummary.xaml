@@ -37,7 +37,7 @@
                      provider was resolved through the Synara meta-app. -->
                 <Border x:Name="HostBadgeBox" Visibility="Collapsed"
                         Width="13" Height="13" CornerRadius="6.5"
-                        Padding="2"
+                        Padding="1.5"
                         HorizontalAlignment="Right" VerticalAlignment="Bottom"
                         Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
                     <Viewbox HorizontalAlignment="Center" VerticalAlignment="Center">

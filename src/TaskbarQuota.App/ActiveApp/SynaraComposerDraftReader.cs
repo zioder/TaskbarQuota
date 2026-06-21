@@ -43,6 +43,10 @@ namespace TaskbarQuota.ActiveApp
             "DP Code (Alpha)",
             "DP Code (Dev)",
             "dp-code-desktop",
+            // Upstream T3 Code (pingdotgg/t3code): Electron userData = productName / legacyUserDataDirName.
+            "T3 Code (Alpha)",
+            "T3 Code (Nightly)",
+            "T3 Code (Dev)",
         };
 
         /// <summary>
@@ -85,16 +89,15 @@ namespace TaskbarQuota.ActiveApp
         private static Snapshot? _cachedSnapshot;
         private static string? _logScanDir;
         private static LogScanCache? _logScanCache;
-        private static DateTime _levelDbDirsCachedUntilUtc = DateTime.MinValue;
-        private static string[]? _cachedLevelDbDirs;
 
         // sstable candidates change only on compaction; cache them keyed by the .ldb set's stamp.
         private static string? _cachedLdbDir;
         private static long _cachedLdbStamp = long.MinValue;
         private static Dictionary<string, Candidate>? _cachedLdbCandidates;
 
-        /// <summary>The thread the user currently has open (MRU head), or null if unknown.</summary>
-        public static string? GetFocusedThreadId() => GetSnapshot()?.FocusedThreadId;
+        /// <summary>The thread the user currently has open (MRU head), or null if unknown. Scoped to
+        /// <paramref name="host"/> when given so the other fork's more-recent draft can't leak in.</summary>
+        public static string? GetFocusedThreadId(HostApp? host = null) => GetSnapshot(host)?.FocusedThreadId;
 
         /// <summary>Resolve the focused thread and its draft from one cached snapshot read.</summary>
         public static DraftSelection? TryGetFocusedDraft(out string? threadId)
@@ -141,11 +144,11 @@ namespace TaskbarQuota.ActiveApp
         }
 
         /// <summary>The live draft selection for <paramref name="threadId"/>, or null if there is none.</summary>
-        public static DraftSelection? TryGetDraft(string threadId)
+        public static DraftSelection? TryGetDraft(string threadId, HostApp? host = null)
         {
             if (string.IsNullOrEmpty(threadId))
                 return null;
-            var snap = GetSnapshot();
+            var snap = GetSnapshot(host);
             return snap != null && snap.Drafts.TryGetValue(threadId, out var sel) ? sel : null;
         }
 
@@ -154,15 +157,15 @@ namespace TaskbarQuota.ActiveApp
         /// per-thread draft, and it is the only persisted signal for the visible New Chat composer before
         /// a draft route has been recorded in recent views.
         /// </summary>
-        public static DraftSelection? GetStickySelection() => GetSnapshot()?.StickySelection;
+        public static DraftSelection? GetStickySelection(HostApp? host = null) => GetSnapshot(host)?.StickySelection;
 
         /// <summary>
         /// Hot-path sticky read: parse only the composer-drafts log entry (no recent-views / full snapshot).
         /// Used when the file watcher signals a provider-picker change.
         /// </summary>
-        internal static DraftSelection? TryGetStickySelectionFast()
+        internal static DraftSelection? TryGetStickySelectionFast(HostApp? host = null)
         {
-            foreach (var dir in GetLevelDbDirs())
+            foreach (var dir in GetLevelDbDirs(host))
             {
                 try
                 {
@@ -196,9 +199,9 @@ namespace TaskbarQuota.ActiveApp
             return null;
         }
 
-        private static Snapshot? GetSnapshot()
+        private static Snapshot? GetSnapshot(HostApp? host = null)
         {
-            var dirs = GetLevelDbDirs();
+            var dirs = GetLevelDbDirs(host);
             if (dirs.Count == 0)
                 return null;
 
@@ -254,19 +257,36 @@ namespace TaskbarQuota.ActiveApp
             return GetLevelDbDirs().FirstOrDefault();
         }
 
-        internal static IReadOnlyList<string> GetLevelDbDirs()
+        // Electron userData profile dirs that belong to upstream T3 Code; everything else in
+        // LevelDbProfileNames is a Synara / DP Code (the fork) profile. Used to scope the LevelDB scan to
+        // the foreground host so a more-recently-active OTHER app can't override the active one's draft.
+        private static readonly HashSet<string> T3CodeProfileNames = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "t3code", "t3code-dev", "T3 Code (Alpha)", "T3 Code (Nightly)", "T3 Code (Dev)",
+        };
+
+        private static bool ProfileBelongsToHost(string profile, HostApp host) =>
+            host == HostApp.T3Code ? T3CodeProfileNames.Contains(profile) : !T3CodeProfileNames.Contains(profile);
+
+        // Per-host dir cache (key -1 = all hosts) so a host-scoped scan never reuses the other host's list.
+        private static readonly Dictionary<int, (string[] Dirs, DateTime UntilUtc)> _levelDbDirsByHost = new();
+
+        internal static IReadOnlyList<string> GetLevelDbDirs(HostApp? host = null)
         {
             var now = DateTime.UtcNow;
+            var key = host is { } hh ? (int)hh : -1;
             lock (Gate)
             {
-                if (_cachedLevelDbDirs != null && now < _levelDbDirsCachedUntilUtc)
-                    return _cachedLevelDbDirs;
+                if (_levelDbDirsByHost.TryGetValue(key, out var cached) && now < cached.UntilUtc)
+                    return cached.Dirs;
             }
 
             var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             var dirs = new List<string>();
             foreach (var profile in LevelDbProfileNames)
             {
+                if (host is { } h && !ProfileBelongsToHost(profile, h))
+                    continue;
                 var dir = Path.Combine(appData, profile, "Local Storage", "leveldb");
                 if (Directory.Exists(dir))
                     dirs.Add(dir);
@@ -276,8 +296,7 @@ namespace TaskbarQuota.ActiveApp
             var result = dirs.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             lock (Gate)
             {
-                _cachedLevelDbDirs = result;
-                _levelDbDirsCachedUntilUtc = now + ProfileDiscoveryCacheTtl;
+                _levelDbDirsByHost[key] = (result, now + ProfileDiscoveryCacheTtl);
             }
             return result;
         }
@@ -723,8 +742,11 @@ namespace TaskbarQuota.ActiveApp
             };
         }
 
-        private static readonly byte[] DraftKeyBytes = Encoding.ASCII.GetBytes(DraftKey);
-        private static readonly byte[] RecentViewsKeyBytes = Encoding.ASCII.GetBytes(RecentViewsKey);
+        // Match on the unprefixed key suffix so every fork's localStorage namespace resolves: Synara writes
+        // "synara:composer-drafts:v1", upstream T3 Code writes "t3code:composer-drafts:v1", and legacy DP
+        // Code wrote "dpcode:...". All collapse to the same canonical DraftKey/RecentViewsKey map entry.
+        private static readonly byte[] DraftKeyBytes = Encoding.ASCII.GetBytes(":composer-drafts:v1");
+        private static readonly byte[] RecentViewsKeyBytes = Encoding.ASCII.GetBytes(":recent-views:v1");
 
         private static bool Contains(byte[] haystack, byte[] needle)
         {
@@ -961,8 +983,7 @@ namespace TaskbarQuota.ActiveApp
                 _cachedLdbDir = null;
                 _cachedLdbStamp = long.MinValue;
                 _cachedLdbCandidates = null;
-                _cachedLevelDbDirs = null;
-                _levelDbDirsCachedUntilUtc = DateTime.MinValue;
+                _levelDbDirsByHost.Clear();
             }
         }
     }

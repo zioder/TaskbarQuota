@@ -69,6 +69,30 @@ public class SynaraStateReaderTests
     }
 
     [Fact]
+    public void ParseSelection_reads_t3code_instanceId_shape()
+    {
+        // Upstream T3 Code stores the provider under "instanceId" (+ an options array), not "provider".
+        var json = "{\"instanceId\":\"opencode\",\"model\":\"opencode-go/deepseek-v4-pro\",\"options\":[{\"id\":\"agent\",\"value\":\"build\"}]}";
+        var selection = SynaraStateReader.ParseSelection(json, "Run project from current path");
+
+        Assert.NotNull(selection);
+        Assert.Equal(ProviderId.OpenCodeGo, selection!.Provider);
+        Assert.Equal("opencode", selection.ProviderLiteral);
+        Assert.Equal("opencode-go/deepseek-v4-pro", selection.Model);
+    }
+
+    [Fact]
+    public void ParseSelection_reads_t3code_codex_instanceId()
+    {
+        var json = "{\"instanceId\":\"codex\",\"model\":\"gpt-5.5\",\"options\":[{\"id\":\"reasoningEffort\",\"value\":\"medium\"}]}";
+        var selection = SynaraStateReader.ParseSelection(json, null);
+
+        Assert.NotNull(selection);
+        Assert.Equal(ProviderId.Codex, selection!.Provider);
+        Assert.Equal("gpt-5.5", selection.Model);
+    }
+
+    [Fact]
     public void ParseSelection_returns_null_for_unsupported_provider()
     {
         Assert.Null(SynaraStateReader.ParseSelection("{\"provider\":\"gemini\",\"model\":\"gemini-2.5-pro\"}", "t"));
@@ -100,6 +124,30 @@ public class SynaraStateReaderTests
     public void IsSynaraProcessName_matches_synara_only(string? name, bool expected)
     {
         Assert.Equal(expected, SynaraStateReader.IsSynaraProcessName(name));
+    }
+
+    [Theory]
+    [InlineData("synara", HostApp.Synara)]
+    [InlineData("Synara (Dev)", HostApp.Synara)]
+    [InlineData("dpcode", HostApp.Synara)]
+    [InlineData("t3code", HostApp.T3Code)]
+    [InlineData("t3code-dev", HostApp.T3Code)]
+    [InlineData("T3 Code (Alpha)", HostApp.T3Code)]
+    [InlineData("T3 Code (Nightly)", HostApp.T3Code)]
+    [InlineData("T3 Code (Dev)", HostApp.T3Code)]
+    public void ResolveHost_maps_process_names_to_host(string name, HostApp expected)
+    {
+        Assert.Equal(expected, SynaraStateReader.ResolveHost(name));
+    }
+
+    [Theory]
+    [InlineData("cursor")]
+    [InlineData("code")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void ResolveHost_returns_null_for_other_processes(string? name)
+    {
+        Assert.Null(SynaraStateReader.ResolveHost(name));
     }
 
     private const string DraftBlob =

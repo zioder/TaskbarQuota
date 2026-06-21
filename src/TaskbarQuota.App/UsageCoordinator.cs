@@ -64,6 +64,34 @@ namespace TaskbarQuota
 
         public UsageService Service => _service;
         public ProviderId? ActiveProvider => _lastActive;
+
+        /// <summary>
+        /// The provider the taskbar widget should display: the active provider when its widget is enabled,
+        /// otherwise the first enabled-and-available provider (most recently active first, then enum order).
+        /// Null when no provider qualifies, in which case the widget hides instead of falling back to a
+        /// hidden default. Fixes the "widget disappears when Codex is disabled / only Cursor enabled" bug
+        /// (the old code hard-coded <see cref="ProviderId.Codex"/> as the fallback). See issue #7.
+        /// </summary>
+        public ProviderId? WidgetDisplayProvider
+        {
+            get
+            {
+                if (_lastActive is { } active && WidgetSettingsService.IsProviderVisible(active))
+                    return active;
+                foreach (var p in RecentProviders)
+                    if (WidgetSettingsService.IsProviderVisible(p) && IsProviderAvailable(p))
+                        return p;
+                foreach (ProviderId p in Enum.GetValues<ProviderId>())
+                    if (WidgetSettingsService.IsProviderVisible(p) && IsProviderAvailable(p))
+                        return p;
+                return null;
+            }
+        }
+
+        // A provider can back the widget only if it is actually installed or has been configured — so we
+        // never fall back to an enabled-by-default provider the user doesn't even have.
+        private static bool IsProviderAvailable(ProviderId provider) =>
+            ProviderInstallDetector.IsInstalled(provider) || ProviderDiscoveryService.IsConfigured(provider);
         /// <summary>
         /// When the active provider was resolved through the Synara host app, the active thread's
         /// selection (inner provider + model); null otherwise. The taskbar widget reads this to badge the
@@ -161,7 +189,8 @@ namespace TaskbarQuota
                 var sw = Stopwatch.StartNew();
                 var resolved = classification.Provider;
                 var host = new SynaraStateReader.SynaraSelection(
-                    resolved, SynaraProviderLiteral(resolved), classification.ModelDisplayName, ThreadTitle: null);
+                    resolved, SynaraProviderLiteral(resolved), classification.ModelDisplayName, ThreadTitle: null,
+                    Host: _detector.TryGetForegroundHost() ?? HostApp.Synara);
 
                 // Hold the authoritative UIA provider so the still-lagging disk read can't flicker it
                 // back before localStorage catches up. The disk path only enriches (model id / thread
@@ -363,6 +392,7 @@ namespace TaskbarQuota
             // poll (untitled) reading the same selection must not be seen as a change — that would
             // republish and re-fetch every tick.
             return left.Provider == right.Provider
+                && left.Host == right.Host
                 && string.Equals(left.ProviderLiteral, right.ProviderLiteral, StringComparison.Ordinal)
                 && string.Equals(left.Model, right.Model, StringComparison.Ordinal);
         }
@@ -628,9 +658,9 @@ namespace TaskbarQuota
                     ActiveToolPresenceChanged?.Invoke(true);
                 }
 
-                // Last-active fallback: nothing detected and never had one -> show Codex,
-                // but do not make the fallback sticky as the active provider.
-                target = _lastActive ?? ProviderId.Codex;
+                // Last-active fallback: nothing detected and never had one -> show the first enabled
+                // provider (never a hidden default), but do not make the fallback sticky as the active one.
+                target = _lastActive ?? WidgetDisplayProvider ?? ProviderId.Codex;
             }
             catch (Exception ex)
             {
@@ -651,7 +681,7 @@ namespace TaskbarQuota
 
                 // The active provider may have changed while we awaited the network; if so, drop this
                 // stale result and let the next tick fetch the current target.
-                if (target != (_lastActive ?? ProviderId.Codex))
+                if (target != (_lastActive ?? WidgetDisplayProvider ?? ProviderId.Codex))
                     return;
 
                 if (target != _lastLogged)
