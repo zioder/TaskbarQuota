@@ -132,7 +132,9 @@ namespace TaskbarQuota.ActiveApp
         private OpenCodeModelStateWatcher? _modelStateWatcher;
         private SynaraStateWatcher? _synaraStateWatcher;
         private SynaraStateReader.SynaraSelection? _synaraHost;
+        private ProviderSource _activeSource = ProviderSource.Unknown;
         private readonly SynaraUiaReader _synaraUia = new();
+        private readonly BrowserActiveTabDetector _browserTabs = new();
 
         /// <summary>Raised when Synara's localStorage changes (provider switch / thread navigation).</summary>
         public event Action? SynaraStateChanged;
@@ -156,6 +158,8 @@ namespace TaskbarQuota.ActiveApp
         /// over the inner provider's icon.
         /// </summary>
         public SynaraStateReader.SynaraSelection? ActiveSynaraHost => _synaraHost;
+
+        public ProviderSource ActiveSource => _activeSource;
 
         /// <summary>
         /// Lightweight Synara-only detection: checks if Synara is foreground and reads its active
@@ -198,6 +202,9 @@ namespace TaskbarQuota.ActiveApp
                 _lastForegroundPid = foregroundPid;
                 _lastForegroundProcessName = procName;
                 _synaraHost = selection;
+                _activeSource = selection is { } s
+                    ? new ProviderSource(ProviderSourceKind.HostApp, HostName(s.Host), s.Host == HostApp.T3Code ? "t3code" : "synara")
+                    : ProviderSource.Unknown;
             }
 
             return selection;
@@ -338,6 +345,8 @@ namespace TaskbarQuota.ActiveApp
                 _lastForegroundHwnd = hwnd;
                 _lastForegroundPid = foregroundPid;
                 _lastForegroundProcessName = procName;
+                if (_cliCache is { })
+                    _activeSource = ResolveCliSource(sessionRootName ?? procName);
                 return _lastForegroundResult = _cliCache;
             }
 
@@ -345,6 +354,7 @@ namespace TaskbarQuota.ActiveApp
             _lastForegroundPid = foregroundPid;
             _lastForegroundProcessName = procName;
             _synaraHost = null;
+            _activeSource = ProviderSource.Unknown;
             if (procName == null) return null;
 
             // Synara host: a meta-app wrapping many providers. Resolve the inner provider from the active
@@ -361,19 +371,36 @@ namespace TaskbarQuota.ActiveApp
                     host: host);
                 _synaraHost = selection;
                 if (selection is { } s)
+                {
+                    _activeSource = new ProviderSource(ProviderSourceKind.HostApp, HostName(s.Host), s.Host == HostApp.T3Code ? "t3code" : "synara");
                     return _lastForegroundResult = s.Provider;
+                }
                 return _lastForegroundResult = null;
             }
 
             // Fast path: GUI desktop apps resolve from the foreground process name (~instant).
             if (TryResolveGuiProcess(procName) is { } gui)
+            {
+                _activeSource = ResolveDesktopSource(procName);
                 return _lastForegroundResult = gui;
+            }
+
+            // Normal browser chat surfaces have their own account-level usage semantics and should not be
+            // folded into coding-client providers like Codex or Antigravity.
+            if (_browserTabs.Detect(hwnd, procName, windowTitle) is { } browserProvider)
+            {
+                _activeSource = browserProvider.Source;
+                return _lastForegroundResult = browserProvider.Provider;
+            }
 
             // Interactive CLI TUI focused directly (e.g. grok.exe owns the window).
             if (InteractiveClis.Contains(procName))
             {
                 if (TryDetectCliProvider($"{procName}.exe", null) is { } cli)
+                {
+                    _activeSource = new ProviderSource(ProviderSourceKind.Cli, procName, "terminal");
                     return _lastForegroundResult = cli;
+                }
             }
 
             if (terminalFocused)
@@ -391,11 +418,50 @@ namespace TaskbarQuota.ActiveApp
                 _cliCacheFocusHwnd = focusHwnd;
                 _cliCacheAt = DateTime.UtcNow;
                 if (_cliCache is { } detectedCli)
+                {
                     _terminalWindowCliCache[hwnd] = detectedCli;
+                    _activeSource = ResolveCliSource(sessionRootName ?? procName);
+                }
                 return _lastForegroundResult = _cliCache;
             }
 
+            _activeSource = ProviderSource.Unknown;
             return _lastForegroundResult = null;
+        }
+
+        private static string HostName(HostApp host) => host == HostApp.T3Code ? "T3 Code" : "Synara";
+
+        private static ProviderSource ResolveDesktopSource(string? processName)
+        {
+            var normalized = NormalizeProcessName(processName ?? "");
+            var name = normalized.ToLowerInvariant() switch
+            {
+                "claude" => "Claude app",
+                "cursor" => "Cursor",
+                "antigravity" => "Antigravity",
+                "codex" => "Codex app",
+                "devin" or "devin - next" => "Devin app",
+                "code" or "code-insiders" => "VS Code",
+                _ => string.IsNullOrWhiteSpace(normalized) ? "desktop app" : normalized,
+            };
+            return new ProviderSource(ProviderSourceKind.DesktopApp, name, "desktop");
+        }
+
+        private static ProviderSource ResolveCliSource(string? processName)
+        {
+            var normalized = NormalizeProcessName(processName ?? "");
+            var name = normalized.ToLowerInvariant() switch
+            {
+                "powershell" => "PowerShell",
+                "pwsh" => "PowerShell",
+                "cmd" => "Command Prompt",
+                "windowsterminal" or "wt" => "Windows Terminal",
+                "wezterm" or "wezterm-gui" => "WezTerm",
+                "alacritty" => "Alacritty",
+                "bash" or "wsl" or "wslhost" => "WSL",
+                _ => string.IsNullOrWhiteSpace(normalized) ? "terminal" : normalized,
+            };
+            return new ProviderSource(ProviderSourceKind.Cli, name, "terminal");
         }
 
         private static bool IsTerminalRelatedProcess(string? processName)

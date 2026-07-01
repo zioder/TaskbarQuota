@@ -120,6 +120,53 @@ public class ActiveAppDetectorTests : IDisposable
     }
 
     [Theory]
+    [InlineData("chrome", true)]
+    [InlineData("msedge", true)]
+    [InlineData("arc", true)]
+    [InlineData("firefox", true)]
+    [InlineData("zen", true)]
+    [InlineData("brave", true)]
+    [InlineData("vivaldi", true)]
+    [InlineData("opera", true)]
+    [InlineData("chromium", true)]
+    [InlineData("slack", false)]
+    [InlineData("codex", false)]
+    public void BrowserActiveTabDetector_IsBrowserProcessName_KnownBrowsers(string processName, bool expected)
+        => Assert.Equal(expected, BrowserActiveTabDetector.IsBrowserProcessName(processName));
+
+    [Theory]
+    [InlineData("https://chatgpt.com/", null)]
+    [InlineData("chatgpt.com/c/abc", null)]
+    [InlineData("https://chat.openai.com/", null)]
+    [InlineData("https://claude.ai/new", ProviderId.Claude)]
+    [InlineData("https://grok.com/chat/123", null)]
+    [InlineData("https://aistudio.google.com/usage", null)]
+    [InlineData("https://gemini.google.com/app", null)]
+    [InlineData("https://example.com/", null)]
+    public void BrowserActiveTabDetector_TryResolveProviderFromUrl_MapsChatSurfaces(string url, ProviderId? expected)
+        => Assert.Equal(expected, BrowserActiveTabDetector.TryResolveProviderFromUrl(url));
+
+    [Theory]
+    [InlineData("ChatGPT — Zen Browser", null)]
+    [InlineData("Claude — Zen Browser", ProviderId.Claude)]
+    [InlineData("Grok — Zen Browser", null)]
+    [InlineData("Git clone checkout error — Zen Browser", null)]
+    public void BrowserActiveTabDetector_TryResolveProviderFromTitle_MapsKnownChatTitles(string title, ProviderId? expected)
+        => Assert.Equal(expected, BrowserActiveTabDetector.TryResolveProviderFromTitle(title));
+
+    [Theory]
+    [InlineData("chrome", "Chrome")]
+    [InlineData("msedge.exe", "Edge")]
+    [InlineData("firefox", "Firefox")]
+    public void BrowserActiveTabDetector_ResolveBrowserSource_UsesFriendlyName(string processName, string expected)
+    {
+        var source = BrowserActiveTabDetector.ResolveBrowserSource(processName);
+
+        Assert.Equal(ProviderSourceKind.Browser, source.Kind);
+        Assert.Equal(expected, source.DisplayName);
+    }
+
+    [Theory]
     [InlineData("antigravity")]
     [InlineData("claude")]
     [InlineData("codex")]
