@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using TaskbarQuota;
+using TaskbarQuota.Services;
 
 namespace TaskbarQuota.Usage.Providers
 {
@@ -27,9 +28,12 @@ namespace TaskbarQuota.Usage.Providers
         private const string ClientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
         private const string RefreshScope = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
         private const string WebApiBaseUrl = "https://claude.ai/api";
+        public const string PreferWebEnvironmentVariable = "TASKBARQUOTA_CLAUDE_PREFER_WEB";
+        public const string ForceLoginEnvironmentVariable = "TASKBARQUOTA_CLAUDE_FORCE_LOGIN";
 
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
         private static readonly object RateLimitLock = new();
+        private static readonly DateTimeOffset ProcessStartedAt = DateTimeOffset.UtcNow;
         private static DateTimeOffset? _oauthRateLimitedUntil;
 
         public ProviderId Id => ProviderId.Claude;
@@ -40,7 +44,38 @@ namespace TaskbarQuota.Usage.Providers
 
         public async Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
         {
-            var creds = LoadCredentials();
+            if (ShouldForceLoginFlow())
+            {
+                var freshLogin = await ClaudeOAuth.GetValidTokensAsync(ct).ConfigureAwait(false);
+                if (freshLogin != null && ClaudeOAuth.WasStoreWrittenAfter(ProcessStartedAt))
+                    return await FetchWithOAuthTokenAsync(freshLogin, ct).ConfigureAwait(false);
+
+                throw new ProviderException(ProviderErrorKind.AuthRequired, "Login with Claude required.");
+            }
+
+            if (ShouldPreferWebUsage() && await TryFetchWebUsageAsync(ct).ConfigureAwait(false) is { } preferredWeb)
+                return preferredWeb;
+
+            // An explicit "Login with Claude" wins over CLI/cookies, so the widget shows the
+            // account you logged into (cookie-free, survives Chrome App-Bound Encryption).
+            var oauth = await ClaudeOAuth.GetValidTokensAsync(ct).ConfigureAwait(false);
+            if (oauth != null)
+                return await FetchWithOAuthTokenAsync(oauth, ct).ConfigureAwait(false);
+
+            Credentials creds;
+            try
+            {
+                creds = LoadCredentials();
+            }
+            catch (ProviderException pe) when (pe.Kind is ProviderErrorKind.NotInstalled or ProviderErrorKind.NotRunning or ProviderErrorKind.AuthRequired)
+            {
+                // No CLI and no explicit login — fall back to claude.ai cookies (Edge/Firefox/Brave).
+                if (await TryFetchWebUsageAsync(ct).ConfigureAwait(false) is { } webOnlyResult)
+                    return webOnlyResult;
+
+                // Nothing readable — prompt the one-click login (works on any browser, no CLI).
+                throw new ProviderException(ProviderErrorKind.AuthRequired, "Login with Claude required.");
+            }
 
             if (IsOAuthRateLimited())
             {
@@ -65,6 +100,18 @@ namespace TaskbarQuota.Usage.Providers
             }
 
             return await HandleUsageResponseAsync(response, creds, ct).ConfigureAwait(false);
+        }
+
+        private static async Task<ProviderFetchResult> FetchWithOAuthTokenAsync(Services.ClaudeTokens oauth, CancellationToken ct)
+        {
+            var creds = new Credentials(oauth.AccessToken, oauth.SubscriptionType, oauth.RateLimitTier);
+            using var resp = await SendUsageRequestAsync(oauth.AccessToken, ct).ConfigureAwait(false);
+            if (resp.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                Services.ClaudeOAuth.Logout(); // token dead and refresh already failed upstream
+                throw new ProviderException(ProviderErrorKind.AuthRequired, "Login with Claude required.");
+            }
+            return await HandleUsageResponseAsync(resp, creds, ct).ConfigureAwait(false);
         }
 
         private static async Task<HttpResponseMessage> SendUsageRequestAsync(string accessToken, CancellationToken ct)
@@ -358,6 +405,20 @@ namespace TaskbarQuota.Usage.Providers
             return CookieHelper.Resolve(ProviderId.Claude, "claude.ai", "claude.com", "console.anthropic.com", "anthropic.com");
         }
 
+        private static bool ShouldPreferWebUsage()
+        {
+            var value = Environment.GetEnvironmentVariable(PreferWebEnvironmentVariable);
+            return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool ShouldForceLoginFlow()
+        {
+            var value = Environment.GetEnvironmentVariable(ForceLoginEnvironmentVariable);
+            return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static Dictionary<string, string> BuildWebHeaders(string cookie) => new()
         {
             ["Cookie"] = cookie,
@@ -536,8 +597,20 @@ namespace TaskbarQuota.Usage.Providers
             if (!string.IsNullOrEmpty(envToken))
                 return new Credentials(envToken!, null, null);
 
+            // CLI store: ~/.claude/.credentials.json carries the token when the user ran `claude /login`.
             var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", ".credentials.json");
-            if (!File.Exists(path))
+            if (TryReadCliCredentials(path) is { } cliCreds)
+                return cliCreds with { CredentialsPath = path };
+
+            // Desktop store: when the user signs in through the Claude desktop app instead, the CLI
+            // file holds only metadata with an empty token — the live token lives in the desktop
+            // app's encrypted config. Auto-detect it so local Claude works without an explicit login.
+            if (ClaudeDesktopTokenReader.TryRead() is { } desktop)
+                return new Credentials(desktop.AccessToken, desktop.SubscriptionType, desktop.RateLimitTier, desktop.RefreshToken, desktop.ExpiresAtMs);
+
+            // Nothing usable on disk — surface the right state so the caller can fall back to web /
+            // prompt the one-click login.
+            if (!File.Exists(path) && !ClaudeDesktopTokenReader.IsInstalled)
             {
                 if (!ProviderInstallDetector.IsInstalled(ProviderId.Claude))
                     throw new ProviderException(ProviderErrorKind.NotInstalled, ProviderInstallDetector.NotInstalledMessage(ProviderId.Claude));
@@ -545,9 +618,23 @@ namespace TaskbarQuota.Usage.Providers
                 throw new ProviderException(ProviderErrorKind.NotRunning, ProviderInstallDetector.WaitingMessage(ProviderId.Claude));
             }
 
-            using var doc = JsonDocument.Parse(File.ReadAllText(path));
-            var creds = ReadCredentials(doc.RootElement);
-            return creds with { CredentialsPath = path };
+            throw new ProviderException(ProviderErrorKind.AuthRequired, "Claude OAuth access token missing. Run `claude` to authenticate.");
+        }
+
+        /// <summary>Reads the CLI credentials file; returns null when it is absent or holds an empty token.</summary>
+        private static Credentials? TryReadCliCredentials(string path)
+        {
+            if (!File.Exists(path))
+                return null;
+            try
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                return ReadCredentials(doc.RootElement);
+            }
+            catch (ProviderException)
+            {
+                return null; // empty/missing accessToken — let the desktop store take over
+            }
         }
 
         internal static Credentials ReadCredentials(JsonElement root)
