@@ -58,6 +58,13 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 
 ## Features
 
+### What's new in 1.0.15
+
+- **Browser tab detection** — TaskbarQuota reads the active browser tab to attribute usage to the provider you're actually using (ChatGPT, Claude, Gemini, and more), instead of folding web chats into coding-client providers.
+- **Login with Claude** — a cookie-free one-click sign-in for Claude usage that survives Chrome's App-Bound Encryption, with an automatic fallback to `claude.ai` browser cookies when no CLI is present.
+- **Detection source in the UI** — the dashboard and widget now show how each provider was detected (browser, desktop app, terminal, or host app), plus a dismissible onboarding panel.
+- **Multi-monitor widget confinement** — on setups where one taskbar spans displays, the widget stays on the monitor hosting the notification area instead of straddling the seam.
+
 ### What's new in 1.0.14
 
 - **T3 Code detection** — TaskbarQuota now recognises upstream T3 Code and attributes the active thread's usage to its selected provider, with a dedicated T3 Code badge in the taskbar widget.
