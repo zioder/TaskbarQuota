@@ -106,7 +106,7 @@ internal static class ProviderInstallDetector
         ProviderId.Grok => "Install the Grok CLI and run grok login.",
         ProviderId.Devin => "Install the Devin CLI or app, then sign in.",
         ProviderId.Codex => "Install the Codex CLI and run codex login.",
-        ProviderId.Claude => "Install the Claude CLI or app and sign in.",
+        ProviderId.Claude => "Open Claude in your browser, or install the Claude CLI/app and sign in.",
         ProviderId.Copilot => "Install the GitHub CLI or add a token in Settings.",
         ProviderId.Cursor => "Install Cursor and sign in.",
         ProviderId.OpenCode or ProviderId.OpenCodeGo => "Sign in at opencode.ai or paste cookies via Fix.",

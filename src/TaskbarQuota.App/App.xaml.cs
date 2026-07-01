@@ -38,6 +38,7 @@ namespace TaskbarQuota
             Dispatcher = DispatcherQueue.GetForCurrentThread();
             AppStorage.MigrateLegacyDataIfNeeded();
             StartupSettingsService.MigrateLegacyStartupEntryIfNeeded();
+
             Log.Information("TaskbarQuota launching");
 
             UsageCoordinator.Instance.Start();

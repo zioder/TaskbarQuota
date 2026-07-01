@@ -10,6 +10,8 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using Windows.Foundation;
 using Windows.UI;
+using TaskbarQuota.ActiveApp;
+using TaskbarQuota.Services;
 using TaskbarQuota.Usage;
 using TaskbarQuota.Usage.Providers;
 
@@ -90,7 +92,10 @@ namespace TaskbarQuota.Controls
                 }
                 Clicked?.Invoke();
             };
-            Unloaded += (_, _) => WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
+            Unloaded += (_, _) =>
+            {
+                WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
+            };
         }
 
         private void ApplyTaskbarForeground()
@@ -142,31 +147,43 @@ namespace TaskbarQuota.Controls
                 BadgeText.Visibility = Visibility.Visible;
             }
 
-            ApplySynaraHostBadge(result.Id);
+            ApplySourceBadge(result);
 
             _forcePercentagesOnly = false;
             if (!result.Ok || result.Fetch is null)
             {
+                // Claude needs an interactive OAuth login — say so instead of a red blank bar.
+                if (result.Id is ProviderId.Claude && result.ErrorKind == ProviderErrorKind.AuthRequired)
+                {
+                    _rows = new() { new WidgetUsageRow("Login", 0, "required", HasBar: false) };
+                    RenderRows();
+                    AnimateRender(isFirstReveal, providerSwitch: providerChanged);
+                    var loginSourceText = result.Source.IsKnown ? $" {result.Source.ShortViaText}" : "";
+                    ToolTipService.SetToolTip(this, $"{widgetName}{loginSourceText}: Login required — open the app to connect.");
+                    return;
+                }
+
                 _rows = new()
                 {
                     new WidgetUsageRow(CompactLabel(result.Provider?.SessionLabel ?? "Usage"), 0, "--"),
                     new WidgetUsageRow(CompactLabel(result.Provider?.WeeklyLabel ?? "Usage"), 100, "!"),
                 };
                 RenderRows();
-                AnimateRender(isFirstReveal, instant: providerChanged);
-                ToolTipService.SetToolTip(this, $"{widgetName}: {result.Error ?? "Unavailable"}");
+                AnimateRender(isFirstReveal, providerSwitch: providerChanged);
+                var sourceText = result.Source.IsKnown ? $" {result.Source.ShortViaText}" : "";
+                ToolTipService.SetToolTip(this, $"{widgetName}{sourceText}: {result.Error ?? "Unavailable"}");
                 return;
             }
 
             var usage = result.Fetch.Usage;
             if (result.Id == ProviderId.OpenCode)
             {
-                ApplyZenDisplay(usage, providerChanged);
+                ApplyZenDisplay(result, usage, providerChanged);
                 return;
             }
             if (result.Id == ProviderId.Antigravity)
             {
-                ApplyAntigravityDisplay(usage, providerChanged);
+                ApplyAntigravityDisplay(result, usage, providerChanged);
                 return;
             }
             if (result.Id is ProviderId.Copilot or ProviderId.Grok && usage.Cost is { Label: "Credits" } credits)
@@ -183,7 +200,7 @@ namespace TaskbarQuota.Controls
             }
             RenderRows();
             SetBars();
-            AnimateRender(isFirstReveal, instant: providerChanged);
+            AnimateRender(isFirstReveal, providerSwitch: providerChanged);
 
             var tooltipLines = _rows.Select(FormatTooltipLine);
             var plan = FormatPlanLabel(result.Id, widgetName, usage.LoginMethod);
@@ -191,40 +208,73 @@ namespace TaskbarQuota.Controls
             var resetCreditsTooltip = WidgetResetCreditsTooltipLine(usage.ResetCredits);
             ToolTipService.SetToolTip(this,
                 string.IsNullOrEmpty(plan)
-                    ? $"{widgetName}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}"
-                    : $"{widgetName} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}");
+                    ? $"{WidgetTooltipTitle(widgetName, result.Source)}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}"
+                    : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}");
         }
 
         /// <summary>
-        /// Badge the provider glyph with the Synara host mark when the active provider was resolved
-        /// through Synara's active thread. Hovering the mark shows the thread/model it came from.
+        /// Badge the provider glyph with its active source (browser, host app, terminal, desktop app).
+        /// Synara/T3 Code keep their host marks; other sources use a small generic source mark.
         /// </summary>
-        private void ApplySynaraHostBadge(ProviderId id)
+        private void ApplySourceBadge(UsageResult result)
         {
+            var id = result.Id;
             var host = UsageCoordinator.Instance.ActiveSynaraHost;
-            bool show = host is { } h
+            if (host is { } h
                 && h.Provider == id
-                && UsageCoordinator.Instance.ActiveProvider == id;
+                && UsageCoordinator.Instance.ActiveProvider == id)
+            {
+                var isT3Code = h.Host == ActiveApp.HostApp.T3Code;
+                var glyphPath = isT3Code ? ProviderGlyphs.T3Code : ProviderGlyphs.Synara;
+                SetSourceBadge(glyphPath, BuildSynaraTooltip(h, isT3Code));
+                return;
+            }
 
-            if (!show)
+            var source = result.Source;
+            if (!source.IsKnown || UsageCoordinator.Instance.ActiveProvider != id)
             {
                 HostBadgeBox.Visibility = Visibility.Collapsed;
                 ToolTipService.SetToolTip(HostBadgeBox, null);
                 return;
             }
 
-            var isT3Code = host!.Host == ActiveApp.HostApp.T3Code;
-            var glyphPath = isT3Code ? ProviderGlyphs.T3Code : ProviderGlyphs.Synara;
+            var sourceGlyph = source.Kind switch
+            {
+                ProviderSourceKind.Browser => ProviderGlyphs.Browser,
+                ProviderSourceKind.Cli => ProviderGlyphs.Terminal,
+                ProviderSourceKind.DesktopApp => ProviderGlyphs.Desktop,
+                _ => null,
+            };
+
+            if (sourceGlyph is null)
+            {
+                HostBadgeBox.Visibility = Visibility.Collapsed;
+                ToolTipService.SetToolTip(HostBadgeBox, null);
+                return;
+            }
+
+            SetSourceBadge(sourceGlyph, $"{result.DisplayName} {source.ShortViaText}");
+        }
+
+        private void SetSourceBadge(string glyphPath, string tooltip)
+        {
             if (ViewModels.Ui.ParseFreshGeometry(glyphPath) is { } hostGlyph)
                 SetNormalizedGlyph(HostBadgeGlyph, hostGlyph, Foreground);
             HostBadgeBox.Visibility = Visibility.Visible;
+            ToolTipService.SetToolTip(HostBadgeBox, tooltip);
+        }
 
+        private static string BuildSynaraTooltip(SynaraStateReader.SynaraSelection host, bool isT3Code)
+        {
             var hostName = isT3Code ? "T3 Code" : "Synara";
             var tip = host.Model is { Length: > 0 } model ? $"{hostName} · {model}" : hostName;
             if (host.ThreadTitle is { Length: > 0 } title)
                 tip += $"\n{title}";
-            ToolTipService.SetToolTip(HostBadgeBox, tip);
+            return tip;
         }
+
+        private static string WidgetTooltipTitle(string widgetName, ProviderSource source)
+            => source.IsKnown ? $"{widgetName} {source.ShortViaText}" : widgetName;
 
         public void SetActiveToolVisible(bool isVisible)
         {
@@ -306,16 +356,18 @@ namespace TaskbarQuota.Controls
             var rows = new List<WidgetUsageRow>();
             if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowPrimary))
             {
+                var primaryLabel = result.Provider?.SessionLabel ?? "Usage";
                 rows.Add(new WidgetUsageRow(
-                    CompactLabel(result.Provider?.SessionLabel ?? "Usage"),
+                    CompactLabel(primaryLabel),
                     WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
                     WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent),
                     usage.Primary.ResetDescription));
             }
             if (usage.Secondary != null && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowSecondary))
             {
+                var secondaryLabel = result.Provider?.WeeklyLabel ?? "Usage";
                 rows.Add(new WidgetUsageRow(
-                    CompactLabel(result.Provider?.WeeklyLabel ?? "Usage"),
+                    CompactLabel(secondaryLabel),
                     WidgetSettingsService.DisplayPercent(usage.Secondary.UsedPercent),
                     WidgetSettingsService.FormatDisplayPercent(usage.Secondary.UsedPercent),
                     usage.Secondary.ResetDescription));
@@ -368,7 +420,7 @@ namespace TaskbarQuota.Controls
             return rows;
         }
 
-        private void ApplyZenDisplay(UsageSnapshot usage, bool providerChanged = false)
+        private void ApplyZenDisplay(UsageResult result, UsageSnapshot usage, bool providerChanged = false)
         {
             _forcePercentagesOnly = true;
             var balanceText = usage.Secondary?.ResetDescription;
@@ -388,10 +440,10 @@ namespace TaskbarQuota.Controls
                 return;
             }
             RenderRows();
-            AnimateRender(!_hasRevealed, instant: providerChanged);
+            AnimateRender(!_hasRevealed, providerSwitch: providerChanged);
 
             ToolTipService.SetToolTip(this,
-                $"{usage.LoginMethod}\n" +
+                $"{WidgetTooltipTitle(result.DisplayName, result.Source)} · {usage.LoginMethod}\n" +
                 $"Usage: {usage.Cost?.Display ?? "--"}\n" +
                 $"Balance: {(balanceText != null ? "$" + balanceText.Split(' ')[0] : "--")}");
         }
@@ -436,12 +488,12 @@ namespace TaskbarQuota.Controls
             }
             RenderRows();
             SetBars();
-            AnimateRender(!_hasRevealed, instant: providerChanged);
+            AnimateRender(!_hasRevealed, providerSwitch: providerChanged);
 
             var plan = FormatPlanLabel(result.Id, widgetName, usage.LoginMethod);
             var tooltip = string.IsNullOrEmpty(plan)
-                ? $"{widgetName}\nCredits: {value} ({FormatCreditCount(remaining)} remaining)"
-                : $"{widgetName} · {plan}\nCredits: {value} ({FormatCreditCount(remaining)} remaining)";
+                ? $"{WidgetTooltipTitle(widgetName, result.Source)}\nCredits: {value} ({FormatCreditCount(remaining)} remaining)"
+                : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\nCredits: {value} ({FormatCreditCount(remaining)} remaining)";
             if (usage.AdditionalUsage is { Enabled: true } addl)
                 tooltip += $"\nAdditional usage: {addl.StatusText} ({addl.SpendText})";
             if (usage.Primary.ResetDescription is { } resetDesc)
@@ -494,7 +546,7 @@ namespace TaskbarQuota.Controls
             return "\n" + string.Join("\n", lines);
         }
 
-        private void ApplyAntigravityDisplay(UsageSnapshot usage, bool providerChanged = false)
+        private void ApplyAntigravityDisplay(UsageResult result, UsageSnapshot usage, bool providerChanged = false)
         {
             var rows = new List<WidgetUsageRow>();
             // Icon already conveys the model family (Gemini vs Non-Gemini), so the widget row only needs the window.
@@ -529,11 +581,12 @@ namespace TaskbarQuota.Controls
                 return;
             }
             RenderRows();
-            AnimateRender(!_hasRevealed, instant: providerChanged);
+            AnimateRender(!_hasRevealed, providerSwitch: providerChanged);
 
             var plan = FormatPlanLabel(ProviderId.Antigravity, "Antigravity", usage.LoginMethod);
+            var title = WidgetTooltipTitle("Antigravity", result.Source);
             ToolTipService.SetToolTip(this,
-                string.IsNullOrEmpty(plan) ? "Antigravity\n" : $"Antigravity · {plan}\n" +
+                string.IsNullOrEmpty(plan) ? $"{title}\n" : $"{title} · {plan}\n" +
                 $"Gemini: {WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent)}" +
                 (usage.Primary.ResetDescription is { } r1 ? $" (resets {r1})" : "") + "\n" +
                 $"Non-Gemini: {WidgetSettingsService.FormatDisplayPercent(usage.Secondary?.UsedPercent ?? 0)}" +
@@ -548,18 +601,28 @@ namespace TaskbarQuota.Controls
                 RenderRows();
         }
 
-        private void AnimateRender(bool isFirstReveal, bool instant = false)
+        private void AnimateRender(bool isFirstReveal, bool providerSwitch = false)
         {
             _hasRevealed = true;
             if (isFirstReveal)
                 AnimateFirstReveal();
-            else if (instant)
-            {
-                _softRefreshStoryboard?.Stop();
-                Panel.Opacity = 1;
-            }
+            else if (providerSwitch)
+                AnimateProviderSwitch();
             else
                 AnimateSoftRefresh();
+        }
+
+        // A provider switch rebuilds every row and usually resizes the host, so a hard content swap
+        // reads as the whole widget flashing. Cross-fade the new content in (from fully hidden, not the
+        // soft-refresh's partial dim) so the switch feels like a transition rather than a redraw.
+        private void AnimateProviderSwitch()
+        {
+            Panel.Opacity = 0;
+
+            _softRefreshStoryboard?.Stop();
+            _softRefreshStoryboard = new Storyboard();
+            _softRefreshStoryboard.Children.Add(CreateDoubleAnimation(Panel, "Opacity", 0, 1, 200));
+            _softRefreshStoryboard.Begin();
         }
 
         private void AnimateFirstReveal()
@@ -970,6 +1033,8 @@ namespace TaskbarQuota.Controls
                 result.Id.ToString(),
                 result.DisplayName,
                 result.Error ?? string.Empty,
+                result.Source.Kind.ToString(),
+                result.Source.DisplayName,
             };
 
             if (result.Fetch is not { } fetch)

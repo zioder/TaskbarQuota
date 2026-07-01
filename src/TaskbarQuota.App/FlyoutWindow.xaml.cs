@@ -192,13 +192,28 @@ namespace TaskbarQuota
                 if (!User32.GetWindowRect(_widgetHandle, out RECT wr))
                     return;
 
-                int maxHeight = Math.Max(WindowDpi.ToPhysical(320, scale), wr.top - WindowDpi.ToPhysical(8, scale));
+                int gap = WindowDpi.ToPhysical(8, scale);
+                int maxHeight = Math.Max(WindowDpi.ToPhysical(320, scale), wr.top - gap);
                 h = Math.Min(h, maxHeight);
 
+                // Right-align the flyout to the widget, floating just above the taskbar.
                 int x = wr.right - w;
-                int y = wr.top - h - WindowDpi.ToPhysical(8, scale);
-                if (y < 0) y = 0;
-                if (x < 0) x = 0;
+                int y = wr.top - h - gap;
+
+                // Confine the flyout to the monitor that hosts the widget so it never straddles a
+                // monitor boundary on multi-display setups (issue #10).
+                if (TryGetWorkArea(_widgetHandle, out RECT work))
+                {
+                    w = Math.Min(w, work.right - work.left);
+                    h = Math.Min(h, work.bottom - work.top);
+                    x = Math.Clamp(wr.right - w, work.left, work.right - w);
+                    y = Math.Clamp(y, work.top, work.bottom - h);
+                }
+                else
+                {
+                    if (y < 0) y = 0;
+                    if (x < 0) x = 0;
+                }
 
                 var bounds = new RectInt32(x, y, w, h);
                 if (_lastAppliedBounds is { } last
@@ -222,6 +237,25 @@ namespace TaskbarQuota
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
             var dpi = User32.GetDpiForWindow(hwnd);
             return dpi > 0 ? dpi / 96d : 1d;
+        }
+
+        // Work area (taskbar-excluded) of the monitor hosting the given window, in physical pixels.
+        private static bool TryGetWorkArea(IntPtr hwnd, out RECT work)
+        {
+            work = default;
+            if (hwnd == IntPtr.Zero)
+                return false;
+
+            var monitor = User32.MonitorFromWindow(hwnd, MonitorFromFlags.MONITOR_DEFAULTTONEAREST);
+            if (monitor == IntPtr.Zero)
+                return false;
+
+            var info = MONITORINFO.Create();
+            if (!User32.GetMonitorInfo(monitor, ref info))
+                return false;
+
+            work = info.rcWork;
+            return work.right > work.left && work.bottom > work.top;
         }
 
         public void Hide()

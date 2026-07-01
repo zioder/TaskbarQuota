@@ -9,8 +9,16 @@ namespace TaskbarQuota
     {
         public const int IconButtonWidth = 48;
 
-        /// <summary>Minimum flyout width (roughly two providers + chrome).</summary>
-        public const int MinLogicalWidth = 320;
+        /// <summary>
+        /// Fixed default flyout width. The flyout stays exactly this wide no matter how many
+        /// providers are installed; the provider strip only pushes it wider once the icons (or the
+        /// detail card) genuinely need more room than this. Chosen wide enough that the dashboard
+        /// content (session / weekly rows, reset dates) does not wrap at the default provider count.
+        /// </summary>
+        public const int BaseLogicalWidth = 450;
+
+        /// <summary>Absolute floor; kept for callers that reference a minimum.</summary>
+        public const int MinLogicalWidth = BaseLogicalWidth;
 
         /// <summary>
         /// Chrome beyond the provider icons, so the strip + settings button fit without clipping the
@@ -28,6 +36,12 @@ namespace TaskbarQuota
         /// <summary>Smallest dashboard content height before chrome is added.</summary>
         public const int MinLogicalContentHeight = 320;
 
+        /// <summary>
+        /// Stable compact dashboard content height used by the tray flyout. Taller provider detail
+        /// panes scroll inside this frame instead of resizing the native tray window on selection.
+        /// </summary>
+        public const int FixedLogicalContentHeight = 620;
+
         /// <summary>Largest dashboard content height before scrolling takes over.</summary>
         public const int MaxLogicalContentHeight = 760;
 
@@ -35,6 +49,7 @@ namespace TaskbarQuota
         public const int ChromeLogicalHeight = 122;
 
         public const int HeightMeasureBuffer = 40;
+        public const string ForceMinWidthEnvironmentVariable = "TASKBARQUOTA_FORCE_MIN_FLYOUT_WIDTH";
 
         public static int LogicalHeight =>
             ComputeLogicalHeight(MinLogicalContentHeight);
@@ -47,14 +62,25 @@ namespace TaskbarQuota
         }
 
         /// <summary>
-        /// Flyout width grows with each visible provider icon and the measured detail card width.
+        /// Flyout stays at <see cref="BaseLogicalWidth"/> and only grows past it when the provider
+        /// strip or the measured detail card actually needs more room.
         /// </summary>
         public static int ComputeLogicalWidth(int stripIconCount, double detailContentWidth)
         {
+            if (IsForceMinWidthEnabled())
+                return BaseLogicalWidth;
+
             int icons = Math.Max(0, stripIconCount);
             int stripWidth = (icons * IconButtonWidth) + StripChromeLogicalWidth;
             int contentWidth = (int)Math.Ceiling(detailContentWidth + DetailContentPadding);
-            return Math.Max(Math.Max(stripWidth, contentWidth), MinLogicalWidth);
+            return Math.Max(Math.Max(stripWidth, contentWidth), BaseLogicalWidth);
+        }
+
+        private static bool IsForceMinWidthEnabled()
+        {
+            var value = Environment.GetEnvironmentVariable(ForceMinWidthEnvironmentVariable);
+            return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
         }
     }
 }

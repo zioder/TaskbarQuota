@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -207,6 +208,99 @@ namespace TaskbarQuota.Views
             flyout.Content = stack;
             flyout.ShowAt(button);
         }
+
+        private async void ConnectOAuth_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button button || button.Tag is not ProviderId id)
+                return;
+
+            await ConnectProviderAsync(button, id);
+        }
+
+        private async Task ConnectProviderAsync(Button button, ProviderId id)
+        {
+            button.IsEnabled = false;
+            var original = button.Content;
+            button.Content = "Waiting for browser…";
+            try
+            {
+                if (id == ProviderId.Claude)
+                    await LoginWithClaudeAsync(button);
+                ViewModel.EnableAvailableProvider(id);
+                ViewModel.RefreshCommand.Execute(null);
+            }
+            catch (System.Exception ex)
+            {
+                TaskbarQuota.Diagnostics.Log.Debug($"[oauth] login failed for {id}: {ex.Message}");
+            }
+            finally
+            {
+                button.Content = original;
+                button.IsEnabled = true;
+            }
+        }
+
+        private async Task LoginWithClaudeAsync(Button button)
+        {
+            var request = TaskbarQuota.Services.ClaudeOAuth.CreateLoginRequest();
+            TaskbarQuota.Services.ClaudeOAuth.OpenLoginPage(request);
+
+            button.Content = "Paste code…";
+            var code = await PromptForClaudeCodeAsync(button);
+            if (string.IsNullOrWhiteSpace(code))
+                throw new OperationCanceledException("Claude login cancelled.");
+
+            button.Content = "Connecting…";
+            await TaskbarQuota.Services.ClaudeOAuth.CompleteLoginAsync(request, code);
+        }
+
+        private async Task<string?> PromptForClaudeCodeAsync(FrameworkElement owner)
+        {
+            var input = new TextBox
+            {
+                AcceptsReturn = false,
+                MinWidth = 360,
+                PlaceholderText = "Paste Claude code or callback URL",
+            };
+
+            var panel = new StackPanel { Spacing = 10 };
+            panel.Children.Add(new TextBlock
+            {
+                Text = "After approving access in Claude, paste the authorization code shown in the browser.",
+                TextWrapping = TextWrapping.Wrap,
+                MaxWidth = 420,
+            });
+            panel.Children.Add(input);
+
+            var dialog = new ContentDialog
+            {
+                Title = "Complete Claude login",
+                Content = panel,
+                PrimaryButtonText = "Connect",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+                XamlRoot = owner.XamlRoot,
+            };
+
+            var result = await dialog.ShowAsync();
+            return result == ContentDialogResult.Primary ? input.Text : null;
+        }
+
+        private async void OnboardingConnect_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button button || button.Tag is not string)
+                return;
+
+            await ConnectProviderAsync(button, ProviderId.Claude);
+        }
+
+        private void OnboardingOpenSettings_Click(object sender, RoutedEventArgs e)
+        {
+            Frame?.Navigate(typeof(SettingsPage), null, new EntranceNavigationTransitionInfo());
+        }
+
+        private void DismissOnboarding_Click(object sender, RoutedEventArgs e)
+            => ViewModel.DismissOnboarding();
 
         private static ProviderCredentialViewModel CreateCredentialVm(ProviderId id) => id switch
         {

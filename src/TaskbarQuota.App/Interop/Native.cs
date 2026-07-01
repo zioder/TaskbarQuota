@@ -111,6 +111,33 @@ namespace TaskbarQuota.Interop
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr MonitorFromWindow([In] IntPtr hwnd, MonitorFromFlags dwFlags);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr MonitorFromPoint(POINT pt, MonitorFromFlags dwFlags);
+
+        [DllImport("user32.dll")]
+        public static extern bool GetMonitorInfo([In] IntPtr hMonitor, ref MONITORINFO lpmi);
+    }
+
+    public enum MonitorFromFlags : uint
+    {
+        MONITOR_DEFAULTTONULL = 0,
+        MONITOR_DEFAULTTOPRIMARY = 1,
+        MONITOR_DEFAULTTONEAREST = 2,
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MONITORINFO
+    {
+        public int cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+
+        public static MONITORINFO Create() => new() { cbSize = Marshal.SizeOf<MONITORINFO>() };
     }
 
     public static class Shell32

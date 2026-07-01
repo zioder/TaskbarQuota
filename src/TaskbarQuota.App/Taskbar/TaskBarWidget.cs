@@ -208,6 +208,13 @@ namespace TaskbarQuota.Taskbar
             User32.GetWindowRect(hwndShell, out RECT taskbarRect);
 
             int offsetX = LoadCustomPosition();
+            // Taskbar alignment flipped (e.g. centered -> left): the old manual position now sits on the
+            // wrong side, so discard it and re-anchor to the new side's default lane (issue #10).
+            if (reason == TaskbarChangeReason.Alignment && offsetX != -1)
+            {
+                SaveCustomPosition(-1);
+                offsetX = -1;
+            }
             bool useDefault = offsetX == -1;
             User32.GetWindowRect(hwndTrayNotify, out RECT trayNotifyRect);
             User32.GetWindowRect(hwndReBar, out RECT barRect);
@@ -215,36 +222,54 @@ namespace TaskbarQuota.Taskbar
             // open/close; manual drag (MoveWidgetWithCursor) keeps the full band-avoiding lanes.
             var lanes = GetWidgetLanes(taskbarRect, trayNotifyRect, barRect, stableOnly: true);
 
-            if (useDefault)
+            // The Widgets button is a XAML element the child-window lane scan can't see, so fetch its
+            // bounds separately and treat it as an obstacle to clear — for BOTH the default anchor and a
+            // saved manual position (which NormalizeWidgetX would otherwise snap right onto it) (issue #10).
+            RECT? wbRect = isWidgetsEnabled ? await taskbarWatcher.GetWidgetsButtonRectAsync() : null;
+            var obstacles = new List<RECT>();
+            try
             {
-                _ = isWidgetsEnabled;
-                // Default anchor: FAR LEFT of the items area — immediately right of the Widgets button (it's
-                // always pinned far-left on Win11) or, on a left-aligned taskbar, right of the Start button;
-                // otherwise the very left edge. (Previously this anchored near the tray / centred cluster.)
-                RECT? wbRect = await taskbarWatcher.GetWidgetsButtonRectAsync();
-                offsetX = ComputeFarLeftAnchor(taskbarRect, trayNotifyRect, wbRect, isCentered);
-
-                try
+                foreach (var wnd in GetOtherInjectedWindows())
                 {
-                    // Step right past any other injected widget we'd overlap so two add-ons don't stack.
-                    foreach (var wnd in GetOtherInjectedWindows())
-                    {
-                        User32.GetWindowRect(wnd, out var injectedBounds);
-                        if (injectedBounds.right < offsetX || injectedBounds.left > (offsetX + WidgetHostWidth)) continue;
-                        offsetX = IsRtlUI ? injectedBounds.left - WidgetHostWidth : injectedBounds.right;
-                    }
+                    User32.GetWindowRect(wnd, out var injectedBounds);
+                    obstacles.Add(injectedBounds);
                 }
-                catch (Exception ex) { Log.Warning(ex, "overlap scan failed"); }
+            }
+            catch (Exception ex) { Log.Warning(ex, "overlap scan failed"); }
+            if (wbRect is { } wb && wb.right > wb.left)
+                obstacles.Add(wb);
 
-                // Keep it on the taskbar and clear of the tray, but do NOT snap to the right lane.
-                int minX = Math.Max(0, taskbarRect.left);
-                int maxX = Math.Max(minX, trayNotifyRect.left - WidgetHostWidth);
-                offsetX = Math.Clamp(offsetX, minX, maxX);
+            // Centered default anchors far-left and grows rightward, so step off obstacles to the RIGHT;
+            // every other case rests toward the tray and steps LEFT. RTL mirrors both.
+            bool centeredDefault = isCentered && useDefault;
+            bool stepLeft = IsRtlUI ? centeredDefault : !centeredDefault;
+
+            if (useDefault && isCentered)
+            {
+                // Centered Win11 taskbar: far-left is empty, anchor just right of the Widgets button.
+                offsetX = ComputeFarLeftAnchor(taskbarRect, trayNotifyRect, wbRect, isCentered);
+            }
+            else if (useDefault)
+            {
+                // Left-aligned bar: left end is Start/search/apps, so rest toward the tray.
+                offsetX = IsRtlUI ? Math.Max(0, taskbarRect.left) : trayNotifyRect.left - WidgetHostWidth;
             }
             else
             {
+                // Saved manual position: snap to the nearest valid lane first.
                 offsetX = NormalizeWidgetX(offsetX, lanes, preferRightLane: true);
             }
+
+            offsetX = StepClearOfObstacles(offsetX, obstacles, stepLeft);
+
+            // Keep it on the bar, clear of the tray, and (LTR) right of the app cluster so stepping left off
+            // a tray-side Widgets button lands in the free gap rather than on Start/search/apps.
+            int minXBound = IsRtlUI
+                ? Math.Max(0, taskbarRect.left)
+                : Math.Max(Math.Max(0, taskbarRect.left), isCentered ? 0 : barRect.right);
+            int maxXBound = Math.Max(minXBound, trayNotifyRect.left - WidgetHostWidth);
+            offsetX = Math.Clamp(offsetX, minXBound, maxXBound);
+            offsetX = ClampToMonitorContainingTray(offsetX, WidgetHostWidth, taskbarRect, trayNotifyRect, barRect);
 
             int offsetY = barRect.top - taskbarRect.top;
 
@@ -451,6 +476,46 @@ namespace TaskbarQuota.Taskbar
                      && User32.GetWindowRect(hwndStart, out RECT startRect) && startRect.right > startRect.left)
                 anchor = Math.Max(anchor, startRect.right);
             return anchor;
+        }
+
+        // Nudge a candidate X off any obstacle it overlaps: to the obstacle's left edge (stepLeft) or its
+        // right edge. Obstacles are sorted so repeated overlaps resolve in one pass in the step direction.
+        private int StepClearOfObstacles(int x, List<RECT> obstacles, bool stepLeft)
+        {
+            if (obstacles.Count == 0)
+                return x;
+
+            var ordered = new List<RECT>(obstacles);
+            ordered.Sort((a, b) => stepLeft ? b.right.CompareTo(a.right) : a.left.CompareTo(b.left));
+            foreach (var o in ordered)
+            {
+                if (o.right <= x || o.left >= x + WidgetHostWidth)
+                    continue;
+                x = stepLeft ? o.left - WidgetHostWidth : o.right;
+            }
+            return x;
+        }
+
+        // On multi-monitor setups where one taskbar spans displays (e.g. Open-Shell), the widget can land
+        // straddling the seam. Confine it to the monitor that hosts the notification area (issue #10).
+        private static int ClampToMonitorContainingTray(int offsetX, int widgetHostWidth, RECT taskbarRect, RECT trayNotifyRect, RECT barRect)
+        {
+            var anchor = new POINT { x = trayNotifyRect.left - 1, y = (barRect.top + barRect.bottom) / 2 };
+            var monitor = User32.MonitorFromPoint(anchor, MonitorFromFlags.MONITOR_DEFAULTTONEAREST);
+            if (monitor == IntPtr.Zero)
+                return offsetX;
+
+            var info = MONITORINFO.Create();
+            if (!User32.GetMonitorInfo(monitor, ref info))
+                return offsetX;
+
+            var m = info.rcMonitor;
+            if (m.right - m.left < widgetHostWidth)
+                return offsetX;
+
+            int screenX = taskbarRect.left + offsetX;
+            screenX = Math.Clamp(screenX, m.left, m.right - widgetHostWidth);
+            return screenX - taskbarRect.left;
         }
 
         private int NormalizeWidgetX(int x, TaskbarLanes lanes, bool preferRightLane)

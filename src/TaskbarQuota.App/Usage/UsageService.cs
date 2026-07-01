@@ -296,6 +296,7 @@ namespace TaskbarQuota.Usage
         public ProviderFetchResult? Fetch { get; private init; }
         public string? Error { get; private init; }
         public ProviderErrorKind? ErrorKind { get; private init; }
+        public ProviderSource Source { get; private init; } = ProviderSource.Unknown;
         public bool Ok => Fetch != null;
         public string DisplayName => Provider?.DisplayName ?? Id.ToString();
 
@@ -307,5 +308,16 @@ namespace TaskbarQuota.Usage
 
         public static UsageResult Pending(ProviderId id, IUsageProvider provider, string message)
             => new() { Id = id, Provider = provider, Error = message };
+
+        public UsageResult WithSource(ProviderSource? source)
+            => new()
+            {
+                Id = Id,
+                Provider = Provider,
+                Fetch = Fetch,
+                Error = Error,
+                ErrorKind = ErrorKind,
+                Source = source ?? ProviderSource.Unknown,
+            };
     }
 }

@@ -29,6 +29,7 @@ namespace TaskbarQuota.ViewModels
         [ObservableProperty] public partial double DetailContentWidth { get; private set; }
         [ObservableProperty] public partial double DetailContentHeight { get; private set; }
         [ObservableProperty] public partial Visibility AvailableCardsVisibility { get; private set; }
+        [ObservableProperty] public partial Visibility OnboardingVisibility { get; private set; }
 
         /// <summary>Raised when the first card changes so the view can scroll back to the top.</summary>
         public event Action? ScrollToTopRequested;
@@ -43,6 +44,9 @@ namespace TaskbarQuota.ViewModels
         {
             _dispatcher = dispatcher;
             StatusText = "";
+            OnboardingVisibility = OnboardingStateService.IsDismissed()
+                ? Visibility.Collapsed
+                : Visibility.Visible;
             WidgetSettingsService.PercentageModeChanged += OnPercentageModeChanged;
             WidgetSettingsService.Changed += OnWidgetSettingsChanged;
             WidgetSettingsService.DashboardCompositionChanged += OnDashboardCompositionChanged;
@@ -64,16 +68,8 @@ namespace TaskbarQuota.ViewModels
 
         public void ReportMeasuredDetailHeight(double height)
         {
-            if (double.IsNaN(height) || double.IsInfinity(height) || height <= 0)
-                return;
-
-            height = Math.Ceiling(height);
-            // Grow-only: a shorter provider must not shrink the fixed flyout (Option A). Only a
-            // taller-than-estimated measurement enlarges it, and once settled it stops changing.
-            if (height <= DetailContentHeight + 1)
-                return;
-
-            DetailContentHeight = height;
+            // The tray flyout intentionally keeps a stable height. Let the inner dashboard scroll
+            // instead of resizing the native popup, which makes provider switching feel laggy.
         }
 
         public void SelectProvider(ProviderId id)
@@ -102,6 +98,12 @@ namespace TaskbarQuota.ViewModels
         {
             ProviderDiscoveryService.EnableProvider(id);
             _ = RefreshAsync();
+        }
+
+        public void DismissOnboarding()
+        {
+            OnboardingStateService.Dismiss();
+            OnboardingVisibility = Visibility.Collapsed;
         }
 
         [RelayCommand]
@@ -311,19 +313,13 @@ namespace TaskbarQuota.ViewModels
 
         private void UpdateDetailContentMetrics(ProviderCardViewModel? card)
         {
-            // Option A: fixed flyout. Width is driven purely by the provider strip (icons + settings
-            // gear) so the flyout fits the bottom bar exactly and never grows wider for content.
-            // Content wraps inside that width instead of pushing the window out.
+            // Option A: fixed flyout. Width stays at FlyoutLayout.BaseLogicalWidth regardless of how
+            // many providers are installed; the strip only pushes the window wider once its icons
+            // overflow that base. Content is laid out inside the resulting width.
             int flyoutWidth = FlyoutLayout.ComputeLogicalWidth(Cards.Count, 0);
             DetailContentWidth = flyoutWidth - FlyoutLayout.DetailContentPadding;
 
-            // Size to the tallest provider so switching never resizes the native window. Estimate
-            // from all cards, then grow-only (never shrink) below.
-            double selectedHeightEstimate = card?.SuggestedDetailHeight ?? DashboardLayoutMetrics.EstimateDetailHeight(null);
-            double heightEstimate = Cards.Count > 0
-                ? Math.Max(selectedHeightEstimate, Cards.Max(c => c.SuggestedDetailHeight))
-                : selectedHeightEstimate;
-            DetailContentHeight = Math.Max(DetailContentHeight, heightEstimate);
+            DetailContentHeight = FlyoutLayout.FixedLogicalContentHeight;
         }
 
         private void OnCoordinatorStateChanged(UsageResult result)
@@ -393,7 +389,9 @@ namespace TaskbarQuota.ViewModels
                 .Append(r.Id).Append('|')
                 .Append(isActive).Append('|')
                 .Append(r.Error).Append('|')
-                .Append(r.ErrorKind);
+                .Append(r.ErrorKind).Append('|')
+                .Append(r.Source.Kind).Append('|')
+                .Append(r.Source.DisplayName);
 
             if (r.Fetch is not { } fetch)
                 return sb.ToString();

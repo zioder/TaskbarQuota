@@ -1,18 +1,22 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using global::Interop.UIAutomationClient;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using TaskbarQuota.Interop;
 
 namespace TaskbarQuota.Taskbar
 {
-   
+
     internal sealed class TaskbarStructureWatcher : IDisposable
     {
+        private const string WidgetsButtonAutomationId = "WidgetsButton";
+
         private readonly IntPtr hwndTaskbar;
         private readonly IntPtr hwndReBar;
         private Timer? _timer;
+        private IUIAutomation? _automation;
 
         private bool widgetsButtonEnabled;
         private bool taskbarCentered;
@@ -56,8 +60,44 @@ namespace TaskbarQuota.Taskbar
             catch { /* best-effort */ }
         }
 
-        /// <summary>No UIAutomation available — widgets-button bounds are unknown; caller falls back to tray edge.</summary>
-        public Task<RECT?> GetWidgetsButtonRectAsync() => Task.FromResult<RECT?>(null);
+        /// <summary>
+        /// Screen bounds (physical px) of the taskbar Widgets button via UI Automation, or null when it
+        /// can't be found (disabled, or the tree isn't ready). Runs off the UI thread — the UIA cross-
+        /// process walk can block. Lets the default anchor sit clear of the Widgets pill (issue #10).
+        /// </summary>
+        public Task<RECT?> GetWidgetsButtonRectAsync() => Task.Run(TryGetWidgetsButtonRect);
+
+        private RECT? TryGetWidgetsButtonRect()
+        {
+            if (hwndTaskbar == IntPtr.Zero || !SystemInfos.IsTaskBarWidgetsEnabled())
+                return null;
+
+            try
+            {
+                _automation ??= new CUIAutomation();
+                var root = _automation.ElementFromHandle(hwndTaskbar);
+                if (root is null)
+                    return null;
+
+                var condition = _automation.CreatePropertyCondition(
+                    UIA_PropertyIds.UIA_AutomationIdPropertyId, WidgetsButtonAutomationId);
+                var button = root.FindFirst(TreeScope.TreeScope_Descendants, condition);
+                if (button is null)
+                    return null;
+
+                var r = button.CurrentBoundingRectangle;
+                if (r.right <= r.left || r.bottom <= r.top)
+                    return null;
+
+                return new RECT { left = r.left, top = r.top, right = r.right, bottom = r.bottom };
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Log.Debug($"widgets-button UIA lookup failed: {ex.Message}");
+                _automation = null;
+                return null;
+            }
+        }
 
         private bool IsTaskbarHidden()
         {
@@ -73,6 +113,11 @@ namespace TaskbarQuota.Taskbar
         {
             _timer?.Dispose();
             _timer = null;
+            if (_automation is not null)
+            {
+                try { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(_automation); } catch { }
+                _automation = null;
+            }
         }
     }
 

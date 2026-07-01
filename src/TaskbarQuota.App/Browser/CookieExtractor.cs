@@ -85,6 +85,46 @@ namespace TaskbarQuota.Browser
             return string.Join("; ", jar.Select(kv => $"{kv.Key}={kv.Value}"));
         }
 
+        /// <summary>
+        /// Returns raw (name, value) cookie pairs for the domain WITHOUT recombining Firefox's
+        /// chunked cookies. Needed for browser-cookie based requests: chunked cookies (e.g.
+        /// NextAuth's __Secure-next-auth.session-token.0/.1) must stay separate because each
+        /// chunk fits Chromium's ~4 KB per-cookie limit and the server reassembles them.
+        /// </summary>
+        public static List<(string name, string value)> GetCookiePairs(string domain)
+        {
+            var jar = new Dictionary<string, string>(StringComparer.Ordinal);
+
+            foreach (var browser in ChromiumBrowsers())
+            {
+                if (!Directory.Exists(browser.UserDataDir)) continue;
+                try
+                {
+                    foreach (var (name, value) in ExtractFromChromium(browser, domain))
+                        jar[name] = value;
+                }
+                catch (Exception ex) { Log.Debug($"Cookie pairs failed for {browser.Name}/{domain}: {ex.Message}"); }
+            }
+
+            foreach (var browser in FirefoxBrowsers())
+            {
+                if (!Directory.Exists(browser.ProfilesDir)) continue;
+                try
+                {
+                    foreach (var profileDir in EnumerateFirefoxProfiles(browser.ProfilesDir))
+                    {
+                        var cookiesDb = Path.Combine(profileDir, "cookies.sqlite");
+                        if (!File.Exists(cookiesDb)) continue;
+                        foreach (var (name, value) in ReadFirefoxCookiesRaw(cookiesDb, domain))
+                            jar[name] = value;
+                    }
+                }
+                catch (Exception ex) { Log.Debug($"Cookie pairs failed for {browser.Name}/{domain}: {ex.Message}"); }
+            }
+
+            return jar.Select(kv => (kv.Key, kv.Value)).ToList();
+        }
+
         private static IEnumerable<(string name, string value)> ExtractFromChromium(Browser browser, string domain)
         {
             var localStatePath = Path.Combine(browser.UserDataDir, "Local State");
@@ -181,9 +221,9 @@ namespace TaskbarQuota.Browser
             return results;
         }
 
-        private static List<(string name, string value)> ReadFirefoxCookies(string cookiesDb, string domain)
+        private static List<(string name, string value)> ReadFirefoxCookiesRaw(string cookiesDb, string domain)
         {
-            var results = new List<(string, string)>();
+            var raw = new List<(string name, string value)>();
             string temp = Path.Combine(Path.GetTempPath(), $"TaskbarQuota_ff_cookies_{Guid.NewGuid():N}.db");
             try
             {
@@ -202,11 +242,61 @@ namespace TaskbarQuota.Browser
                     string name = reader.GetString(0);
                     string value = reader.IsDBNull(1) ? "" : reader.GetString(1);
                     if (!string.IsNullOrEmpty(name))
-                        results.Add((name, value));
+                        raw.Add((name, value));
                 }
             }
             catch (Exception ex) { Log.Debug($"firefox cookie db read failed: {ex.Message}"); }
             finally { try { File.Delete(temp); } catch { } }
+            return raw;
+        }
+
+        private static List<(string name, string value)> ReadFirefoxCookies(string cookiesDb, string domain)
+        {
+            var raw = ReadFirefoxCookiesRaw(cookiesDb, domain);
+
+            // Firefox splits cookies >4KB into .0, .1, .N chunks; recombine them.
+            var grouped = new Dictionary<string, SortedDictionary<int, string>>(StringComparer.Ordinal);
+            foreach (var (name, value) in raw)
+            {
+                var dotIdx = name.LastIndexOf('.');
+                if (dotIdx > 0 && int.TryParse(name[(dotIdx + 1)..], out var chunk))
+                {
+                    var baseName = name[..dotIdx];
+                    if (!grouped.TryGetValue(baseName, out var chunks))
+                    {
+                        chunks = new SortedDictionary<int, string>();
+                        grouped[baseName] = chunks;
+                    }
+                    chunks[chunk] = value;
+                }
+                else
+                {
+                    if (!grouped.TryGetValue(name, out var chunks))
+                    {
+                        chunks = new SortedDictionary<int, string>();
+                        grouped[name] = chunks;
+                    }
+                    chunks[-1] = value; // single-chunk cookie uses sentinel key
+                }
+            }
+
+            var results = new List<(string name, string value)>(grouped.Count);
+            foreach (var (baseName, chunks) in grouped)
+            {
+                if (chunks.Count == 1 && chunks.ContainsKey(-1))
+                {
+                    // Single-chunk cookie, return as-is
+                    results.Add((baseName, chunks[-1]));
+                }
+                else
+                {
+                    // Multi-chunk cookie: concatenate values in order (.0, .1, ...)
+                    var combined = new System.Text.StringBuilder();
+                    foreach (var kv in chunks)
+                        combined.Append(kv.Value);
+                    results.Add((baseName, combined.ToString()));
+                }
+            }
             return results;
         }
 
