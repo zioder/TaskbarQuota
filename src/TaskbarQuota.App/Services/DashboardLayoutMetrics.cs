@@ -15,7 +15,7 @@ internal static class DashboardLayoutMetrics
     private const double SectionSpacing = 16;
     private const double UsageBarHeight = 52;
     private const double ResetCreditsHeaderHeight = 24;
-    private const double ResetCreditItemHeight = 76;
+    private const double ResetCreditItemHeight = 44;
     private const double CardVerticalPadding = 32;
     private const double SetupCardHeight = 112;
     private const double ErrorCardHeight = 72;
@@ -57,10 +57,8 @@ internal static class DashboardLayoutMetrics
             foreach (var resetCredit in card.ResetCreditItems)
             {
                 maxLine = Math.Max(maxLine,
-                    Estimate(resetCredit.TokenTitle) +
-                    Estimate(resetCredit.GrantedText) +
-                    Estimate(resetCredit.ExpiresText) +
-                    72);
+                    Math.Max(Estimate(resetCredit.TokenTitle), Estimate(resetCredit.ExpiresText)) +
+                    48);
             }
         }
 
@@ -102,7 +100,7 @@ internal static class DashboardLayoutMetrics
                 + ResetCreditsHeaderHeight
                 + 12
                 + (card.ResetCreditItems.Count * ResetCreditItemHeight)
-                + (Math.Max(0, card.ResetCreditItems.Count - 1) * 8);
+                + (Math.Max(0, card.ResetCreditItems.Count - 1) * 6);
         }
 
         if (!string.IsNullOrEmpty(card.AdditionalUsageStatusText))

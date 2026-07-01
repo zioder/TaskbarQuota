@@ -18,7 +18,7 @@ public class FlyoutLayoutTests
     public void ComputeLogicalWidth_UsesWiderOfStripAndDetailContent()
     {
         int width = FlyoutLayout.ComputeLogicalWidth(stripIconCount: 3, detailContentWidth: 360);
-        Assert.Equal(400, width);
+        Assert.Equal(FlyoutLayout.MinLogicalWidth, width);
     }
 
     [Fact]
@@ -40,5 +40,23 @@ public class FlyoutLayoutTests
     {
         int width = FlyoutLayout.ComputeLogicalWidth(stripIconCount: 10, detailContentWidth: 900);
         Assert.Equal(940, width);
+    }
+
+    [Fact]
+    public void ComputeLogicalWidth_CanForceMinimumWidthForManualTesting()
+    {
+        var previous = Environment.GetEnvironmentVariable(FlyoutLayout.ForceMinWidthEnvironmentVariable);
+        try
+        {
+            Environment.SetEnvironmentVariable(FlyoutLayout.ForceMinWidthEnvironmentVariable, "1");
+
+            int width = FlyoutLayout.ComputeLogicalWidth(stripIconCount: 12, detailContentWidth: 900);
+
+            Assert.Equal(FlyoutLayout.MinLogicalWidth, width);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(FlyoutLayout.ForceMinWidthEnvironmentVariable, previous);
+        }
     }
 }
