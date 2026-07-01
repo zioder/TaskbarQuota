@@ -61,9 +61,11 @@ namespace TaskbarQuota
         private static readonly TimeSpan UiaReconcileWindow = TimeSpan.FromSeconds(10);
         private bool? _lastHasDetectedTool;
         private DateTime _lastPresenceProbeAt = DateTime.MinValue;
+        private ProviderSource _activeProviderSource = ProviderSource.Unknown;
 
         public UsageService Service => _service;
         public ProviderId? ActiveProvider => _lastActive;
+        public ProviderSource ActiveProviderSource => _activeProviderSource;
 
         /// <summary>
         /// The provider the taskbar widget should display: the active provider when its widget is enabled,
@@ -267,6 +269,7 @@ namespace TaskbarQuota
             {
                 var previousHost = ActiveSynaraHost;
                 ActiveSynaraHost = host;
+                _activeProviderSource = SynaraSource(host.Host);
                 HoldSynaraProvider(provider);
                 var previous = _lastActive;
                 var providerChanged = previous != provider;
@@ -357,7 +360,8 @@ namespace TaskbarQuota
         {
             try
             {
-                var fresh = await _service.FetchAsync(targetProvider, force: true).ConfigureAwait(false);
+                var fresh = (await _service.FetchAsync(targetProvider, force: true).ConfigureAwait(false))
+                    .WithSource(SourceFor(targetProvider));
                 if (!await _gate.WaitAsync(0).ConfigureAwait(false))
                     return;
                 try
@@ -400,6 +404,7 @@ namespace TaskbarQuota
         private async Task HandleOpenCodeModelSwitchAsync()
         {
             var foreground = _detector.Detect();
+            var foregroundSource = _detector.ActiveSource;
             var modelProvider = ActiveAppDetector.DetectOpenCodeProviderFromModelState();
 
             if (!ShouldReactToOpenCodeModelChange(foreground))
@@ -421,6 +426,7 @@ namespace TaskbarQuota
 
                 var previous = _lastActive;
                 _lastActive = target;
+                _activeProviderSource = foregroundSource;
                 PromoteRecentProvider(target);
 
                 if (previous != target)
@@ -446,7 +452,8 @@ namespace TaskbarQuota
 
             try
             {
-                var fresh = await _service.FetchAsync(target, force: true).ConfigureAwait(false);
+                var fresh = (await _service.FetchAsync(target, force: true).ConfigureAwait(false))
+                    .WithSource(SourceFor(target));
                 await _gate.WaitAsync().ConfigureAwait(false);
                 try
                 {
@@ -498,11 +505,11 @@ namespace TaskbarQuota
         {
             UsageResult snapshot;
             if (_service.TryGetCached(target, out var cached))
-                snapshot = cached;
+                snapshot = cached.WithSource(SourceFor(target));
             else if (_service.TryGetLastSuccessfulLiveResult(target, out var lastSuccess))
-                snapshot = lastSuccess;
+                snapshot = lastSuccess.WithSource(SourceFor(target));
             else if (_service.Get(target) is { } provider)
-                snapshot = UsageResult.Pending(target, provider, "Loading...");
+                snapshot = UsageResult.Pending(target, provider, "Loading...").WithSource(SourceFor(target));
             else
                 return;
 
@@ -517,7 +524,8 @@ namespace TaskbarQuota
                 .Select(p => Task.Run(() => _service.FetchAsync(p.Id, force)))
                 .ToArray();
             var results = await Task.WhenAll(tasks).ConfigureAwait(false);
-            return SortByRecentActivity(results, RecentProviders, ActiveProvider);
+            var sourcedResults = results.Select(result => result.WithSource(SourceFor(result.Id))).ToArray();
+            return SortByRecentActivity(sourcedResults, RecentProviders, ActiveProvider);
         }
 
         /// <summary>Fetch providers needed for the dashboard and report each result as it arrives.</summary>
@@ -536,7 +544,8 @@ namespace TaskbarQuota
             {
                 var completed = await Task.WhenAny(tasks).ConfigureAwait(false);
                 tasks.Remove(completed);
-                onResult(await completed.ConfigureAwait(false));
+                var result = await completed.ConfigureAwait(false);
+                onResult(result.WithSource(SourceFor(result.Id)));
             }
         }
 
@@ -574,10 +583,12 @@ namespace TaskbarQuota
             // file-watcher path can publish provider switches while a tick is mid-detect.
             ProviderId target;
             ProviderId? detected;
+            ProviderSource detectedSource;
             SynaraStateReader.SynaraSelection? detectedSynaraHost;
             try
             {
                 detected = _detector.Detect();
+                detectedSource = _detector.ActiveSource;
                 detectedSynaraHost = _detector.ActiveSynaraHost;
             }
             catch (Exception ex)
@@ -610,11 +621,13 @@ namespace TaskbarQuota
                 if (detectedSynaraHost is { } synaraHost)
                 {
                     ActiveSynaraHost = synaraHost;
+                    detectedSource = SynaraSource(synaraHost.Host);
                     HoldSynaraProvider(synaraHost.Provider);
                 }
                 else if (ShouldHoldSynaraProvider(detected))
                 {
                     detected = _synaraHoldProvider;
+                    detectedSource = _activeProviderSource;
                 }
                 else
                 {
@@ -630,6 +643,7 @@ namespace TaskbarQuota
                         _lastHasDetectedTool = false;
                         _lastActive = null;
                         _lastLogged = null;
+                        _activeProviderSource = ProviderSource.Unknown;
                         ActiveSynaraHost = null;
                         ClearSynaraHold(force: true);
                         ActiveToolPresenceChanged?.Invoke(false);
@@ -641,6 +655,7 @@ namespace TaskbarQuota
                 if (detected is ProviderId p)
                 {
                     _lastActive = p;
+                    _activeProviderSource = detectedSource;
                     PromoteRecentProvider(p);
                     if (previousActive != p)
                     {
@@ -678,6 +693,7 @@ namespace TaskbarQuota
             try
             {
                 var result = await _service.FetchAsync(target, force).ConfigureAwait(false);
+                result = result.WithSource(SourceFor(target));
 
                 // The active provider may have changed while we awaited the network; if so, drop this
                 // stale result and let the next tick fetch the current target.
@@ -713,6 +729,15 @@ namespace TaskbarQuota
                 _recentProviders.Insert(0, provider);
             }
         }
+
+        private ProviderSource SourceFor(ProviderId provider)
+            => _lastActive == provider ? _activeProviderSource : ProviderSource.Unknown;
+
+        private static ProviderSource SynaraSource(HostApp host)
+            => new(
+                ProviderSourceKind.HostApp,
+                host == HostApp.T3Code ? "T3 Code" : "Synara",
+                host == HostApp.T3Code ? "t3code" : "synara");
 
         // Brief spin before giving up — tick only holds the gate for state apply, not WMI.
         private bool TryEnterDetectGate()

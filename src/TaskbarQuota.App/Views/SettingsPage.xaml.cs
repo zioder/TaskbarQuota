@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using TaskbarQuota.Helpers;
+using TaskbarQuota.Services;
 using TaskbarQuota.ViewModels;
 
 namespace TaskbarQuota.Views

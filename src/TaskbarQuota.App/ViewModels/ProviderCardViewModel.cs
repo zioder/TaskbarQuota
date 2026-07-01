@@ -117,13 +117,11 @@ namespace TaskbarQuota.ViewModels
     public sealed class ResetCreditViewModel
     {
         public string TokenTitle { get; }
-        public string GrantedText { get; }
         public string ExpiresText { get; }
 
         public ResetCreditViewModel(int index, ResetCreditGrant credit)
         {
             TokenTitle = $"Reset {index}";
-            GrantedText = FormatNullableLocalDateTime(credit.GrantedAt);
             ExpiresText = FormatNullableLocalDateTime(credit.ExpiresAt);
         }
 
@@ -133,7 +131,7 @@ namespace TaskbarQuota.ViewModels
         private static string FormatLocalDateTime(DateTimeOffset timestamp)
         {
             var local = timestamp.ToLocalTime();
-            return $"{local:MMM d, yyyy 'at' h:mm tt}";
+            return $"{local:MMM d, yyyy h:mm tt}";
         }
     }
 
@@ -208,7 +206,12 @@ namespace TaskbarQuota.ViewModels
 
         public bool IsSetupRequired { get; }
         public Visibility SetupRequiredVisibility { get; }
+        public bool IsOAuthLoginRequired { get; }
+        public Visibility OAuthLoginVisibility { get; }
+        public string OAuthLoginText { get; }
+        public string OAuthLoginDescription { get; }
         public string SetupHint { get; }
+        public string SetupTitle { get; }
         public string? SetupUrl { get; }
         public Visibility SetupUrlVisibility { get; }
         public bool IsCompactSetupCard { get; }
@@ -272,8 +275,13 @@ namespace TaskbarQuota.ViewModels
                     bool creditsOnly = r.Id is ProviderId.Copilot or ProviderId.Grok && u.Cost is { Label: "Credits" };
                     if (!creditsOnly)
                     {
-                        bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowPrimary, r.Provider?.SessionLabel ?? "Session", u.Primary));
-                        if (u.Secondary != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowSecondary, r.Provider?.WeeklyLabel ?? "Weekly", u.Secondary));
+                        var primaryLabel = r.Provider?.SessionLabel ?? "Session";
+                        bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowPrimary, primaryLabel, u.Primary));
+                        if (u.Secondary != null)
+                        {
+                            var secondaryLabel = r.Provider?.WeeklyLabel ?? "Weekly";
+                            bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowSecondary, secondaryLabel, u.Secondary));
+                        }
                         if (u.ModelSpecific != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowModelSpecific, ModelSpecificLabel(r.Id), u.ModelSpecific));
                         if (u.Monthly != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowMonthly, "Monthly", u.Monthly));
                         foreach (var extra in u.ExtraRateWindows) bars.Add(new BarViewModel(r.Id, extra));
@@ -319,14 +327,14 @@ namespace TaskbarQuota.ViewModels
 
                 Plan = PlanDisplayNames.ForTitle(r.Id, r.DisplayName, u.LoginMethod);
                 Email = u.Email ?? string.Empty;
-                SourceText = $"via {f.SourceLabel}";
+                SourceText = r.Source.IsKnown ? r.Source.SourceText : $"via {f.SourceLabel}";
                 Error = string.Empty;
             }
             else
             {
                 Plan = string.Empty; Email = string.Empty; CostText = string.Empty;
                 CreditLeftText = string.Empty; CreditLimitText = string.Empty;
-                SourceText = string.Empty;
+                SourceText = r.Source.IsKnown ? r.Source.SourceText : string.Empty;
                 Error = r.Error ?? "Unavailable";
             }
             Bars = bars;
@@ -350,7 +358,16 @@ namespace TaskbarQuota.ViewModels
             CreditVisibility = string.IsNullOrEmpty(CreditLeftText) ? Visibility.Collapsed : Visibility.Visible;
             SourceVisibility = string.IsNullOrEmpty(SourceText) ? Visibility.Collapsed : Visibility.Visible;
             IsSetupRequired = !ok && r.ErrorKind == ProviderErrorKind.NotInstalled;
-            ErrorVisibility = ok || IsSetupRequired ? Visibility.Collapsed : Visibility.Visible;
+            IsOAuthLoginRequired = !ok && r.ErrorKind == ProviderErrorKind.AuthRequired
+                && r.Id is ProviderId.Claude;
+            OAuthLoginVisibility = IsOAuthLoginRequired ? Visibility.Visible : Visibility.Collapsed;
+            OAuthLoginText = "Login with Claude";
+            OAuthLoginDescription = r.Id switch
+            {
+                ProviderId.Claude => "Connect Claude or sign in with Claude Code/Desktop. A browser window opens for you to approve access.",
+                _ => "Connect your account to read usage. A browser window opens for you to approve access.",
+            };
+            ErrorVisibility = ok || IsSetupRequired || IsOAuthLoginRequired ? Visibility.Collapsed : Visibility.Visible;
             ContentVisibility = ok ? Visibility.Visible : Visibility.Collapsed;
 
             AvatarBrush = isActive ? Ui.Accent : new SolidColorBrush(Color.FromArgb(40, 128, 128, 128));
@@ -360,6 +377,7 @@ namespace TaskbarQuota.ViewModels
 
             UsageDashboardUrl = ResolveLinkUrl(r, u => u.UsageDashboardUrl, DefaultUsageDashboardUrl);
             SetupHint = IsSetupRequired ? ProviderSetupInfo.Hint(r.Id) : string.Empty;
+            SetupTitle = "Not set up";
             SetupUrl = IsSetupRequired ? ProviderSetupInfo.SetupUrl(r.Id) : null;
             SetupUrlVisibility = string.IsNullOrEmpty(SetupUrl) ? Visibility.Collapsed : Visibility.Visible;
             IsCompactSetupCard = IsSetupRequired;

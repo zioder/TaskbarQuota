@@ -102,38 +102,23 @@
                     BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
                     BorderThickness="1"
                     CornerRadius="6"
-                    Padding="12,10">
-                <Grid RowSpacing="8" ColumnSpacing="16">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                    </Grid.RowDefinitions>
-                    <TextBlock Grid.Row="0"
+                    Padding="10,7">
+                <Grid ColumnSpacing="12" MinHeight="28">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0"
                                Text="{x:Bind TokenTitle}"
                                Style="{StaticResource BodyStrongTextBlockStyle}"
                                VerticalAlignment="Center"/>
-                    <Grid Grid.Row="1" ColumnSpacing="16">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0" Spacing="2">
-                            <TextBlock Text="Granted"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                       Style="{StaticResource CaptionTextBlockStyle}"/>
-                            <TextBlock Text="{x:Bind GrantedText}"
-                                       Style="{StaticResource BodyStrongTextBlockStyle}"
-                                       TextWrapping="Wrap"/>
-                        </StackPanel>
-                        <StackPanel Grid.Column="1" Spacing="2">
-                            <TextBlock Text="Expires"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                       Style="{StaticResource CaptionTextBlockStyle}"/>
-                            <TextBlock Text="{x:Bind ExpiresText}"
-                                       Style="{StaticResource BodyStrongTextBlockStyle}"
-                                       TextWrapping="Wrap"/>
-                        </StackPanel>
-                    </Grid>
+                    <TextBlock Grid.Column="1"
+                               Text="{x:Bind ExpiresText}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               TextAlignment="Right"
+                               TextWrapping="NoWrap"
+                               VerticalAlignment="Center"/>
                 </Grid>
             </Border>
         </DataTemplate>
@@ -147,7 +132,7 @@
                         CornerRadius="8"
                         Padding="16,14">
                     <StackPanel Spacing="4">
-                        <TextBlock Text="Not set up" Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                        <TextBlock Text="{x:Bind SetupTitle}" Style="{StaticResource BodyStrongTextBlockStyle}"/>
                         <TextBlock Text="{x:Bind SetupHint}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"/>
                         <HyperlinkButton Content="Learn more" Tag="{x:Bind ProviderId}" Visibility="{x:Bind SetupUrlVisibility}" Click="OpenSetupUrl_Click" HorizontalAlignment="Left"/>
                     </StackPanel>
@@ -167,6 +152,26 @@
                                          Click="FixCredentials_Click"/>
                     </muxc:InfoBar.ActionButton>
                 </muxc:InfoBar>
+
+                <Border Visibility="{x:Bind OAuthLoginVisibility}"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="16,14">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="{x:Bind OAuthLoginText}" Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                        <TextBlock Text="{x:Bind OAuthLoginDescription}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"/>
+                        <Button Content="{x:Bind OAuthLoginText}"
+                                Tag="{x:Bind ProviderId}"
+                                Style="{StaticResource AccentButtonStyle}"
+                                HorizontalAlignment="Left"
+                                AutomationProperties.AutomationId="OAuthLoginButton"
+                                Click="ConnectOAuth_Click"/>
+                    </StackPanel>
+                </Border>
 
                 <Border Visibility="{x:Bind BarsVisibility}"
                         HorizontalAlignment="Stretch"
@@ -419,6 +424,57 @@
                         Spacing="16"
                         HorizontalAlignment="Stretch"
                         VerticalAlignment="Top">
+                <Border x:Name="OnboardingBanner"
+                        Visibility="{x:Bind ViewModel.OnboardingVisibility, Mode=OneWay}"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="20,16">
+                    <Grid RowSpacing="12" ColumnSpacing="16">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Grid.Row="0" Grid.Column="0" Spacing="4">
+                            <TextBlock Text="Use AI normally"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}"/>
+                            <TextBlock Text="Open Claude or your coding apps normally. TaskbarQuota follows the active app, browser tab, or terminal."
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Style="{StaticResource BodyTextBlockStyle}"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+
+                        <Button Grid.Row="0"
+                                Grid.Column="1"
+                                AutomationProperties.AutomationId="DismissOnboardingButton"
+                                AutomationProperties.Name="Dismiss onboarding"
+                                Click="DismissOnboarding_Click"
+                                Padding="8">
+                            <FontIcon Glyph="&#xE711;" FontSize="12"/>
+                        </Button>
+
+                        <StackPanel Grid.Row="1"
+                                    Grid.Column="0"
+                                    Grid.ColumnSpan="2"
+                                    Orientation="Horizontal"
+                                    Spacing="8">
+                            <Button Content="Login with Claude"
+                                    Tag="Claude"
+                                    AutomationProperties.AutomationId="OnboardingConnectClaudeButton"
+                                    Click="OnboardingConnect_Click"/>
+                            <Button Content="Open settings"
+                                    AutomationProperties.AutomationId="OnboardingOpenSettingsButton"
+                                    Click="OnboardingOpenSettings_Click"/>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
                 <Border x:Name="HeaderCard"
                         Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
