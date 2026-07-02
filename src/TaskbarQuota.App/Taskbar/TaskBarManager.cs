@@ -120,7 +120,6 @@ namespace TaskbarQuota.Taskbar
                 widget.Destroying += (_, _) => _widget = null;
                 if (widget.Summary is { } summary)
                     summary.Clicked += () => _dispatcher?.TryEnqueue(ToggleFlyout);
-                widget.Show();
                 _widget = widget;
                 SyncWidgetState();
                 PrewarmFlyout();
@@ -144,20 +143,26 @@ namespace TaskbarQuota.Taskbar
             var coordinator = UsageCoordinator.Instance;
             summary.DispatcherQueue.TryEnqueue(() =>
             {
-                // No enabled+available provider -> hide instead of falling back to a disabled default (#7).
-                if (coordinator.WidgetDisplayProvider is not { } target)
+                var target = coordinator.WidgetDisplayProvider;
+                bool shouldShowWidget = coordinator.IsActiveToolPresent && target is not null;
+                widget.SetVisible(shouldShowWidget);
+
+                // No enabled+available provider -> hide the native host instead of leaving a transparent
+                // taskbar child window over the notification area (#10).
+                if (target is not { } targetProvider)
                 {
                     summary.SetActiveToolVisible(false);
                     return;
                 }
-                UsageResult? toApply = coordinator.LastState is { } last && last.Id == target
+
+                UsageResult? toApply = coordinator.LastState is { } last && last.Id == targetProvider
                     ? last
-                    : coordinator.Service.TryGetCached(target, out var cached)
+                    : coordinator.Service.TryGetCached(targetProvider, out var cached)
                         ? cached
-                        : coordinator.Service.TryGetLastSuccessfulLiveResult(target, out var lastSuccess)
+                        : coordinator.Service.TryGetLastSuccessfulLiveResult(targetProvider, out var lastSuccess)
                             ? lastSuccess
-                            : coordinator.Service.Get(target) is { } provider
-                                ? UsageResult.Pending(target, provider, "Loading...")
+                            : coordinator.Service.Get(targetProvider) is { } usageProvider
+                                ? UsageResult.Pending(targetProvider, usageProvider, "Loading...")
                                 : null;
 
                 if (toApply is { } result)
@@ -166,8 +171,7 @@ namespace TaskbarQuota.Taskbar
                     LogWidgetApply(result.Id, "sync");
                 }
 
-                bool isVisible = coordinator.IsActiveToolPresent;
-                summary.SetActiveToolVisible(isVisible);
+                summary.SetActiveToolVisible(shouldShowWidget);
 
                 if (toApply is null)
                     _ = coordinator.TickAsync(force: true);
@@ -219,7 +223,9 @@ namespace TaskbarQuota.Taskbar
             {
                 widget.Summary.Apply(result);
                 LogWidgetApply(result.Id, "state");
-                bool isVisible = UsageCoordinator.Instance.IsActiveToolPresent;
+                bool isVisible = UsageCoordinator.Instance.IsActiveToolPresent
+                    && UsageCoordinator.Instance.WidgetDisplayProvider is not null;
+                widget.SetVisible(isVisible);
                 widget.Summary.SetActiveToolVisible(isVisible);
             });
         }
@@ -242,7 +248,11 @@ namespace TaskbarQuota.Taskbar
             var widget = _widget;
             if (widget?.Summary is null) return;
             bool isVisible = isPresent && UsageCoordinator.Instance.WidgetDisplayProvider is not null;
-            widget.Summary.DispatcherQueue.TryEnqueue(() => widget.Summary.SetActiveToolVisible(isVisible));
+            widget.Summary.DispatcherQueue.TryEnqueue(() =>
+            {
+                widget.SetVisible(isVisible);
+                widget.Summary.SetActiveToolVisible(isVisible);
+            });
         }
 
         private static void OnWidgetSettingsChanged(object? sender, EventArgs e)

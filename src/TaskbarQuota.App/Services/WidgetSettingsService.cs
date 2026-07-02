@@ -103,6 +103,9 @@ public static class WidgetSettingsService
             : DefaultRowVisible(provider, rowId);
     }
 
+    public static bool TryGetRowVisibilityOverride(ProviderId provider, string rowId, out bool visible)
+        => RowVisibility.TryGetValue(RowVisibilityKey(provider, rowId), out visible);
+
     public static bool IsProviderVisible(ProviderId provider)
     {
         var key = provider.ToString();
@@ -278,6 +281,13 @@ public static class WidgetSettingsService
                 new(RowModelSpecific, "Completions"),
                 new(RowExtra, "Extra quota rows"),
             ],
+            ProviderId.Claude =>
+            [
+                new(RowPrimary, "Session"),
+                new(RowSecondary, "Weekly"),
+                new(RowModelSpecific, "Model weekly"),
+                new(RowExtra, "Extra weekly rows"),
+            ],
             ProviderId.Cursor =>
             [
                 new(RowSecondary, "Auto + Composer"),
@@ -290,6 +300,7 @@ public static class WidgetSettingsService
                 new(RowSecondary, "Weekly"),
                 new(RowModelSpecific, "Model"),
                 new(RowMonthly, "Monthly"),
+                new(RowCredits, "Credits"),
                 new(RowResetCredits, "Reset credits"),
                 new(RowExtra, "Extra model rows"),
             ],
@@ -500,7 +511,8 @@ public static class WidgetSettingsService
 
     private static bool DefaultRowVisible(ProviderId provider, string rowId)
         => provider != ProviderId.Codex
-        || rowId == RowPrimary
-        || rowId == RowSecondary
-        || rowId == RowResetCredits;
+              || rowId == RowPrimary
+              || rowId == RowSecondary
+              || rowId == RowCredits
+              || rowId == RowResetCredits;
 }

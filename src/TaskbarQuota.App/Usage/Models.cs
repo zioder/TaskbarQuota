@@ -23,13 +23,17 @@ namespace TaskbarQuota.Usage
         public int? WindowMinutes { get; init; }
         public DateTimeOffset? ResetAt { get; init; }
         public string? ResetDescription { get; init; }
+        /// <summary>Optional bar label override (e.g. "Spend limit" for Claude Enterprise), when the
+        /// window isn't the provider's default Session/Weekly meter.</summary>
+        public string? Label { get; init; }
 
-        public RateWindow(double usedPercent, int? windowMinutes = null, DateTimeOffset? resetAt = null, string? resetDescription = null)
+        public RateWindow(double usedPercent, int? windowMinutes = null, DateTimeOffset? resetAt = null, string? resetDescription = null, string? label = null)
         {
             UsedPercent = Math.Clamp(usedPercent, 0, 100);
             WindowMinutes = windowMinutes;
             ResetAt = resetAt;
             ResetDescription = resetDescription;
+            Label = label;
         }
 
         public double RemainingPercent => 100 - UsedPercent;
@@ -155,6 +159,9 @@ namespace TaskbarQuota.Usage
     public sealed class UsageSnapshot
     {
         public RateWindow Primary { get; }            // session
+        /// <summary>False when the provider reported no session window at all (e.g. Codex org/Business
+        /// plans that only expose credits): the card skips the primary bar instead of showing "0%".</summary>
+        public bool HasPrimaryWindow { get; set; } = true;
         public RateWindow? Secondary { get; set; }    // weekly
         public RateWindow? ModelSpecific { get; set; }// e.g. Opus / code review
         public RateWindow? Monthly { get; set; }      // monthly window when available

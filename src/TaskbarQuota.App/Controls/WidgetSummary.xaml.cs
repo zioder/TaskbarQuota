@@ -305,6 +305,23 @@ namespace TaskbarQuota.Controls
             if (result.Id == ProviderId.Codex)
             {
                 var rows = BuildBaseRows(result, usage);
+                // Codex credits (raw balance, or used/limit when the API reports a real cap). Lets org/
+                // Business plans surface credits in the widget — the only meter they have. See issue #12.
+                if (usage.Cost is { Label: "Credits" } codexCredits && ShouldShowCodexCredits(usage, codexCredits))
+                {
+                    if (codexCredits.Limit is { } creditLimit && creditLimit > 0)
+                    {
+                        double creditUsed = Math.Max(0, creditLimit - codexCredits.Amount);
+                        rows.Add(new WidgetUsageRow(
+                            "Credits",
+                            WidgetSettingsService.DisplayPercent(Math.Clamp(creditUsed / creditLimit * 100, 0, 100)),
+                            $"{FormatCreditCount(creditUsed)}/{FormatCreditCount(creditLimit)}"));
+                    }
+                    else
+                    {
+                        rows.Add(new WidgetUsageRow("Credits", 0, FormatCreditCount(codexCredits.Amount), HasBar: false));
+                    }
+                }
                 if (usage.ResetCredits is { AvailableCount: > 0 } resetCredits && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowResetCredits))
                 {
                     string? expiresIn = CodexProvider.FormatResetCountdown(resetCredits.EarliestExpiresAt);
@@ -316,6 +333,20 @@ namespace TaskbarQuota.Controls
                         HasBar: false));
                 }
 
+                if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
+                {
+                    rows.AddRange(usage.ExtraRateWindows.Select(w => new WidgetUsageRow(
+                        CompactLabel(w.Title),
+                        WidgetSettingsService.DisplayPercent(w.Window.UsedPercent),
+                        WidgetSettingsService.FormatDisplayPercent(w.Window.UsedPercent),
+                        w.Window.ResetDescription)));
+                }
+                return rows;
+            }
+
+            if (result.Id == ProviderId.Claude)
+            {
+                var rows = BuildBaseRows(result, usage);
                 if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
                 {
                     rows.AddRange(usage.ExtraRateWindows.Select(w => new WidgetUsageRow(
@@ -351,16 +382,39 @@ namespace TaskbarQuota.Controls
         internal static IReadOnlyList<string> BuildRowLabelsForTesting(UsageResult result, UsageSnapshot usage)
             => BuildRows(result, usage).Select(row => row.Label).ToList();
 
+        private static bool ShouldShowCodexCredits(UsageSnapshot usage, CostSnapshot credits)
+        {
+            if (WidgetSettingsService.TryGetRowVisibilityOverride(ProviderId.Codex, WidgetSettingsService.RowCredits, out bool userVisible))
+                return userVisible;
+
+            return credits.Amount > 0 || !IsNormalCodexPlan(usage.LoginMethod);
+        }
+
+        private static bool IsNormalCodexPlan(string? plan)
+        {
+            var normalized = (plan ?? string.Empty).Trim().ToLowerInvariant();
+            return normalized is "free" or "plus"
+                || normalized.StartsWith("pro", StringComparison.Ordinal);
+        }
+
         private static List<WidgetUsageRow> BuildBaseRows(UsageResult result, UsageSnapshot usage)
         {
             var rows = new List<WidgetUsageRow>();
-            if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowPrimary))
+            // Skip the primary bar when the provider reported no session window (Codex org/Business):
+            // otherwise the widget shows a bogus "Session 0%". Honor the window's Label override so
+            // Claude Enterprise reads "Spend limit" instead of "Session".
+            if (usage.HasPrimaryWindow && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowPrimary))
             {
-                var primaryLabel = result.Provider?.SessionLabel ?? "Usage";
+                var primaryLabel = usage.Primary.Label ?? result.Provider?.SessionLabel ?? "Usage";
+                // Spend-limit meter (Claude Enterprise): show the money value "$9.27/$100.00" instead of a
+                // bare percent so it matches Codex's "used/limit credits". The bar still tracks used %.
+                string primaryValue = usage.Primary.Label != null && usage.Cost is { } spend
+                    ? FormatSpendValue(spend)
+                    : WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent);
                 rows.Add(new WidgetUsageRow(
                     CompactLabel(primaryLabel),
                     WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
-                    WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent),
+                    primaryValue,
                     usage.Primary.ResetDescription));
             }
             if (usage.Secondary != null && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowSecondary))
@@ -375,7 +429,7 @@ namespace TaskbarQuota.Controls
             if (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowModelSpecific))
             {
                 rows.Add(new WidgetUsageRow(
-                    CompactLabel(ModelSpecificLabel(result.Id)),
+                    CompactLabel(usage.ModelSpecific.Label ?? ModelSpecificLabel(result.Id)),
                     WidgetSettingsService.DisplayPercent(usage.ModelSpecific.UsedPercent),
                     WidgetSettingsService.FormatDisplayPercent(usage.ModelSpecific.UsedPercent),
                     usage.ModelSpecific.ResetDescription));
@@ -503,6 +557,18 @@ namespace TaskbarQuota.Controls
 
         private static string FormatCreditCount(double value)
             => value.ToString(value % 1 == 0 ? "N0" : "N1", CultureInfo.InvariantCulture);
+
+        /// <summary>Compact "used / limit" money string for a spend-limit meter, e.g. "$9.27/$100".
+        /// Space-free to fit the widget's narrow value column.</summary>
+        private static string FormatSpendValue(CostSnapshot cost)
+        {
+            string Money(double v)
+            {
+                string n = v.ToString(v % 1 == 0 ? "N0" : "N2", CultureInfo.InvariantCulture);
+                return string.Equals(cost.Currency, "USD", StringComparison.OrdinalIgnoreCase) ? $"${n}" : $"{n} {cost.Currency}";
+            }
+            return cost.Limit is { } limit ? $"{Money(cost.Amount)}/{Money(limit)}" : Money(cost.Amount);
+        }
 
         private static string WidgetCostTooltipLine(ProviderId id, CostSnapshot? cost)
         {

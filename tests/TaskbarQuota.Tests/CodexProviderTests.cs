@@ -132,6 +132,147 @@ public class CodexProviderTests
         }
     }
 
+    [Theory]
+    [InlineData("Free")]
+    [InlineData("Plus")]
+    [InlineData("Pro 20x")]
+    [InlineData("Pro 5x")]
+    public void WidgetRows_ForCodex_NormalPlansHideZeroCreditsByDefault(string plan)
+    {
+        WidgetSettingsService.ResetRowVisibilityForTesting();
+        try
+        {
+            var result = CodexWidgetResultWithCredits(plan, amount: 0);
+
+            var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch!.Usage);
+
+            Assert.DoesNotContain("Credits", labels);
+        }
+        finally
+        {
+            WidgetSettingsService.ResetRowVisibilityForTesting();
+        }
+    }
+
+    [Fact]
+    public void WidgetRows_ForCodex_NormalPlanShowsPositiveCreditsByDefault()
+    {
+        WidgetSettingsService.ResetRowVisibilityForTesting();
+        try
+        {
+            var result = CodexWidgetResultWithCredits("Plus", amount: 250);
+
+            var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch!.Usage);
+
+            Assert.Contains("Credits", labels);
+        }
+        finally
+        {
+            WidgetSettingsService.ResetRowVisibilityForTesting();
+        }
+    }
+
+    [Fact]
+    public void WidgetRows_ForCodex_NormalPlanShowsCreditsWhenEnabled()
+    {
+        WidgetSettingsService.ResetRowVisibilityForTesting();
+        try
+        {
+            WidgetSettingsService.SetRowVisibleForTesting(ProviderId.Codex, WidgetSettingsService.RowCredits, true);
+            var result = CodexWidgetResultWithCredits("Plus", amount: 0);
+
+            var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch!.Usage);
+
+            Assert.Contains("Credits", labels);
+        }
+        finally
+        {
+            WidgetSettingsService.ResetRowVisibilityForTesting();
+        }
+    }
+
+    [Fact]
+    public void WidgetRows_ForCodex_NormalPlanHidesPositiveCreditsWhenDisabled()
+    {
+        WidgetSettingsService.ResetRowVisibilityForTesting();
+        try
+        {
+            WidgetSettingsService.SetRowVisibleForTesting(ProviderId.Codex, WidgetSettingsService.RowCredits, false);
+            var result = CodexWidgetResultWithCredits("Plus", amount: 250);
+
+            var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch!.Usage);
+
+            Assert.DoesNotContain("Credits", labels);
+        }
+        finally
+        {
+            WidgetSettingsService.ResetRowVisibilityForTesting();
+        }
+    }
+
+    [Fact]
+    public void WidgetRows_ForCodex_CreditPlansShowCreditsByDefault()
+    {
+        WidgetSettingsService.ResetRowVisibilityForTesting();
+        try
+        {
+            var result = CodexWidgetResultWithCredits("Business", amount: 250);
+
+            var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch!.Usage);
+
+            Assert.Contains("Credits", labels);
+        }
+        finally
+        {
+            WidgetSettingsService.ResetRowVisibilityForTesting();
+        }
+    }
+
+    [Fact]
+    public void WidgetRows_ForCodex_CreditPlansHideCreditsWhenDisabled()
+    {
+        WidgetSettingsService.ResetRowVisibilityForTesting();
+        try
+        {
+            WidgetSettingsService.SetRowVisibleForTesting(ProviderId.Codex, WidgetSettingsService.RowCredits, false);
+            var result = CodexWidgetResultWithCredits("Business");
+
+            var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch!.Usage);
+
+            Assert.DoesNotContain("Credits", labels);
+        }
+        finally
+        {
+            WidgetSettingsService.ResetRowVisibilityForTesting();
+        }
+    }
+
+    [Fact]
+    public void WidgetRows_ForClaude_UsesModelSpecificLabelOverride()
+    {
+        WidgetSettingsService.ResetRowVisibilityForTesting();
+        try
+        {
+            var result = UsageResult.Success(ProviderId.Claude, new TestProvider(ProviderId.Claude), new ProviderFetchResult(
+                new UsageSnapshot(new RateWindow(10))
+                {
+                    Secondary = new RateWindow(20),
+                    ModelSpecific = new RateWindow(30, label: "Sonnet"),
+                },
+                "oauth"));
+
+            var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch!.Usage);
+
+            Assert.Contains("Sonnet", labels);
+            Assert.DoesNotContain("Fable", labels);
+            Assert.DoesNotContain("Model", labels);
+        }
+        finally
+        {
+            WidgetSettingsService.ResetRowVisibilityForTesting();
+        }
+    }
+
     [Fact]
     public void WidgetRows_ForCodex_ShowsExtraRowsWhenEnabled()
     {
@@ -228,10 +369,23 @@ public class CodexProviderTests
             "oauth"));
     }
 
-    private sealed class TestProvider : IUsageProvider
+    private static UsageResult CodexWidgetResultWithCredits(string plan, double amount = 250)
     {
-        public ProviderId Id => ProviderId.Codex;
-        public string DisplayName => "Codex";
+        var cost = new CostSnapshot(amount, "credits", "Credits").WithLimit(1000);
+        return UsageResult.Success(ProviderId.Codex, new TestProvider(), new ProviderFetchResult(
+            new UsageSnapshot(new RateWindow(10))
+            {
+                Secondary = new RateWindow(20),
+                LoginMethod = plan,
+                Cost = cost,
+            },
+            "oauth"));
+    }
+
+    private sealed class TestProvider(ProviderId id = ProviderId.Codex) : IUsageProvider
+    {
+        public ProviderId Id => id;
+        public string DisplayName => id.ToString();
         public string SessionLabel => "Session";
         public string WeeklyLabel => "Weekly";
         public BillingKind Billing => BillingKind.Subscription;

@@ -67,7 +67,12 @@ namespace TaskbarQuota.Usage.Providers
             double? headerCredits = null,
             JsonElement? resetCreditsJson = null)
         {
-            var (primary, secondary, codeReview) = ExtractRateLimits(json);
+            var (primaryOpt, secondary, codeReview) = ExtractRateLimits(json);
+            // Codex org/Business plans expose no rate windows — only credits. Mirror CodexBar's
+            // credits-only snapshot (primary == nil) rather than fabricating a bogus "Session 0%".
+            // A live header percent still counts as a real session signal. See github issue #12.
+            bool hasPrimary = primaryOpt != null || headerPrimary != null;
+            var primary = primaryOpt ?? new RateWindow(0);
             if (headerPrimary is double hp) primary = WithUsedPercent(primary, hp);
             if (headerSecondary is double hs)
             {
@@ -76,7 +81,7 @@ namespace TaskbarQuota.Usage.Providers
                     : WithUsedPercent(secondary, hs);
             }
 
-            var usage = new UsageSnapshot(primary);
+            var usage = new UsageSnapshot(primary) { HasPrimaryWindow = hasPrimary };
             if (secondary != null) usage.Secondary = secondary;
             if (codeReview != null) usage.ModelSpecific = codeReview;
 
@@ -135,7 +140,7 @@ namespace TaskbarQuota.Usage.Providers
             return request;
         }
 
-        private static (RateWindow primary, RateWindow? secondary, RateWindow? codeReview) ExtractRateLimits(JsonElement json)
+        private static (RateWindow? primary, RateWindow? secondary, RateWindow? codeReview) ExtractRateLimits(JsonElement json)
         {
             if (json.TryGetProperty("rate_limit", out var rl) && rl.ValueKind == JsonValueKind.Object)
             {
@@ -153,10 +158,10 @@ namespace TaskbarQuota.Usage.Providers
 
                 // Promote secondary to primary for weekly-only plans
                 if (p == null && s != null) { p = s; s = null; }
-                return (p ?? new RateWindow(0), s, cr);
+                return (p, s, cr);
             }
 
-            return (new RateWindow(0), null, null);
+            return (null, null, null);
         }
 
         private static void AddAdditionalRateLimits(JsonElement json, UsageSnapshot usage, string? planType)
@@ -217,15 +222,35 @@ namespace TaskbarQuota.Usage.Providers
 
         private static CostSnapshot? ExtractCredits(JsonElement json, double? headerCredits)
         {
+            // Codex credits mirror CodexBar's model: the /wham/usage `credits` object carries a raw
+            // `balance` plus `has_credits` / `unlimited` flags, but NO limit. Business/Enterprise plans
+            // report a raw balance with no cap, so we must never fabricate one (the old code slapped
+            // `.WithLimit(1000)` on every balance, which rendered a bogus "1,000 / 1,000"). A limit is
+            // surfaced only when the API actually reports one; otherwise the balance shows on its own.
             double? balance = headerCredits;
-            if (!json.TryGetProperty("credits", out var credits) || credits.ValueKind != JsonValueKind.Object)
-                return balance is null ? null : new CostSnapshot(balance.Value, "credits", "Credits").WithLimit(1000);
+            double? limit = null;
 
-            bool hasCredits = credits.TryGetProperty("has_credits", out var hc) && hc.ValueKind == JsonValueKind.True;
-            if (!hasCredits && balance is null) return null;
-            if (credits.TryGetProperty("unlimited", out var un) && un.ValueKind == JsonValueKind.True) return null;
-            balance ??= TryF64(credits, "balance") ?? (hasCredits ? 0 : null);
-            return balance is null ? null : new CostSnapshot(balance.Value, "credits", "Credits").WithLimit(1000);
+            if (json.TryGetProperty("credits", out var credits) && credits.ValueKind == JsonValueKind.Object)
+            {
+                // Unlimited orgs have no meaningful credit balance to show.
+                if (credits.TryGetProperty("unlimited", out var un) && un.ValueKind == JsonValueKind.True)
+                    return null;
+
+                bool hasCredits = credits.TryGetProperty("has_credits", out var hc) && hc.ValueKind == JsonValueKind.True;
+                balance ??= TryF64(credits, "balance") ?? (hasCredits ? 0 : null);
+                limit = TryF64(credits, "limit") ?? TryF64(credits, "total_granted") ?? TryF64(credits, "granted") ?? TryF64(credits, "monthly_limit");
+
+                if (!hasCredits && balance is null)
+                    return null;
+            }
+
+            if (balance is null)
+                return null;
+
+            var snapshot = new CostSnapshot(balance.Value, "credits", "Credits");
+            if (limit is { } lim && lim > 0)
+                snapshot.WithLimit(lim);
+            return snapshot;
         }
 
         private static ResetCreditsSnapshot? ExtractResetCredits(JsonElement? maybeJson)

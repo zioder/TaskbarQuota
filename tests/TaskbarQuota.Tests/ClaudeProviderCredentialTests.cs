@@ -2,6 +2,8 @@ using System.Text.Json;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using TaskbarQuota.Controls;
+using TaskbarQuota.Usage;
 using TaskbarQuota.Usage.Providers;
 
 namespace TaskbarQuota.Tests;
@@ -82,6 +84,87 @@ public class ClaudeProviderCredentialTests
     }
 
     [Fact]
+    public void BuildResult_FableScopedWeeklyLimit_IsSeparateExtraWeeklyRow()
+    {
+        using var doc = JsonDocument.Parse("""
+        {
+          "five_hour": { "utilization": 10, "resets_at": "2099-01-01T00:00:00.000Z" },
+          "seven_day": { "utilization": 20, "resets_at": "2099-01-08T00:00:00.000Z" },
+          "seven_day_sonnet": null,
+          "limits": [
+            { "kind": "session", "group": "session", "percent": 10, "resets_at": "2099-01-01T00:00:00.000Z" },
+            { "kind": "weekly_all", "group": "weekly", "percent": 20, "resets_at": "2099-01-08T00:00:00.000Z" },
+            {
+              "kind": "weekly_scoped",
+              "group": "weekly",
+              "percent": 7,
+              "resets_at": "2099-01-08T00:00:00.000Z",
+              "scope": { "model": { "display_name": "Fable", "id": null }, "surface": null }
+            }
+          ]
+        }
+        """);
+
+        var result = ClaudeProvider.BuildResultForTesting(
+            doc.RootElement,
+            new ClaudeProvider.Credentials("token", "max", "default_claude_ai"));
+
+        var fable = Assert.Single(result.Usage.ExtraRateWindows, w => w.Id == "claude-fable");
+        Assert.Equal("Fable", fable.Title);
+        Assert.Equal(7, fable.Window.UsedPercent);
+        Assert.Equal(10080, fable.Window.WindowMinutes);
+        Assert.Null(result.Usage.ModelSpecific);
+    }
+
+    [Fact]
+    public void WidgetRows_ForClaude_FableIsVisibleByDefaultAndDoesNotReplaceCoreRows()
+    {
+        WidgetSettingsService.ResetRowVisibilityForTesting();
+        try
+        {
+            var usage = new UsageSnapshot(new RateWindow(10))
+            {
+                Secondary = new RateWindow(20),
+            };
+            usage.ExtraRateWindows.Add(new NamedRateWindow("claude-fable", "Fable", new RateWindow(7)));
+            var result = UsageResult.Success(ProviderId.Claude, new TestProvider(), new ProviderFetchResult(usage, "oauth"));
+
+            var defaultLabels = WidgetSummary.BuildRowLabelsForTesting(result, usage);
+            WidgetSettingsService.SetRowVisibleForTesting(ProviderId.Claude, WidgetSettingsService.RowExtra, false);
+            var disabledLabels = WidgetSummary.BuildRowLabelsForTesting(result, usage);
+
+            Assert.Equal(new[] { "Session", "Weekly", "Fable" }, defaultLabels);
+            Assert.Equal(new[] { "Session", "Weekly" }, disabledLabels);
+        }
+        finally
+        {
+            WidgetSettingsService.ResetRowVisibilityForTesting();
+        }
+    }
+
+    [Fact]
+    public void BuildResult_UncappedExtraUsage_DoesNotCreateFakePrimaryWindow()
+    {
+        using var doc = JsonDocument.Parse("""
+        {
+          "extra_usage": {
+            "is_enabled": true,
+            "used_credits": 927,
+            "currency": "USD"
+          }
+        }
+        """);
+
+        var result = ClaudeProvider.BuildResultForTesting(
+            doc.RootElement,
+            new ClaudeProvider.Credentials("token", "enterprise", "default_claude_ai"));
+
+        Assert.False(result.Usage.HasPrimaryWindow);
+        Assert.Equal("Spend limit", result.Usage.Cost?.Label);
+        Assert.Equal("$9.27", result.Usage.Cost?.Display);
+    }
+
+    [Fact]
     public void ParseRetryAfter_Delta_ReturnsFutureTime()
     {
         using var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
@@ -93,5 +176,16 @@ public class ClaudeProviderCredentialTests
 
         Assert.NotNull(parsed);
         Assert.InRange(parsed.Value, before, after);
+    }
+
+    private sealed class TestProvider : IUsageProvider
+    {
+        public ProviderId Id => ProviderId.Claude;
+        public string DisplayName => "Claude Code";
+        public string SessionLabel => "Session";
+        public string WeeklyLabel => "Weekly";
+        public BillingKind Billing => BillingKind.Subscription;
+        public Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
+            => throw new NotImplementedException();
     }
 }
