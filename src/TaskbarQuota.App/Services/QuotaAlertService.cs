@@ -169,7 +169,8 @@ internal static class QuotaAlertEvaluator
 
     private static IEnumerable<QuotaAlertWindow> EnumerateWindows(UsageSnapshot usage)
     {
-        yield return new QuotaAlertWindow("primary", "Session", usage.Primary);
+        if (usage.HasPrimaryWindow)
+            yield return new QuotaAlertWindow("primary", "Session", usage.Primary);
 
         if (usage.Secondary is { } secondary)
             yield return new QuotaAlertWindow("secondary", "Weekly", secondary);

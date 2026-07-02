@@ -147,27 +147,79 @@ namespace TaskbarQuota.Usage.Providers
 
         private static ProviderFetchResult BuildResult(JsonElement json, Credentials creds)
         {
-            var primary = ParseWindow(json, 300, "five_hour", "fiveHour") ?? new RateWindow(0);
-            var usage = new UsageSnapshot(primary);
+            var sessionWindow = ParseWindow(json, 300, "five_hour", "fiveHour");
+            var secondary = ParseWindow(json, 10080, "seven_day", "sevenDay");
+            var modelSpecific =
+                ParseWindow(json, 10080, "seven_day_opus", "sevenDayOpus") is { } opus
+                    ? WithLabel(opus, "Opus")
+                    : ParseWindow(json, 10080, "seven_day_sonnet", "sevenDaySonnet") is { } sonnet
+                        ? WithLabel(sonnet, "Sonnet")
+                        : null;
+            var fableWeekly = ParseScopedWeeklyLimit(json, "Fable");
 
-            usage.Secondary = ParseWindow(json, 10080, "seven_day", "sevenDay");
-            usage.ModelSpecific =
-                ParseWindow(json, 10080, "seven_day_opus", "sevenDayOpus")
-                ?? ParseWindow(json, 10080, "seven_day_sonnet", "sevenDaySonnet");
+            bool hasExtra = TryParseExtraUsage(json, out var cost, out var additional);
+            string plan = ResolvePlan(creds.SubscriptionType, creds.RateLimitTier);
 
+            // Claude Enterprise (and other org-billed plans) expose no session/weekly rate windows —
+            // only an `extra_usage` spend cap. Promote that cap to the primary bar so it's a first-class,
+            // widget-toggleable meter ("Spend limit") instead of a plain text line with no add option.
+            // Mirrors CodexBar's `oauthSpendLimitWindow` / `treatAsSpendLimit`. See github issue #12.
+            bool treatAsSpendLimit = sessionWindow == null && secondary == null && hasExtra;
+            bool isSpendLimit = treatAsSpendLimit || string.Equals(plan, "Enterprise", StringComparison.OrdinalIgnoreCase);
+
+            bool hasSpendLimitWindow = treatAsSpendLimit && cost is { Limit: > 0 };
+            RateWindow primary;
+            if (hasSpendLimitWindow && cost is { } spend)
+                primary = BuildSpendLimitWindow(spend);
+            else
+                primary = sessionWindow ?? new RateWindow(0);
+
+            var usage = new UsageSnapshot(primary)
+            {
+                HasPrimaryWindow = sessionWindow != null || hasSpendLimitWindow,
+            };
+            usage.Secondary = secondary;
+            usage.ModelSpecific = modelSpecific;
+
+            if (fableWeekly is { } fable)
+                usage.ExtraRateWindows.Add(new NamedRateWindow("claude-fable", "Fable", fable));
             AddExtraWindow(usage, json, "claude-oauth-apps", "OAuth apps", "seven_day_oauth_apps", "seven_day_claude_oauth_apps", "oauth_apps", "oauth", "sevenDayOauthApps");
             AddExtraWindow(usage, json, "claude-design", "Claude Design", "seven_day_design", "seven_day_claude_design", "claude_design", "design", "seven_day_omelette", "omelette", "sevenDayDesign");
             AddExtraWindow(usage, json, "claude-routines", "Daily Routines", "seven_day_routines", "seven_day_claude_routines", "claude_routines", "routines", "routine", "seven_day_cowork", "cowork", "sevenDayRoutines");
 
-            if (TryParseExtraUsage(json, out var cost, out var additional))
+            if (hasExtra && cost != null)
             {
-                usage.Cost = cost;
+                // CodexBar wording: spend-limit plans read "Spend limit", others "Monthly cap".
+                usage.Cost = RelabelCostPeriod(cost, isSpendLimit ? "Spend limit" : "Monthly cap");
                 usage.AdditionalUsage = additional;
             }
 
-            usage.LoginMethod = ResolvePlan(creds.SubscriptionType, creds.RateLimitTier);
+            usage.LoginMethod = plan;
             return new ProviderFetchResult(usage, "oauth");
         }
+
+        private static CostSnapshot RelabelCostPeriod(CostSnapshot cost, string period)
+        {
+            var relabeled = new CostSnapshot(cost.Amount, cost.Currency, period);
+            if (cost.Limit is { } limit) relabeled.WithLimit(limit);
+            if (cost.ResetsAt is { } resetsAt) relabeled.WithResetsAt(resetsAt);
+            return relabeled;
+        }
+
+        /// <summary>
+        /// Builds the Enterprise "Spend limit" primary bar from the extra-usage cost: percent = used/limit.
+        /// The dollar detail ($9.27 / $100.00) still renders below via <see cref="UsageSnapshot.Cost"/>.
+        /// </summary>
+        private static RateWindow BuildSpendLimitWindow(CostSnapshot spend)
+        {
+            double pct = spend.Limit is { } lim && lim > 0
+                ? Math.Clamp(spend.Amount / lim * 100, 0, 100)
+                : 0;
+            return new RateWindow(pct, label: "Spend limit");
+        }
+
+        private static RateWindow WithLabel(RateWindow window, string label)
+            => new(window.UsedPercent, window.WindowMinutes, window.ResetAt, window.ResetDescription, label);
 
         internal static ProviderFetchResult BuildResultForTesting(JsonElement json, Credentials creds)
             => BuildResult(json, creds);
@@ -230,6 +282,42 @@ namespace TaskbarQuota.Usage.Providers
             }
 
             return new RateWindow(util, windowMinutes, resetAt, resetDesc);
+        }
+
+        /// <summary>
+        /// A model-scoped weekly limit from the <c>limits</c> array — a <c>kind: "weekly_scoped"</c> row
+        /// whose <c>scope.model.display_name</c> names the model (e.g. "Fable"). Anthropic moved the
+        /// per-model weekly windows off the legacy top-level <c>seven_day_&lt;model&gt;</c> keys (which now
+        /// return null) into this array, so the Fable bucket is read by display name. <c>percent</c> is
+        /// 0–100. Ported from openusage ClaudeUsageMapper.appendScopedWeeklyLimit (#814).
+        /// </summary>
+        private static RateWindow? ParseScopedWeeklyLimit(JsonElement root, string modelDisplayName)
+        {
+            if (!TryGetFirstProperty(root, out var limits, "limits") || limits.ValueKind != JsonValueKind.Array)
+                return null;
+
+            foreach (var entry in limits.EnumerateArray())
+            {
+                if (entry.ValueKind != JsonValueKind.Object) continue;
+                if (!string.Equals(Str(entry, "kind"), "weekly_scoped", StringComparison.Ordinal)) continue;
+                if (!entry.TryGetProperty("scope", out var scope) || scope.ValueKind != JsonValueKind.Object) continue;
+                if (!scope.TryGetProperty("model", out var model) || model.ValueKind != JsonValueKind.Object) continue;
+                if (!string.Equals(Str(model, "display_name"), modelDisplayName, StringComparison.OrdinalIgnoreCase)) continue;
+                if (Num(entry, "percent") is not { } percent) continue;
+
+                DateTimeOffset? resetAt = null;
+                string? resetDesc = null;
+                if (entry.TryGetProperty("resets_at", out var ra) && ra.ValueKind == JsonValueKind.String &&
+                    DateTimeOffset.TryParse(ra.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dt))
+                {
+                    resetAt = dt;
+                    resetDesc = CodexProvider.FormatResetCountdown(dt);
+                }
+
+                return new RateWindow(percent, 10080, resetAt, resetDesc);
+            }
+
+            return null;
         }
 
         private static bool TryGetFirstProperty(JsonElement root, out JsonElement value, params string[] names)

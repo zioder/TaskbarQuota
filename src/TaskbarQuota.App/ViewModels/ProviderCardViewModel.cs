@@ -275,26 +275,38 @@ namespace TaskbarQuota.ViewModels
                     bool creditsOnly = r.Id is ProviderId.Copilot or ProviderId.Grok && u.Cost is { Label: "Credits" };
                     if (!creditsOnly)
                     {
-                        var primaryLabel = r.Provider?.SessionLabel ?? "Session";
-                        bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowPrimary, primaryLabel, u.Primary));
+                        if (u.HasPrimaryWindow)
+                        {
+                            var primaryLabel = u.Primary.Label ?? r.Provider?.SessionLabel ?? "Session";
+                            bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowPrimary, primaryLabel, u.Primary));
+                        }
                         if (u.Secondary != null)
                         {
                             var secondaryLabel = r.Provider?.WeeklyLabel ?? "Weekly";
                             bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowSecondary, secondaryLabel, u.Secondary));
                         }
-                        if (u.ModelSpecific != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowModelSpecific, ModelSpecificLabel(r.Id), u.ModelSpecific));
+                        if (u.ModelSpecific != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowModelSpecific, u.ModelSpecific.Label ?? ModelSpecificLabel(r.Id), u.ModelSpecific));
                         if (u.Monthly != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowMonthly, "Monthly", u.Monthly));
                         foreach (var extra in u.ExtraRateWindows) bars.Add(new BarViewModel(r.Id, extra));
                     }
 
                     if (u.Cost is { Label: "Credits" } credits)
                     {
-                        var limit = credits.Limit ?? 0;
                         var remaining = credits.Amount;
-                        var used = System.Math.Max(0, limit - remaining);
-                        CreditPercent = limit <= 0 ? 0 : System.Math.Clamp(used / limit * 100, 0, 100);
+                        if (credits.Limit is { } limit && limit > 0)
+                        {
+                            var used = System.Math.Max(0, limit - remaining);
+                            CreditPercent = System.Math.Clamp(used / limit * 100, 0, 100);
+                            CreditLeftText = $"{FormatCount(used)}/{FormatCount(limit)} Credits";
+                        }
+                        else
+                        {
+                            // No cap reported (e.g. Codex Business/Enterprise): show the raw balance
+                            // on its own instead of a fabricated "N / N" — matches CodexBar.
+                            CreditPercent = 0;
+                            CreditLeftText = $"{FormatCount(remaining)} Credits";
+                        }
                         CreditBrush = Ui.ConsumedUsageBrush(CreditPercent);
-                        CreditLeftText = $"{FormatCount(used)}/{FormatCount(limit)} Credits";
                         CreditLimitText = FormatCreditReset(credits.ResetsAt, u.Primary.ResetDescription);
                         CreditOpacity = r.Id == ProviderId.Codex && remaining <= 0 ? 0.55 : 1.0;
                         CostText = string.Empty;

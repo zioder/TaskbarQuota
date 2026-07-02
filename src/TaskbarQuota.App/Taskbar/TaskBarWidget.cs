@@ -28,11 +28,13 @@ namespace TaskbarQuota.Taskbar
         private const string NotificationAreaClassName = "TrayNotifyWnd";
         private const string WidgetsButtonAutomationId = "WidgetsButton";
         private const int DefaultWidgetHostWidth = 172;
+        private const int TrayClearanceLogicalPx = 6;
 
         private static readonly bool IsRtlUI = System.Globalization.CultureInfo.CurrentUICulture.TextInfo.IsRightToLeft;
 
         // Minimum horizontal recompute delta (logical px, DPI-scaled) before the resting widget is moved.
         private int RepositionDeadbandPx => (int)Math.Ceiling(2 * dpiScale);
+        private int TrayClearancePx => (int)Math.Ceiling(TrayClearanceLogicalPx * dpiScale);
 
         private readonly double dpiScale;
         private readonly IntPtr hwndShell;
@@ -60,6 +62,7 @@ namespace TaskbarQuota.Taskbar
         private int pressCursorPositionX;
         private bool initialized;
         private bool destroyed;
+        private bool isVisible;
         private bool disposedValue;
 
         public IntPtr Handle => hwnd != IntPtr.Zero ? hwnd : throw new InvalidOperationException("Widget not initialized.");
@@ -162,7 +165,25 @@ namespace TaskbarQuota.Taskbar
             destroyed = true;
         }
 
-        public void Show() => appWindow?.Show(false);
+        public void SetVisible(bool visible)
+        {
+            if (appWindow is null || isVisible == visible)
+                return;
+
+            isVisible = visible;
+            if (visible)
+            {
+                _ = UpdatePositionImpl(TaskbarChangeReason.None);
+                appWindow.Show(false);
+            }
+            else
+            {
+                if (isDragging)
+                    EndDragging(revert: true);
+                appWindow.Hide();
+            }
+        }
+
         public void Destroy() => appWindow?.Destroy();
 
         public void UpdatePosition(bool resetManualPosition = false)
@@ -205,7 +226,14 @@ namespace TaskbarQuota.Taskbar
         private async Task UpdatePositionImpl(TaskbarChangeReason reason, bool isCentered, bool isWidgetsEnabled)
         {
             if (appWindow is null) return;
-            User32.GetWindowRect(hwndShell, out RECT taskbarRect);
+            User32.GetWindowRect(hwndShell, out RECT taskbarScreenRect);
+            User32.GetWindowRect(hwndTrayNotify, out RECT trayNotifyScreenRect);
+            User32.GetWindowRect(hwndReBar, out RECT barScreenRect);
+            var notificationScreenRect = GetNotificationAreaScreenRect(taskbarScreenRect, trayNotifyScreenRect);
+
+            var taskbarRect = ToTaskbarClientRect(taskbarScreenRect, taskbarScreenRect);
+            var trayNotifyRect = ToTaskbarClientRect(notificationScreenRect, taskbarScreenRect);
+            var barRect = ToTaskbarClientRect(barScreenRect, taskbarScreenRect);
 
             int offsetX = LoadCustomPosition();
             // Taskbar alignment flipped (e.g. centered -> left): the old manual position now sits on the
@@ -216,11 +244,9 @@ namespace TaskbarQuota.Taskbar
                 offsetX = -1;
             }
             bool useDefault = offsetX == -1;
-            User32.GetWindowRect(hwndTrayNotify, out RECT trayNotifyRect);
-            User32.GetWindowRect(hwndReBar, out RECT barRect);
             // Resting position uses the stable lanes (no running-app buttons) so it doesn't jitter as apps
             // open/close; manual drag (MoveWidgetWithCursor) keeps the full band-avoiding lanes.
-            var lanes = GetWidgetLanes(taskbarRect, trayNotifyRect, barRect, stableOnly: true);
+            var lanes = GetWidgetLanes(taskbarRect, trayNotifyRect, barRect, taskbarScreenRect, stableOnly: true);
 
             // The Widgets button is a XAML element the child-window lane scan can't see, so fetch its
             // bounds separately and treat it as an obstacle to clear — for BOTH the default anchor and a
@@ -232,12 +258,12 @@ namespace TaskbarQuota.Taskbar
                 foreach (var wnd in GetOtherInjectedWindows())
                 {
                     User32.GetWindowRect(wnd, out var injectedBounds);
-                    obstacles.Add(injectedBounds);
+                    obstacles.Add(ToTaskbarClientRect(injectedBounds, taskbarScreenRect));
                 }
             }
             catch (Exception ex) { Log.Warning(ex, "overlap scan failed"); }
             if (wbRect is { } wb && wb.right > wb.left)
-                obstacles.Add(wb);
+                obstacles.Add(ToTaskbarClientRect(wb, taskbarScreenRect));
 
             // Centered default anchors far-left and grows rightward, so step off obstacles to the RIGHT;
             // every other case rests toward the tray and steps LEFT. RTL mirrors both.
@@ -247,7 +273,7 @@ namespace TaskbarQuota.Taskbar
             if (useDefault && isCentered)
             {
                 // Centered Win11 taskbar: far-left is empty, anchor just right of the Widgets button.
-                offsetX = ComputeFarLeftAnchor(taskbarRect, trayNotifyRect, wbRect, isCentered);
+                offsetX = ComputeFarLeftAnchor(taskbarRect, trayNotifyRect, wbRect, taskbarScreenRect, isCentered);
             }
             else if (useDefault)
             {
@@ -262,16 +288,17 @@ namespace TaskbarQuota.Taskbar
 
             offsetX = StepClearOfObstacles(offsetX, obstacles, stepLeft);
 
-            // Keep it on the bar, clear of the tray, and (LTR) right of the app cluster so stepping left off
-            // a tray-side Widgets button lands in the free gap rather than on Start/search/apps.
+            // Keep it on the bar and clear of the tray. If the preferred gap between apps and tray is too
+            // small, prioritize tray access over staying right of the app cluster.
+            int traySafeMax = Math.Max(0, trayNotifyRect.left - WidgetHostWidth - TrayClearancePx);
             int minXBound = IsRtlUI
-                ? Math.Max(0, taskbarRect.left)
-                : Math.Max(Math.Max(0, taskbarRect.left), isCentered ? 0 : barRect.right);
-            int maxXBound = Math.Max(minXBound, trayNotifyRect.left - WidgetHostWidth);
+                ? 0
+                : Math.Min(Math.Max(0, isCentered ? 0 : barRect.right), traySafeMax);
+            int maxXBound = Math.Max(minXBound, traySafeMax);
             offsetX = Math.Clamp(offsetX, minXBound, maxXBound);
-            offsetX = ClampToMonitorContainingTray(offsetX, WidgetHostWidth, taskbarRect, trayNotifyRect, barRect);
+            offsetX = ClampToMonitorContainingTray(offsetX, WidgetHostWidth, taskbarScreenRect, notificationScreenRect, barScreenRect);
 
-            int offsetY = barRect.top - taskbarRect.top;
+            int offsetY = barRect.top;
 
             if (currentOffsetY != offsetY)
             {
@@ -290,8 +317,12 @@ namespace TaskbarQuota.Taskbar
         public void StartDragging()
         {
             if (isDragging || appWindow is null || hostContent is null || widgetSummary is null) return;
+            SetVisible(true);
             widgetSummary.IsHitTestVisible = false;
-            User32.SetCursorPos(appWindow.Position.X + appWindow.Size.Width / 2, appWindow.Position.Y + appWindow.Size.Height / 2);
+            User32.GetWindowRect(hwndShell, out var taskbarRect);
+            User32.SetCursorPos(
+                taskbarRect.left + appWindow.Position.X + appWindow.Size.Width / 2,
+                taskbarRect.top + appWindow.Position.Y + appWindow.Size.Height / 2);
             hostContent.KeyUp += Content_KeyUp;
             hostContent.PointerPressed += Content_PointerPressed;
             hostContent.PointerReleased += Content_PointerReleased;
@@ -333,7 +364,8 @@ namespace TaskbarQuota.Taskbar
             hostContent.CapturePointer(e.Pointer);
             User32.GetCursorPos(out var point);
             lastCursorPositionX = point.x;
-            draggingInnerOffsetX = point.x - appWindow.Position.X;
+            User32.GetWindowRect(hwndShell, out var taskbarRect);
+            draggingInnerOffsetX = point.x - taskbarRect.left - appWindow.Position.X;
         }
 
         private void Content_PointerReleased(object sender, PointerRoutedEventArgs e) => EndDragging(false);
@@ -355,7 +387,8 @@ namespace TaskbarQuota.Taskbar
             User32.GetCursorPos(out var point);
             pressCursorPositionX = point.x;
             lastCursorPositionX = point.x;
-            draggingInnerOffsetX = point.x - appWindow.Position.X;
+            User32.GetWindowRect(hwndShell, out var taskbarRect);
+            draggingInnerOffsetX = point.x - taskbarRect.left - appWindow.Position.X;
         }
 
         private void WidgetSummary_PointerMoved(object sender, PointerRoutedEventArgs e)
@@ -404,8 +437,12 @@ namespace TaskbarQuota.Taskbar
             User32.GetWindowRect(hwndShell, out RECT taskbarRect);
             User32.GetWindowRect(hwndTrayNotify, out RECT trayNotifyRect);
             User32.GetWindowRect(hwndReBar, out RECT barRect);
-            var lanes = GetWidgetLanes(taskbarRect, trayNotifyRect, barRect);
-            int targetX = cursorX - draggingInnerOffsetX;
+            var notificationRect = GetNotificationAreaScreenRect(taskbarRect, trayNotifyRect);
+            var taskbarClientRect = ToTaskbarClientRect(taskbarRect, taskbarRect);
+            var trayNotifyClientRect = ToTaskbarClientRect(notificationRect, taskbarRect);
+            var barClientRect = ToTaskbarClientRect(barRect, taskbarRect);
+            var lanes = GetWidgetLanes(taskbarClientRect, trayNotifyClientRect, barClientRect, taskbarRect);
+            int targetX = cursorX - taskbarRect.left - draggingInnerOffsetX;
             int delta = cursorX - lastCursorPositionX;
             targetX = NormalizeDragX(targetX, delta, lanes);
 
@@ -418,19 +455,21 @@ namespace TaskbarQuota.Taskbar
         // computation makes the widget hop around as you switch apps (most visible on a centered Win11
         // taskbar) — issue #7 case 1. Manual dragging still avoids them, so the user can't drop the widget
         // on top of the app buttons.
-        private TaskbarLanes GetWidgetLanes(RECT taskbarRect, RECT trayNotifyRect, RECT barRect, bool stableOnly = false)
+        private TaskbarLanes GetWidgetLanes(RECT taskbarRect, RECT trayNotifyRect, RECT barRect, RECT taskbarScreenRect, bool stableOnly = false)
         {
             int forbiddenLeft = barRect.left;
             int forbiddenRight = barRect.right;
             if (hwndStart != IntPtr.Zero && User32.GetWindowRect(hwndStart, out RECT startRect) && startRect.right > startRect.left)
             {
+                startRect = ToTaskbarClientRect(startRect, taskbarScreenRect);
                 forbiddenLeft = Math.Min(forbiddenLeft, startRect.left);
                 forbiddenRight = Math.Max(forbiddenRight, startRect.right);
             }
             foreach (var bounds in GetTaskbarItemBandWindows(includeAppButtons: !stableOnly))
             {
-                forbiddenLeft = Math.Min(forbiddenLeft, bounds.left);
-                forbiddenRight = Math.Max(forbiddenRight, bounds.right);
+                var localBounds = ToTaskbarClientRect(bounds, taskbarScreenRect);
+                forbiddenLeft = Math.Min(forbiddenLeft, localBounds.left);
+                forbiddenRight = Math.Max(forbiddenRight, localBounds.right);
             }
 
             int leftMin;
@@ -460,21 +499,21 @@ namespace TaskbarQuota.Taskbar
         // The default "far left" X: hugging the left end of the taskbar's item area. On Win11 the Widgets
         // button is pinned far-left, so we sit just right of it; on a left-aligned classic taskbar we sit
         // right of the Start button; otherwise the very left edge. RTL mirrors to the visual start (right).
-        private int ComputeFarLeftAnchor(RECT taskbarRect, RECT trayNotifyRect, RECT? wbRect, bool isCentered)
+        private int ComputeFarLeftAnchor(RECT taskbarRect, RECT trayNotifyRect, RECT? wbRect, RECT taskbarScreenRect, bool isCentered)
         {
             if (IsRtlUI)
             {
                 if (wbRect is { } wb && wb.right > wb.left)
-                    return wb.left - WidgetHostWidth;
+                    return ToTaskbarClientRect(wb, taskbarScreenRect).left - WidgetHostWidth;
                 return taskbarRect.right - WidgetHostWidth;
             }
 
             int anchor = Math.Max(0, taskbarRect.left);
             if (wbRect is { } w && w.right > w.left)
-                anchor = Math.Max(anchor, w.right);
+                anchor = Math.Max(anchor, ToTaskbarClientRect(w, taskbarScreenRect).right);
             else if (!isCentered && hwndStart != IntPtr.Zero
                      && User32.GetWindowRect(hwndStart, out RECT startRect) && startRect.right > startRect.left)
-                anchor = Math.Max(anchor, startRect.right);
+                anchor = Math.Max(anchor, ToTaskbarClientRect(startRect, taskbarScreenRect).right);
             return anchor;
         }
 
@@ -517,6 +556,54 @@ namespace TaskbarQuota.Taskbar
             screenX = Math.Clamp(screenX, m.left, m.right - widgetHostWidth);
             return screenX - taskbarRect.left;
         }
+
+        private static RECT ToTaskbarClientRect(RECT rect, RECT taskbarScreenRect)
+            => new()
+            {
+                left = rect.left - taskbarScreenRect.left,
+                top = rect.top - taskbarScreenRect.top,
+                right = rect.right - taskbarScreenRect.left,
+                bottom = rect.bottom - taskbarScreenRect.top,
+            };
+
+        private RECT GetNotificationAreaScreenRect(RECT taskbarScreenRect, RECT trayNotifyScreenRect)
+        {
+            var result = trayNotifyScreenRect;
+            IncludeTaskbarChildBounds("ClockButton", taskbarScreenRect, ref result);
+            IncludeTaskbarChildBounds("TrayClockWClass", taskbarScreenRect, ref result);
+            IncludeTaskbarChildBounds("TrayShowDesktopButtonWClass", taskbarScreenRect, ref result);
+            return result;
+        }
+
+        private void IncludeTaskbarChildBounds(string className, RECT taskbarScreenRect, ref RECT result)
+        {
+            for (var child = User32.FindWindowEx(hwndShell, IntPtr.Zero, className, null);
+                 child != IntPtr.Zero;
+                 child = User32.FindWindowEx(hwndShell, child, className, null))
+            {
+                if (!User32.GetWindowRect(child, out var bounds)
+                    || bounds.right <= bounds.left
+                    || bounds.bottom <= bounds.top
+                    || !RectsIntersect(bounds, taskbarScreenRect))
+                {
+                    continue;
+                }
+
+                result = Union(result, bounds);
+            }
+        }
+
+        private static bool RectsIntersect(RECT a, RECT b)
+            => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+
+        private static RECT Union(RECT a, RECT b)
+            => new()
+            {
+                left = Math.Min(a.left, b.left),
+                top = Math.Min(a.top, b.top),
+                right = Math.Max(a.right, b.right),
+                bottom = Math.Max(a.bottom, b.bottom),
+            };
 
         private int NormalizeWidgetX(int x, TaskbarLanes lanes, bool preferRightLane)
         {
@@ -671,6 +758,7 @@ namespace TaskbarQuota.Taskbar
         public void Dispose()
         {
             if (disposedValue) return;
+            isVisible = false;
             if (!destroyed) appWindow?.Destroy();
             if (widgetSummary is not null)
             {
