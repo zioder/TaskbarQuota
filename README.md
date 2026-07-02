@@ -58,6 +58,13 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 
 ## Features
 
+### What's new in 1.0.16
+
+- **Claude Fable weekly meter** — TaskbarQuota now reads Anthropic's model-scoped `limits[]` entries and shows Fable usage in the widget by default.
+- **Codex credit balances** — Codex Business and Enterprise-style plans can show raw credits without inventing a fixed cap, plus reset-credit details when available.
+- **Cleaner quota rows** — Claude uncapped extra usage no longer renders a fake `Session 0%` bar, while legacy Sonnet/Opus windows keep their own labels.
+- **Taskbar widget reliability** — the native widget host hides fully when no eligible provider is active and better avoids the tray/widgets area on complex taskbars.
+
 ### What's new in 1.0.15
 
 - **Browser tab detection** — TaskbarQuota reads the active browser tab to attribute usage to the provider you're actually using (ChatGPT, Claude, Gemini, and more), instead of folding web chats into coding-client providers.
