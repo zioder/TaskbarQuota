@@ -14,6 +14,8 @@ namespace TaskbarQuota.Usage
         Copilot,
         Grok,
         Devin,
+        Cline,
+        ClinePass,
     }
 
     /// <summary>A single rate-limit window (for example session or weekly), expressed as percent used.</summary>

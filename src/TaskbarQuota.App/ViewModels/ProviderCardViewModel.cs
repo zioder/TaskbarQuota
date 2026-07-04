@@ -432,6 +432,8 @@ namespace TaskbarQuota.ViewModels
             ProviderId.Antigravity => "https://aistudio.google.com/usage",
             ProviderId.Grok => "https://grok.com/?_s=usage",
             ProviderId.Devin => "https://app.devin.ai",
+            ProviderId.Cline => "https://app.cline.bot/dashboard/credits",
+            ProviderId.ClinePass => "https://app.cline.bot/dashboard/subscription",
             _ => string.Empty,
         };
 

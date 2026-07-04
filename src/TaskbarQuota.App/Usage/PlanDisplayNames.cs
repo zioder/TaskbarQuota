@@ -69,6 +69,8 @@ namespace TaskbarQuota.Usage
             ProviderId.Antigravity => ["Antigravity "],
             ProviderId.Grok => ["Grok ", "xAI "],
             ProviderId.Devin => ["Devin "],
+            ProviderId.Cline => ["Cline Usage-Billing ", "Cline "],
+            ProviderId.ClinePass => ["Cline Pass ", "ClinePass ", "Cline "],
             _ => Array.Empty<string>(),
         };
     }

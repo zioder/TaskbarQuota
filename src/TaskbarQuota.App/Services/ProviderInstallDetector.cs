@@ -15,7 +15,7 @@ namespace TaskbarQuota;
 internal static class ProviderInstallDetector
 {
     private static readonly string[] KnownClis =
-        ["antigravity", "codex", "grok", "claude", "devin", "gh", "opencode"];
+        ["antigravity", "codex", "grok", "claude", "devin", "gh", "opencode", "cline"];
 
     private static readonly ConcurrentDictionary<string, bool> CliAvailability = new(StringComparer.OrdinalIgnoreCase);
     private static volatile bool _cliCacheReady;
@@ -64,6 +64,7 @@ internal static class ProviderInstallDetector
         ProviderId.Cursor => IsCursorInstalled(),
         ProviderId.OpenCode or ProviderId.OpenCodeGo => IsCliAvailable("opencode")
             || !string.IsNullOrWhiteSpace(CredentialStore.Instance.For(ProviderId.OpenCode).CookieHeader),
+        ProviderId.Cline or ProviderId.ClinePass => IsCliAvailable("cline") || File.Exists(ClineProvidersPath()),
         _ => true,
     };
 
@@ -85,6 +86,7 @@ internal static class ProviderInstallDetector
         ProviderId.OpenCode or ProviderId.OpenCodeGo =>
             !string.IsNullOrWhiteSpace(CredentialStore.Instance.For(ProviderId.OpenCode).CookieHeader)
             || HasCachedCli("opencode"),
+        ProviderId.Cline or ProviderId.ClinePass => File.Exists(ClineProvidersPath()) || HasCachedCli("cline"),
         _ => true,
     };
 
@@ -110,8 +112,14 @@ internal static class ProviderInstallDetector
         ProviderId.Copilot => "Install the GitHub CLI or add a token in Settings.",
         ProviderId.Cursor => "Install Cursor and sign in.",
         ProviderId.OpenCode or ProviderId.OpenCodeGo => "Sign in at opencode.ai or paste cookies via Fix.",
+        ProviderId.Cline or ProviderId.ClinePass => "Install the Cline CLI (npm i -g cline) and sign in.",
         _ => "Set up this provider to see usage here.",
     };
+
+    internal static string ClineProvidersPath()
+        => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".cline", "data", "settings", "providers.json");
 
     internal static string CodexAuthPath()
     {
