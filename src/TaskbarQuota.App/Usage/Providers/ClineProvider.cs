@@ -145,6 +145,40 @@ namespace TaskbarQuota.Usage.Providers
             return new AuthTokens(accessToken!, refreshToken, expiresAt, ReadJwtEmail(accessToken!), accountId);
         }
 
+        internal static string? ResolveConfiguredProviderKey(JsonElement providers)
+        {
+            var hasSubscription = ReadProviderAuth(providers, SubscriptionKey) is not null;
+            var hasUsageBilling = ReadProviderAuth(providers, UsageBillingKey) is not null;
+
+            return (hasSubscription, hasUsageBilling) switch
+            {
+                (true, false) => SubscriptionKey,
+                (false, true) => UsageBillingKey,
+                _ => null,
+            };
+        }
+
+        public static string? ConfiguredProviderKey()
+        {
+            var path = ProvidersJsonPath();
+            if (!File.Exists(path)) return null;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                if (!doc.RootElement.TryGetProperty("providers", out var providers)
+                    || providers.ValueKind != JsonValueKind.Object)
+                    return null;
+
+                return ResolveConfiguredProviderKey(providers);
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Log.Debug($"Cline configured provider read failed: {ex.Message}");
+                return null;
+            }
+        }
+
         // --- HTTP ---------------------------------------------------------------------------------
 
         public static async Task<JsonElement> GetJsonAsync(string path, string bearer, CancellationToken ct)

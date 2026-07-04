@@ -1494,7 +1494,8 @@ namespace TaskbarQuota.ActiveApp
         /// </summary>
         internal static ProviderId? DetectClineProviderFromState()
         {
-            var key = Usage.Providers.ClineAccount.ActiveProviderKey();
+            var key = Usage.Providers.ClineAccount.ActiveProviderKey()
+                ?? Usage.Providers.ClineAccount.ConfiguredProviderKey();
             return key switch
             {
                 Usage.Providers.ClineAccount.SubscriptionKey => ProviderId.ClinePass,

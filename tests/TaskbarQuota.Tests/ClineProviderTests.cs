@@ -85,6 +85,51 @@ public class ClineProviderTests
     }
 
     [Fact]
+    public void ResolveConfiguredProviderKey_ReturnsSubscriptionWhenOnlyClinePassConfigured()
+    {
+        var providers = Parse("""
+        {
+          "cline-pass": {
+            "settings": { "auth": { "accessToken": "workos:aaa" } }
+          }
+        }
+        """);
+
+        Assert.Equal(ClineAccount.SubscriptionKey, ClineAccount.ResolveConfiguredProviderKey(providers));
+    }
+
+    [Fact]
+    public void ResolveConfiguredProviderKey_ReturnsUsageBillingWhenOnlyClineConfigured()
+    {
+        var providers = Parse("""
+        {
+          "cline": {
+            "settings": { "auth": { "accessToken": "workos:bbb" } }
+          }
+        }
+        """);
+
+        Assert.Equal(ClineAccount.UsageBillingKey, ClineAccount.ResolveConfiguredProviderKey(providers));
+    }
+
+    [Fact]
+    public void ResolveConfiguredProviderKey_ReturnsNullWhenBothSurfacesConfigured()
+    {
+        var providers = Parse("""
+        {
+          "cline-pass": {
+            "settings": { "auth": { "accessToken": "workos:aaa" } }
+          },
+          "cline": {
+            "settings": { "auth": { "accessToken": "workos:bbb" } }
+          }
+        }
+        """);
+
+        Assert.Null(ClineAccount.ResolveConfiguredProviderKey(providers));
+    }
+
+    [Fact]
     public void ReadJwtEmail_DecodesEmailClaim()
     {
         // {"email":"user@example.com"} base64url, no padding, as a middle JWT segment.
