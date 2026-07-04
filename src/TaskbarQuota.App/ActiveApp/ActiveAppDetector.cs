@@ -52,7 +52,7 @@ namespace TaskbarQuota.ActiveApp
 
         private static readonly HashSet<string> InteractiveClis = new(StringComparer.OrdinalIgnoreCase)
         {
-            "grok", "claude", "codex", "cursor", "cursor-agent", "opencode", "copilot", "antigravity", "agy", "devin",
+            "grok", "claude", "codex", "cursor", "cursor-agent", "opencode", "copilot", "antigravity", "agy", "devin", "cline",
         };
 
         // CLI command-line markers -> provider, checked in order. Claude is checked
@@ -78,6 +78,7 @@ namespace TaskbarQuota.ActiveApp
             (".grok/bin/grok", ProviderId.Grok),
             ("grok", ProviderId.Grok),
             ("devin", ProviderId.Devin),
+            ("cline", ProviderId.Cline),
             ("claude", ProviderId.Claude),
             ("codex", ProviderId.Codex),
         };
@@ -98,6 +99,7 @@ namespace TaskbarQuota.ActiveApp
             ["gh"] = ProviderId.Copilot,
             ["grok"] = ProviderId.Grok,
             ["devin"] = ProviderId.Devin,
+            ["cline"] = ProviderId.Cline,
         };
 
         // Script-runtime hosts that run a CLI as an argument (e.g. "node ... claude"); only these need
@@ -111,7 +113,7 @@ namespace TaskbarQuota.ActiveApp
         // tree). CommandLine is deliberately excluded here — it is fetched per-PID only when required.
         private const string BulkProcessQuery =
             "SELECT ProcessId, ParentProcessId, Name, CreationDate FROM Win32_Process WHERE " +
-            "Name = 'node.exe' OR Name = 'antigravity.exe' OR Name = 'agy.exe' OR Name = 'claude.exe' OR Name = 'codex.exe' OR Name = 'cursor.exe' OR Name = 'cursor-agent.exe' OR Name = 'opencode.exe' OR Name = 'copilot.exe' OR Name = 'gh.exe' OR Name = 'grok.exe' OR Name = 'devin.exe' OR Name = 'bun.exe' OR Name = 'deno.exe' OR Name = 'npm.exe' OR Name = 'npx.exe' OR Name = 'pnpm.exe' OR Name = 'yarn.exe' OR Name = 'cmd.exe' OR Name = 'powershell.exe' OR Name = 'pwsh.exe' OR Name = 'windowsterminal.exe' OR Name = 'openconsole.exe' OR Name = 'conhost.exe' OR Name = 'wezterm-gui.exe' OR Name = 'wezterm.exe' OR Name = 'alacritty.exe' OR Name = 'mintty.exe' OR Name = 'tabby.exe' OR Name = 'hyper.exe' OR Name = 'wt.exe' OR Name = 'wsl.exe' OR Name = 'wslhost.exe'";
+            "Name = 'node.exe' OR Name = 'antigravity.exe' OR Name = 'agy.exe' OR Name = 'claude.exe' OR Name = 'codex.exe' OR Name = 'cursor.exe' OR Name = 'cursor-agent.exe' OR Name = 'opencode.exe' OR Name = 'copilot.exe' OR Name = 'gh.exe' OR Name = 'grok.exe' OR Name = 'devin.exe' OR Name = 'cline.exe' OR Name = 'bun.exe' OR Name = 'deno.exe' OR Name = 'npm.exe' OR Name = 'npx.exe' OR Name = 'pnpm.exe' OR Name = 'yarn.exe' OR Name = 'cmd.exe' OR Name = 'powershell.exe' OR Name = 'pwsh.exe' OR Name = 'windowsterminal.exe' OR Name = 'openconsole.exe' OR Name = 'conhost.exe' OR Name = 'wezterm-gui.exe' OR Name = 'wezterm.exe' OR Name = 'alacritty.exe' OR Name = 'mintty.exe' OR Name = 'tabby.exe' OR Name = 'hyper.exe' OR Name = 'wt.exe' OR Name = 'wsl.exe' OR Name = 'wslhost.exe'";
 
         // Brief cache so tab switches inside one terminal stay responsive without hammering WMI.
         private static readonly TimeSpan CliCacheTtl = TimeSpan.FromMilliseconds(250);
@@ -129,7 +131,9 @@ namespace TaskbarQuota.ActiveApp
         private bool _runningToolCache;
         private DateTime _runningToolCacheAt = DateTime.MinValue;
         private volatile bool _openCodeModelStateDirty;
+        private volatile bool _clineStateDirty;
         private OpenCodeModelStateWatcher? _modelStateWatcher;
+        private ClineStateWatcher? _clineStateWatcher;
         private SynaraStateWatcher? _synaraStateWatcher;
         private SynaraStateReader.SynaraSelection? _synaraHost;
         private ProviderSource _activeSource = ProviderSource.Unknown;
@@ -294,6 +298,45 @@ namespace TaskbarQuota.ActiveApp
             OpenCodeModelStateChanged?.Invoke();
         }
 
+        public event Action? ClineProviderStateChanged;
+
+        public void StartClineStateWatcher()
+        {
+            if (_clineStateWatcher != null) return;
+
+            _clineStateWatcher = new ClineStateWatcher();
+            _clineStateWatcher.StateChanged += OnClineStateChanged;
+            _clineStateWatcher.Start();
+        }
+
+        private string? _lastClineProviderKey;
+        private bool _clineProviderKeySeen;
+
+        private void OnClineStateChanged()
+        {
+            // The Cline hub daemon rewrites providers.json for unrelated reasons (token refresh, activity),
+            // so only react when the active surface (lastUsedProvider) actually changes — otherwise every
+            // write would thrash the CLI cache and trigger needless re-detects and network fetches.
+            Usage.Providers.ClineAccount.InvalidateActiveProviderKeyCache();
+            var key = Usage.Providers.ClineAccount.ActiveProviderKey();
+            if (_clineProviderKeySeen && string.Equals(key, _lastClineProviderKey, StringComparison.Ordinal))
+                return;
+
+            _clineProviderKeySeen = true;
+            _lastClineProviderKey = key;
+            _clineStateDirty = true;
+            ClineProviderStateChanged?.Invoke();
+        }
+
+        private bool ConsumeClineStateChange()
+        {
+            if (!_clineStateDirty)
+                return false;
+
+            _clineStateDirty = false;
+            return true;
+        }
+
         private bool ConsumeOpenCodeModelStateChange()
         {
             if (!_openCodeModelStateDirty)
@@ -323,7 +366,9 @@ namespace TaskbarQuota.ActiveApp
             if (pid == 0) return null;
 
             var foregroundPid = (int)pid;
-            var openCodeModelChanged = ConsumeOpenCodeModelStateChange();
+            // Either watcher firing invalidates the CLI cache so the next detect re-resolves the active
+            // surface (OpenCode Zen/Go, Cline usage-billing/ClinePass) instead of returning the stale pick.
+            var openCodeModelChanged = ConsumeOpenCodeModelStateChange() | ConsumeClineStateChange();
 
             string? procName = foregroundPid == _lastForegroundPid
                 ? _lastForegroundProcessName
@@ -800,9 +845,7 @@ namespace TaskbarQuota.ActiveApp
 
                     if (NativeCliExes.TryGetValue(name, out var nativeId))
                     {
-                        var detectedId = nativeId == ProviderId.OpenCode
-                            ? DetectOpenCodeProviderFromModelState() ?? ProviderId.OpenCode
-                            : nativeId;
+                        var detectedId = ResolveDynamicCliProvider(nativeId);
                         candidates.Add((detectedId, started, p, parentPid));
                     }
                     else if (CmdLineHostExes.Contains(name))
@@ -1011,9 +1054,7 @@ namespace TaskbarQuota.ActiveApp
                         var pid = TryParseInt(mo["ProcessId"]) ?? 0;
                         if (TryDetectCliProvider(mo["Name"] as string, mo["CommandLine"] as string) is not { } id)
                             continue;
-                        var detectedId = id == ProviderId.OpenCode
-                            ? DetectOpenCodeProviderFromModelState() ?? ProviderId.OpenCode
-                            : id;
+                        var detectedId = ResolveDynamicCliProvider(id);
                         starts.TryGetValue(pid, out var started);
                         parents.TryGetValue(pid, out var parentPid);
                         candidates.Add((detectedId, started, pid, parentPid));
@@ -1283,6 +1324,7 @@ namespace TaskbarQuota.ActiveApp
             if (name is "copilot.exe" or "gh.exe") return ProviderId.Copilot;
             if (name is "grok.exe") return ProviderId.Grok;
             if (name is "devin.exe") return ProviderId.Devin;
+            if (name is "cline.exe") return ProviderId.Cline;
 
             var haystack = ((commandLine ?? "") + " " + name).ToLowerInvariant();
             foreach (var (marker, id) in CliMarkers)
@@ -1435,6 +1477,31 @@ namespace TaskbarQuota.ActiveApp
                 return candidates.OrderByDescending(c => c.timestamp).First().provider;
 
             return HasOpenCodeGoAuth() ? ProviderId.OpenCodeGo : null;
+        }
+
+        /// <summary>Resolves native CLI ids that map to more than one surface to the currently-active one.</summary>
+        private static ProviderId ResolveDynamicCliProvider(ProviderId nativeId) => nativeId switch
+        {
+            ProviderId.OpenCode => DetectOpenCodeProviderFromModelState() ?? ProviderId.OpenCode,
+            ProviderId.Cline or ProviderId.ClinePass => DetectClineProviderFromState() ?? ProviderId.Cline,
+            _ => nativeId,
+        };
+
+        /// <summary>
+        /// The active Cline surface, from providers.json <c>lastUsedProvider</c>: "cline-pass" → ClinePass
+        /// subscription, "cline" → Cline usage-billing. Defaults to ClinePass when a subscription is the
+        /// only configured surface, else usage-billing.
+        /// </summary>
+        internal static ProviderId? DetectClineProviderFromState()
+        {
+            var key = Usage.Providers.ClineAccount.ActiveProviderKey()
+                ?? Usage.Providers.ClineAccount.ConfiguredProviderKey();
+            return key switch
+            {
+                Usage.Providers.ClineAccount.SubscriptionKey => ProviderId.ClinePass,
+                Usage.Providers.ClineAccount.UsageBillingKey => ProviderId.Cline,
+                _ => null,
+            };
         }
 
         private static ProviderId? DetectFromModelJson(string path)

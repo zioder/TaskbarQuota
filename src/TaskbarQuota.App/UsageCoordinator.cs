@@ -123,6 +123,8 @@ namespace TaskbarQuota
             _ = Task.Run(() => _detector.Prewarm());
             _detector.OpenCodeModelStateChanged += OnOpenCodeModelStateChanged;
             _detector.StartOpenCodeModelStateWatcher();
+            _detector.ClineProviderStateChanged += OnClineProviderStateChanged;
+            _detector.StartClineStateWatcher();
             _detector.SynaraStateChanged += OnSynaraStateChanged;
             _detector.StartSynaraStateWatcher();
             // Fast tick for snappy active-app switching; usage fetches respect per-result cache TTL (60s ok, 5m on 429).
@@ -488,6 +490,85 @@ namespace TaskbarQuota
 
         internal static bool IsOpenCodeProvider(ProviderId provider)
             => provider is ProviderId.OpenCode or ProviderId.OpenCodeGo;
+
+        private void OnClineProviderStateChanged() => _ = HandleClineProviderSwitchAsync();
+
+        internal static bool ShouldReactToClineChange(ProviderId? foregroundProvider)
+            => foregroundProvider is ProviderId.Cline or ProviderId.ClinePass;
+
+        internal static bool IsClineProvider(ProviderId provider)
+            => provider is ProviderId.Cline or ProviderId.ClinePass;
+
+        /// <summary>
+        /// providers.json changed: if a Cline terminal is focused, switch the highlighted card to the
+        /// newly-active surface (usage-billing vs ClinePass) in realtime; otherwise just refresh the
+        /// affected card's cache in the background.
+        /// </summary>
+        private async Task HandleClineProviderSwitchAsync()
+        {
+            var foreground = _detector.Detect();
+            var stateProvider = ActiveAppDetector.DetectClineProviderFromState();
+
+            if (!ShouldReactToClineChange(foreground))
+            {
+                if (stateProvider is ProviderId backgroundProvider)
+                    await RefreshProviderCacheSilentlyAsync(backgroundProvider).ConfigureAwait(false);
+                return;
+            }
+
+            var target = stateProvider ?? foreground!.Value;
+            if (!IsClineProvider(target))
+                return;
+
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (!ShouldReactToClineChange(_detector.Detect()))
+                    return;
+
+                var previous = _lastActive;
+                _lastActive = target;
+                _activeProviderSource = _detector.ActiveSource;
+                PromoteRecentProvider(target);
+
+                if (previous != target)
+                    ActiveProviderChanged?.Invoke(target);
+
+                PublishImmediateState(target);
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Log.Error(ex, "Cline provider switch failed");
+                return;
+            }
+            finally
+            {
+                _gate.Release();
+            }
+
+            try
+            {
+                var fresh = (await _service.FetchAsync(target, force: true).ConfigureAwait(false))
+                    .WithSource(SourceFor(target));
+                await _gate.WaitAsync().ConfigureAwait(false);
+                try
+                {
+                    if (!ShouldReactToClineChange(_detector.Detect()) || _lastActive != target)
+                        return;
+
+                    LastState = fresh;
+                    StateChanged?.Invoke(fresh);
+                }
+                finally
+                {
+                    _gate.Release();
+                }
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Log.Error(ex, "Cline provider switch refresh failed");
+            }
+        }
 
         private async Task RefreshProviderCacheSilentlyAsync(ProviderId provider)
         {

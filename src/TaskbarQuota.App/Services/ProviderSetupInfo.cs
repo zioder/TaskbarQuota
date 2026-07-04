@@ -16,6 +16,8 @@ internal static class ProviderSetupInfo
         ProviderId.Cursor => "https://cursor.com",
         ProviderId.Antigravity => "https://antigravity.google",
         ProviderId.OpenCode or ProviderId.OpenCodeGo => "https://opencode.ai",
+        ProviderId.Cline => "https://app.cline.bot/dashboard/credits",
+        ProviderId.ClinePass => "https://app.cline.bot/dashboard/subscription",
         _ => null,
     };
 }

@@ -30,6 +30,8 @@ namespace TaskbarQuota.Usage
             Register(new OpenCodeGoProvider());
             Register(new GrokProvider());
             Register(new DevinProvider());
+            Register(new ClineProvider());
+            Register(new ClinePassProvider());
         }
 
         public void Register(IUsageProvider provider) => _providers[provider.Id] = provider;

@@ -181,6 +181,11 @@ namespace TaskbarQuota.Controls
                 ApplyZenDisplay(result, usage, providerChanged);
                 return;
             }
+            if (result.Id == ProviderId.Cline)
+            {
+                ApplyClineCreditsDisplay(result, usage, providerChanged);
+                return;
+            }
             if (result.Id == ProviderId.Antigravity)
             {
                 ApplyAntigravityDisplay(result, usage, providerChanged);
@@ -500,6 +505,27 @@ namespace TaskbarQuota.Controls
                 $"{WidgetTooltipTitle(result.DisplayName, result.Source)} · {usage.LoginMethod}\n" +
                 $"Usage: {usage.Cost?.Display ?? "--"}\n" +
                 $"Balance: {(balanceText != null ? "$" + balanceText.Split(' ')[0] : "--")}");
+        }
+
+        /// <summary>
+        /// Cline usage-billing: pay-as-you-go credit balance, laid out like the OpenCode Zen block.
+        /// The 5h/weekly/monthly percent windows don't apply here (that's ClinePass), so we show the
+        /// remaining balance as a single tight row. Label is "Balance" (not "Credits") to avoid the
+        /// oversized credit-meter value column that would push the amount to the far edge.
+        /// </summary>
+        private void ApplyClineCreditsDisplay(UsageResult result, UsageSnapshot usage, bool providerChanged = false)
+        {
+            _forcePercentagesOnly = true;
+            _rows = new List<WidgetUsageRow>
+            {
+                new WidgetUsageRow("Balance", 0, usage.Cost?.Display ?? "--", HasBar: false),
+            };
+            RenderRows();
+            AnimateRender(!_hasRevealed, providerSwitch: providerChanged);
+
+            ToolTipService.SetToolTip(this,
+                $"{WidgetTooltipTitle(result.DisplayName, result.Source)} · {usage.LoginMethod}\n" +
+                $"Credit balance: {usage.Cost?.Display ?? "--"}");
         }
 
         private void ApplyCreditsDisplay(UsageResult result, UsageSnapshot usage, CostSnapshot credits, bool providerChanged = false)
@@ -856,6 +882,9 @@ namespace TaskbarQuota.Controls
                 widestValue = Math.Max(widestValue, MeasureTextWidth(row.Value, labelFont));
                 if (row.Label == "Credits")
                     widestValue = Math.Max(widestValue, MeasureTextWidth(MaxCreditValueSample, labelFont));
+                // Reserve room for a large dollar balance so amounts like "$1,000.00" aren't clipped.
+                if (row.Label == "Balance")
+                    widestValue = Math.Max(widestValue, MeasureTextWidth("$1,000.00", labelFont));
             }
 
             return new WidgetLayoutMetrics(
