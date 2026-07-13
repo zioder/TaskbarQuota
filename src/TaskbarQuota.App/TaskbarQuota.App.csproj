@@ -29,9 +29,9 @@
     <Product>TaskbarQuota</Product>
     <AssemblyName>TaskbarQuota</AssemblyName>
     <ApplicationIcon>Assets\TaskBarQuota.ico</ApplicationIcon>
-    <Version>1.0.17</Version>
-    <AssemblyVersion>1.0.17.0</AssemblyVersion>
-    <FileVersion>1.0.17.0</FileVersion>
+    <Version>1.0.18</Version>
+    <AssemblyVersion>1.0.18.0</AssemblyVersion>
+    <FileVersion>1.0.18.0</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>

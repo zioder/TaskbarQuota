@@ -59,13 +59,16 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 
 ## Features
 
-### What's new in 1.0.17
+### What's new in 1.0.18
 
 - **Z.ai support** — TaskbarQuota now reads the Z.ai Coding Plan quota (5-hour prompt pool as **Session**, 7-day **Weekly**, plus a monthly **MCP** tool-call meter shown by default and hideable per row) from the ZCode config at `%USERPROFILE%\.zcode\v2\config.json`.
 - **Kimi support** — detects the terminal-only `kimi` CLI and reads its 5-hour rate limit as **Session** and the 7-day coding quota as **Weekly**, via the Kimi Code OAuth credential (`%USERPROFILE%\.kimi-code\credentials\kimi-code.json`) or a manually entered `KIMI_CODE_API_KEY`.
 - **ChatGPT desktop app detection** — OpenAI renamed the Codex desktop app to **ChatGPT**; the foreground `ChatGPT.exe` is now attributed to Codex usage. (#15)
 - **Codex weekly label** — when OpenAI returns a single (weekly) rate window after temporarily dropping the 5-hour session limit, the widget now labels it **Weekly** instead of Session. (#18)
 - **Taskbar widget positioning overhaul** — a gap solver keeps the widget clear of the weather/Widgets pill, the centered app icons, and the system tray; drag-in-progress is no longer stomped by background repositions, and the widget only settles where it fully fits. (#17)
+
+### What's new in 1.0.17
+
 - **Cline support** — TaskbarQuota now detects the `cline` CLI and shows either **Cline Usage-Billing** credit balance or **ClinePass** subscription windows.
 - **Live Cline surface switching** — watches `%USERPROFILE%\.cline\data\settings\providers.json` so switching between Cline Usage-Billing and ClinePass updates the active card without restarting TaskbarQuota.
 - **Cline account auth refresh** — reads local Cline WorkOS tokens and refreshes expired access tokens in memory without rewriting Cline's settings file.
