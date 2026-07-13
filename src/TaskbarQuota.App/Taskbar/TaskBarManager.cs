@@ -47,7 +47,7 @@ namespace TaskbarQuota.Taskbar
 
         private static void CreateTrayIcon()
         {
-            var open = new PopupMenuItem("Open TaskbarQuota", (_, _) => _dispatcher?.TryEnqueue(() => _showMainWindow?.Invoke()));
+            var open = new PopupMenuItem("Open TaskbarQuota dashboard", (_, _) => _dispatcher?.TryEnqueue(() => _showMainWindow?.Invoke()));
             var move = new PopupMenuItem("Move taskbar widget", (_, _) => _dispatcher?.TryEnqueue(() => _widget?.StartDragging()));
             var reset = new PopupMenuItem("Reset widget position", (_, _) => _dispatcher?.TryEnqueue(() => _widget?.UpdatePosition(resetManualPosition: true)));
             var quit = new PopupMenuItem("Quit", (_, _) => _dispatcher?.TryEnqueue(App.Quit));
@@ -76,8 +76,8 @@ namespace TaskbarQuota.Taskbar
             }
             _trayIcon.MessageWindow.MouseEventReceived += (_, e) =>
             {
-                if (e.MouseEvent is MouseEvent.IconLeftMouseUp or MouseEvent.IconLeftDoubleClick)
-                    _dispatcher?.TryEnqueue(() => _showMainWindow?.Invoke());
+                if (e.MouseEvent == MouseEvent.IconLeftMouseUp)
+                    _dispatcher?.TryEnqueue(ToggleTrayFlyout);
             };
         }
 
@@ -189,6 +189,20 @@ namespace TaskbarQuota.Taskbar
             catch (Exception ex)
             {
                 Log.Error(ex, "Failed to toggle flyout");
+                _flyout = null;
+            }
+        }
+
+        private static void ToggleTrayFlyout()
+        {
+            try
+            {
+                _flyout ??= new FlyoutWindow();
+                _flyout.ToggleAtTrayIcon();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to toggle tray flyout");
                 _flyout = null;
             }
         }

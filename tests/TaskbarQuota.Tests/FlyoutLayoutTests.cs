@@ -59,4 +59,11 @@ public class FlyoutLayoutTests
             Environment.SetEnvironmentVariable(FlyoutLayout.ForceMinWidthEnvironmentVariable, previous);
         }
     }
+
+    [Theory]
+    [InlineData(0, FlyoutLayout.CompactMinLogicalHeight)]
+    [InlineData(3, 400)]
+    [InlineData(20, FlyoutLayout.CompactMaxLogicalHeight)]
+    public void ComputeCompactLogicalHeight_ClampsToCompactBounds(int providers, int expected)
+        => Assert.Equal(expected, FlyoutLayout.ComputeCompactLogicalHeight(providers));
 }

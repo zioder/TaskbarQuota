@@ -8,6 +8,11 @@ namespace TaskbarQuota
     internal static class FlyoutLayout
     {
         public const int IconButtonWidth = 48;
+        public const int CompactLogicalWidth = 420;
+        public const int CompactProviderLogicalHeight = 104;
+        public const int CompactChromeLogicalHeight = 88;
+        public const int CompactMinLogicalHeight = 260;
+        public const int CompactMaxLogicalHeight = 720;
 
         /// <summary>
         /// Fixed default flyout width. The flyout stays exactly this wide no matter how many
@@ -60,6 +65,12 @@ namespace TaskbarQuota
             contentHeight = Math.Clamp(contentHeight, MinLogicalContentHeight, MaxLogicalContentHeight);
             return contentHeight + ChromeLogicalHeight + HeightMeasureBuffer;
         }
+
+        public static int ComputeCompactLogicalHeight(int providerCount)
+            => Math.Clamp(
+                Math.Max(0, providerCount) * CompactProviderLogicalHeight + CompactChromeLogicalHeight,
+                CompactMinLogicalHeight,
+                CompactMaxLogicalHeight);
 
         /// <summary>
         /// Flyout stays at <see cref="BaseLogicalWidth"/> and only grows past it when the provider

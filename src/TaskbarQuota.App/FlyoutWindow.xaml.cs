@@ -39,6 +39,8 @@ namespace TaskbarQuota
         private readonly DashboardViewModel _dashboardViewModel;
         private readonly Dictionary<ProviderId, FlyoutProviderStripItem> _providerStripItems = new();
         private int _stripIconCount;
+        private bool _compactMode;
+        private POINT _trayAnchor;
         private static readonly TimeSpan BoundsCoalesceDelay = TimeSpan.FromMilliseconds(80);
 
         public bool IsShown => _shown;
@@ -48,6 +50,7 @@ namespace TaskbarQuota
             InitializeComponent();
             _dashboardViewModel = DashboardPage.SharedViewModel ?? new DashboardViewModel(DispatcherQueue);
             DashboardPage.SharedViewModel = _dashboardViewModel;
+            CompactProviderList.ItemsSource = _dashboardViewModel.Cards;
             _dashboardViewModel.Cards.CollectionChanged += DashboardCards_CollectionChanged;
             _dashboardViewModel.SelectedCardChanged += DashboardSelectedCardChanged;
             _dashboardViewModel.DetailContentWidthChanged += DashboardDetailContentWidthChanged;
@@ -88,6 +91,22 @@ namespace TaskbarQuota
             ShowAbove(widgetHandle);
         }
 
+        public void ToggleAtTrayIcon()
+        {
+            if (_shown) { Hide(); return; }
+            if (!User32.GetCursorPos(out _trayAnchor))
+                return;
+
+            EnsureDashboardLoaded();
+            _compactMode = true;
+            _widgetHandle = IntPtr.Zero;
+            ApplyMode();
+            _shown = true;
+            ApplyFlyoutBounds();
+            GetAppWindow().Show();
+            Activate();
+        }
+
         /// <summary>
         /// Compose the first XAML frame and spin up the acrylic backdrop off-screen once, so the first
         /// real open doesn't flash a black slab while WinUI warms up composition.
@@ -119,8 +138,10 @@ namespace TaskbarQuota
 
         public void ShowAbove(IntPtr widgetHandle)
         {
+            _compactMode = false;
             _widgetHandle = widgetHandle;
             EnsureDashboardLoaded();
+            ApplyMode();
 
             // Sync the strip selection to the provider the taskbar widget is currently showing,
             // so opening the tray highlights/details that provider rather than a stale selection.
@@ -175,7 +196,7 @@ namespace TaskbarQuota
 
         private void ApplyFlyoutBounds()
         {
-            if (!_shown || _widgetHandle == IntPtr.Zero || _applyingBounds)
+            if (!_shown || (!_compactMode && _widgetHandle == IntPtr.Zero) || _applyingBounds)
                 return;
 
             _applyingBounds = true;
@@ -183,11 +204,21 @@ namespace TaskbarQuota
             {
                 var scale = Root.XamlRoot?.RasterizationScale ?? GetWindowScale();
                 int w = WindowDpi.ToPhysical(
-                    FlyoutLayout.ComputeLogicalWidth(_stripIconCount, _dashboardViewModel.DetailContentWidth),
+                    _compactMode
+                        ? FlyoutLayout.CompactLogicalWidth
+                        : FlyoutLayout.ComputeLogicalWidth(_stripIconCount, _dashboardViewModel.DetailContentWidth),
                     scale);
                 int h = WindowDpi.ToPhysical(
-                    FlyoutLayout.ComputeLogicalHeight(_dashboardViewModel.DetailContentHeight),
+                    _compactMode
+                        ? FlyoutLayout.ComputeCompactLogicalHeight(_dashboardViewModel.Cards.Count)
+                        : FlyoutLayout.ComputeLogicalHeight(_dashboardViewModel.DetailContentHeight),
                     scale);
+
+                if (_compactMode)
+                {
+                    ApplyTrayFlyoutBounds(w, h, scale);
+                    return;
+                }
 
                 if (!User32.GetWindowRect(_widgetHandle, out RECT wr))
                     return;
@@ -230,6 +261,33 @@ namespace TaskbarQuota
             {
                 _applyingBounds = false;
             }
+        }
+
+        private void ApplyTrayFlyoutBounds(int width, int height, double scale)
+        {
+            var monitor = User32.MonitorFromPoint(_trayAnchor, MonitorFromFlags.MONITOR_DEFAULTTONEAREST);
+            var info = MONITORINFO.Create();
+            if (monitor == IntPtr.Zero || !User32.GetMonitorInfo(monitor, ref info))
+                return;
+
+            var work = info.rcWork;
+            int gap = WindowDpi.ToPhysical(8, scale);
+            width = Math.Min(width, work.right - work.left);
+            height = Math.Min(height, work.bottom - work.top);
+            int x = Math.Clamp(_trayAnchor.x - width, work.left, work.right - width);
+            int y = Math.Clamp(_trayAnchor.y - height - gap, work.top, work.bottom - height);
+            var bounds = new RectInt32(x, y, width, height);
+            _lastAppliedBounds = bounds;
+            GetAppWindow().MoveAndResize(bounds);
+        }
+
+        private void ApplyMode()
+        {
+            CompactScrollViewer.Visibility = _compactMode ? Visibility.Visible : Visibility.Collapsed;
+            ContentFrame.Visibility = _compactMode ? Visibility.Collapsed : Visibility.Visible;
+            UpdateRow.Height = _compactMode ? new GridLength(0) : GridLength.Auto;
+            ProviderStripBorder.Visibility = _compactMode ? Visibility.Collapsed : Visibility.Visible;
+            CompactRefreshBorder.Visibility = _compactMode ? Visibility.Visible : Visibility.Collapsed;
         }
 
         private double GetWindowScale()
@@ -375,6 +433,9 @@ namespace TaskbarQuota
             if (Application.Current is App app)
                 app.ShowSettings();
         }
+
+        private void CompactRefreshButton_Click(object sender, RoutedEventArgs e)
+            => _dashboardViewModel.RefreshCommand.Execute(null);
 
         private void SyncProviderStripSelection(bool animate = false)
         {

@@ -358,15 +358,18 @@ namespace TaskbarQuota.ViewModels
                 if (merged.ContainsKey(provider.Id))
                     continue;
 
+                if (ProviderDiscoveryService.IsProbed(provider.Id) && service.TryGetCached(provider.Id, out var cached))
+                {
+                    merged[provider.Id] = cached;
+                    continue;
+                }
+
                 if (ProviderDiscoveryService.ShouldFetch(provider.Id, active))
                 {
                     merged[provider.Id] = UsageResult.Pending(provider.Id, provider,
                         active == provider.Id ? "Loading active provider..." : "Loading...");
                     continue;
                 }
-
-                if (ProviderDiscoveryService.IsProbed(provider.Id) && service.TryGetCached(provider.Id, out var cached))
-                    merged[provider.Id] = cached;
             }
 
             return OrderResults(merged.Values.ToArray(), active).ToList();
