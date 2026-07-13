@@ -32,6 +32,67 @@ public class CodexProviderTests
     }
 
     [Fact]
+    public void BuildResult_SessionAndWeekly_LeavesPrimaryUnlabeled()
+    {
+        using var doc = JsonDocument.Parse(CodexUsageJson("plus"));
+
+        var result = CodexProvider.BuildResult(doc.RootElement);
+
+        // Both windows present: primary keeps its default "Session" label (Label override stays null).
+        Assert.Null(result.Usage.Primary.Label);
+        Assert.NotNull(result.Usage.Secondary);
+    }
+
+    [Fact]
+    public void BuildResult_WeeklyOnlyWindow_RelabelsPrimaryAsWeekly()
+    {
+        // OpenAI dropped the 5h session, so the API returns only the weekly window (issue #18).
+        var json = """
+            {
+              "plan_type": "plus",
+              "rate_limit": {
+                "primary_window": {
+                  "used_percent": 0,
+                  "limit_window_seconds": 604800,
+                  "reset_at": 1893542400
+                }
+              }
+            }
+            """;
+        using var doc = JsonDocument.Parse(json);
+
+        var result = CodexProvider.BuildResult(doc.RootElement);
+
+        Assert.Equal("Weekly", result.Usage.Primary.Label);
+        Assert.Equal(0, result.Usage.Primary.UsedPercent);
+        Assert.True(result.Usage.HasPrimaryWindow);
+        Assert.Null(result.Usage.Secondary);
+    }
+
+    [Fact]
+    public void BuildResult_SessionOnlyShortWindow_KeepsSessionLabel()
+    {
+        // A lone sub-day window is still a real 5h session — must not be relabeled Weekly.
+        var json = """
+            {
+              "plan_type": "plus",
+              "rate_limit": {
+                "primary_window": {
+                  "used_percent": 30,
+                  "limit_window_seconds": 18000,
+                  "reset_at": 1893456000
+                }
+              }
+            }
+            """;
+        using var doc = JsonDocument.Parse(json);
+
+        var result = CodexProvider.BuildResult(doc.RootElement);
+
+        Assert.Null(result.Usage.Primary.Label);
+    }
+
+    [Fact]
     public void BuildResult_NonProPlan_HidesSparkWindows()
     {
         using var doc = JsonDocument.Parse(CodexUsageJson("plus", includeSpark: true));

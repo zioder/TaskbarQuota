@@ -188,6 +188,14 @@ public class ActiveAppDetectorTests : IDisposable
     }
 
     [Theory]
+    [InlineData("codex", ProviderId.Codex)]
+    [InlineData("chatgpt", ProviderId.Codex)]
+    public void TryResolveGuiProcess_OpenAiDesktopApp_ReturnsCodex(string processName, ProviderId expected)
+    {
+        Assert.Equal(expected, ActiveAppDetector.TryResolveGuiProcess(processName));
+    }
+
+    [Theory]
     [InlineData("code")]
     [InlineData("code-insiders")]
     public void IsKnownGuiProcessName_VsCode_ReturnsTrue(string processName)
@@ -208,6 +216,8 @@ public class ActiveAppDetectorTests : IDisposable
     [InlineData("node.exe", @"node C:\Users\me\AppData\Local\Programs\Cursor\resources\app\out\cli.js", ProviderId.Cursor)]
     [InlineData("opencode.exe", @"C:\Users\me\AppData\Roaming\npm\opencode.cmd", ProviderId.OpenCode)]
     [InlineData("node.exe", @"node C:\Users\me\AppData\Roaming\npm\node_modules\opencode\bin\opencode.js", ProviderId.OpenCode)]
+    [InlineData("kimi.exe", @"C:\Users\me\.kimi-code\bin\kimi.exe", ProviderId.Kimi)]
+    [InlineData("node.exe", @"node C:\Users\me\AppData\Roaming\npm\node_modules\@moonshot-ai\kimi\cli.js", ProviderId.Kimi)]
     public void TryDetectCliProvider_KnownCliCommands_ReturnsProvider(string processName, string commandLine, ProviderId expected)
     {
         var result = ActiveAppDetector.TryDetectCliProvider(processName, commandLine);

@@ -81,6 +81,12 @@ namespace TaskbarQuota.Usage.Providers
                     : WithUsedPercent(secondary, hs);
             }
 
+            // OpenAI temporarily disabled the 5h session limit (issue #18), so the API now returns a single
+            // weekly window that would otherwise render under the "Session" label. When the only window we
+            // have is the weekly one, relabel it "Weekly" — the value and reset time are already correct.
+            if (secondary == null && hasPrimary && IsWeeklyWindow(primary))
+                primary = WithLabel(primary, "Weekly");
+
             var usage = new UsageSnapshot(primary) { HasPrimaryWindow = hasPrimary };
             if (secondary != null) usage.Secondary = secondary;
             if (codeReview != null) usage.ModelSpecific = codeReview;
@@ -218,7 +224,16 @@ namespace TaskbarQuota.Usage.Providers
         }
 
         private static RateWindow WithUsedPercent(RateWindow window, double usedPercent)
-            => new(usedPercent, window.WindowMinutes, window.ResetAt, window.ResetDescription);
+            => new(usedPercent, window.WindowMinutes, window.ResetAt, window.ResetDescription, window.Label);
+
+        private static RateWindow WithLabel(RateWindow window, string label)
+            => new(window.UsedPercent, window.WindowMinutes, window.ResetAt, window.ResetDescription, label);
+
+        // A weekly window spans ~7 days. Treat an unknown duration as weekly too: when only one window is
+        // present the 5h session has been dropped, so the lone window is the weekly one. A window shorter
+        // than a day is still a real session window and keeps its "Session" label.
+        private static bool IsWeeklyWindow(RateWindow window)
+            => window.WindowMinutes is not int minutes || minutes >= 1440;
 
         private static CostSnapshot? ExtractCredits(JsonElement json, double? headerCredits)
         {

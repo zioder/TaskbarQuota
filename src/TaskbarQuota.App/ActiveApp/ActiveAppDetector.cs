@@ -29,11 +29,13 @@ namespace TaskbarQuota.ActiveApp
             ["cursor"] = ProviderId.Cursor,
             ["antigravity"] = ProviderId.Antigravity,
             ["codex"] = ProviderId.Codex,        // OpenAI Codex desktop app (Codex.exe)
+            ["chatgpt"] = ProviderId.Codex,      // OpenAI renamed the Codex desktop app to ChatGPT (ChatGPT.exe)
             ["claude"] = ProviderId.Claude,      // Claude desktop app, if installed
             ["code"] = ProviderId.Copilot,       // Visual Studio Code (GitHub Copilot in-editor)
             ["code-insiders"] = ProviderId.Copilot,
             ["devin"] = ProviderId.Devin,        // Devin desktop app (VS Code fork)
             ["devin - next"] = ProviderId.Devin,
+            ["zcode"] = ProviderId.Zai,            // ZCode desktop app (ZCode.exe)
         };
 
         private static readonly HashSet<string> Terminals = new(StringComparer.OrdinalIgnoreCase)
@@ -52,7 +54,7 @@ namespace TaskbarQuota.ActiveApp
 
         private static readonly HashSet<string> InteractiveClis = new(StringComparer.OrdinalIgnoreCase)
         {
-            "grok", "claude", "codex", "cursor", "cursor-agent", "opencode", "copilot", "antigravity", "agy", "devin", "cline",
+            "grok", "claude", "codex", "cursor", "cursor-agent", "opencode", "copilot", "antigravity", "agy", "devin", "cline", "kimi",
         };
 
         // CLI command-line markers -> provider, checked in order. Claude is checked
@@ -79,6 +81,7 @@ namespace TaskbarQuota.ActiveApp
             ("grok", ProviderId.Grok),
             ("devin", ProviderId.Devin),
             ("cline", ProviderId.Cline),
+            ("kimi", ProviderId.Kimi),
             ("claude", ProviderId.Claude),
             ("codex", ProviderId.Codex),
         };
@@ -100,6 +103,7 @@ namespace TaskbarQuota.ActiveApp
             ["grok"] = ProviderId.Grok,
             ["devin"] = ProviderId.Devin,
             ["cline"] = ProviderId.Cline,
+            ["kimi"] = ProviderId.Kimi,
         };
 
         // Script-runtime hosts that run a CLI as an argument (e.g. "node ... claude"); only these need
@@ -113,7 +117,7 @@ namespace TaskbarQuota.ActiveApp
         // tree). CommandLine is deliberately excluded here — it is fetched per-PID only when required.
         private const string BulkProcessQuery =
             "SELECT ProcessId, ParentProcessId, Name, CreationDate FROM Win32_Process WHERE " +
-            "Name = 'node.exe' OR Name = 'antigravity.exe' OR Name = 'agy.exe' OR Name = 'claude.exe' OR Name = 'codex.exe' OR Name = 'cursor.exe' OR Name = 'cursor-agent.exe' OR Name = 'opencode.exe' OR Name = 'copilot.exe' OR Name = 'gh.exe' OR Name = 'grok.exe' OR Name = 'devin.exe' OR Name = 'cline.exe' OR Name = 'bun.exe' OR Name = 'deno.exe' OR Name = 'npm.exe' OR Name = 'npx.exe' OR Name = 'pnpm.exe' OR Name = 'yarn.exe' OR Name = 'cmd.exe' OR Name = 'powershell.exe' OR Name = 'pwsh.exe' OR Name = 'windowsterminal.exe' OR Name = 'openconsole.exe' OR Name = 'conhost.exe' OR Name = 'wezterm-gui.exe' OR Name = 'wezterm.exe' OR Name = 'alacritty.exe' OR Name = 'mintty.exe' OR Name = 'tabby.exe' OR Name = 'hyper.exe' OR Name = 'wt.exe' OR Name = 'wsl.exe' OR Name = 'wslhost.exe'";
+            "Name = 'node.exe' OR Name = 'antigravity.exe' OR Name = 'agy.exe' OR Name = 'claude.exe' OR Name = 'codex.exe' OR Name = 'cursor.exe' OR Name = 'cursor-agent.exe' OR Name = 'opencode.exe' OR Name = 'copilot.exe' OR Name = 'gh.exe' OR Name = 'grok.exe' OR Name = 'devin.exe' OR Name = 'cline.exe' OR Name = 'kimi.exe' OR Name = 'bun.exe' OR Name = 'deno.exe' OR Name = 'npm.exe' OR Name = 'npx.exe' OR Name = 'pnpm.exe' OR Name = 'yarn.exe' OR Name = 'cmd.exe' OR Name = 'powershell.exe' OR Name = 'pwsh.exe' OR Name = 'windowsterminal.exe' OR Name = 'openconsole.exe' OR Name = 'conhost.exe' OR Name = 'wezterm-gui.exe' OR Name = 'wezterm.exe' OR Name = 'alacritty.exe' OR Name = 'mintty.exe' OR Name = 'tabby.exe' OR Name = 'hyper.exe' OR Name = 'wt.exe' OR Name = 'wsl.exe' OR Name = 'wslhost.exe'";
 
         // Brief cache so tab switches inside one terminal stay responsive without hammering WMI.
         private static readonly TimeSpan CliCacheTtl = TimeSpan.FromMilliseconds(250);
@@ -484,7 +488,7 @@ namespace TaskbarQuota.ActiveApp
                 "claude" => "Claude app",
                 "cursor" => "Cursor",
                 "antigravity" => "Antigravity",
-                "codex" => "Codex app",
+                "codex" or "chatgpt" => "Codex app",
                 "devin" or "devin - next" => "Devin app",
                 "code" or "code-insiders" => "VS Code",
                 _ => string.IsNullOrWhiteSpace(normalized) ? "desktop app" : normalized,
@@ -1325,6 +1329,7 @@ namespace TaskbarQuota.ActiveApp
             if (name is "grok.exe") return ProviderId.Grok;
             if (name is "devin.exe") return ProviderId.Devin;
             if (name is "cline.exe") return ProviderId.Cline;
+            if (name is "kimi.exe") return ProviderId.Kimi;
 
             var haystack = ((commandLine ?? "") + " " + name).ToLowerInvariant();
             foreach (var (marker, id) in CliMarkers)

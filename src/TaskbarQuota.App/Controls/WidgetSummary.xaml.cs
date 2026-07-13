@@ -413,7 +413,7 @@ namespace TaskbarQuota.Controls
                 var primaryLabel = usage.Primary.Label ?? result.Provider?.SessionLabel ?? "Usage";
                 // Spend-limit meter (Claude Enterprise): show the money value "$9.27/$100.00" instead of a
                 // bare percent so it matches Codex's "used/limit credits". The bar still tracks used %.
-                string primaryValue = usage.Primary.Label != null && usage.Cost is { } spend
+                string primaryValue = usage.Primary.ShowCostValue && usage.Cost is { } spend
                     ? FormatSpendValue(spend)
                     : WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent);
                 rows.Add(new WidgetUsageRow(
