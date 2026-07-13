@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using global::Interop.UIAutomationClient;
@@ -17,6 +18,12 @@ namespace TaskbarQuota.Taskbar
         private readonly IntPtr hwndReBar;
         private Timer? _timer;
         private IUIAutomation? _automation;
+        private RECT? _lastWidgetsButtonRect;
+        private DateTime _lastWidgetsButtonRectAt = DateTime.MinValue;
+        private static readonly TimeSpan WidgetsButtonRectMaxAge = TimeSpan.FromSeconds(30);
+        private List<RECT>? _lastTaskButtonRects;
+        private DateTime _lastTaskButtonRectsAt = DateTime.MinValue;
+        private static readonly TimeSpan TaskButtonRectsMaxAge = TimeSpan.FromSeconds(30);
 
         private bool widgetsButtonEnabled;
         private bool taskbarCentered;
@@ -77,27 +84,90 @@ namespace TaskbarQuota.Taskbar
                 _automation ??= new CUIAutomation();
                 var root = _automation.ElementFromHandle(hwndTaskbar);
                 if (root is null)
-                    return null;
+                    return CachedWidgetsButtonRect();
 
                 var condition = _automation.CreatePropertyCondition(
                     UIA_PropertyIds.UIA_AutomationIdPropertyId, WidgetsButtonAutomationId);
                 var button = root.FindFirst(TreeScope.TreeScope_Descendants, condition);
                 if (button is null)
-                    return null;
+                    return CachedWidgetsButtonRect();
 
                 var r = button.CurrentBoundingRectangle;
                 if (r.right <= r.left || r.bottom <= r.top)
-                    return null;
+                    return CachedWidgetsButtonRect();
 
-                return new RECT { left = r.left, top = r.top, right = r.right, bottom = r.bottom };
+                var rect = new RECT { left = r.left, top = r.top, right = r.right, bottom = r.bottom };
+                _lastWidgetsButtonRect = rect;
+                _lastWidgetsButtonRectAt = DateTime.UtcNow;
+                return rect;
             }
             catch (Exception ex)
             {
+                // Cross-process UIA reads fail intermittently (shell busy, tree rebuilding). Returning null
+                // here makes the caller anchor the widget at x=0 — right on top of the weather/Widgets pill.
+                // Fall back to the last known-good rect so a transient failure never causes the overlap (#17).
                 Diagnostics.Log.Debug($"widgets-button UIA lookup failed: {ex.Message}");
                 _automation = null;
-                return null;
+                return CachedWidgetsButtonRect();
             }
         }
+
+        private RECT? CachedWidgetsButtonRect()
+            => _lastWidgetsButtonRect is { } rect && DateTime.UtcNow - _lastWidgetsButtonRectAt < WidgetsButtonRectMaxAge
+                ? rect
+                : null;
+
+        /// <summary>
+        /// Screen bounds (physical px) of every Button in the taskbar UIA tree — the running-app icons plus
+        /// system buttons (Start, Search, Widgets, tray). On Win11 the app icons are XAML, not classic
+        /// MSTask* child windows, so an HWND scan can't see them; treating each button rect as an obstacle
+        /// keeps the widget from ever landing on top of the app cluster (issue #17). Falls back to the last
+        /// good set on transient UIA failure.
+        /// </summary>
+        public Task<List<RECT>?> GetTaskbarButtonRectsAsync() => Task.Run(TryGetTaskbarButtonRects);
+
+        private List<RECT>? TryGetTaskbarButtonRects()
+        {
+            if (hwndTaskbar == IntPtr.Zero)
+                return CachedTaskButtonRects();
+
+            try
+            {
+                _automation ??= new CUIAutomation();
+                var root = _automation.ElementFromHandle(hwndTaskbar);
+                if (root is null)
+                    return CachedTaskButtonRects();
+
+                var condition = _automation.CreatePropertyCondition(
+                    UIA_PropertyIds.UIA_ControlTypePropertyId, UIA_ControlTypeIds.UIA_ButtonControlTypeId);
+                var buttons = root.FindAll(TreeScope.TreeScope_Descendants, condition);
+                if (buttons is null)
+                    return CachedTaskButtonRects();
+
+                var rects = new List<RECT>(buttons.Length);
+                for (int i = 0; i < buttons.Length; i++)
+                {
+                    var r = buttons.GetElement(i).CurrentBoundingRectangle;
+                    if (r.right > r.left && r.bottom > r.top)
+                        rects.Add(new RECT { left = r.left, top = r.top, right = r.right, bottom = r.bottom });
+                }
+
+                _lastTaskButtonRects = rects;
+                _lastTaskButtonRectsAt = DateTime.UtcNow;
+                return rects;
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Log.Debug($"taskbar-button UIA scan failed: {ex.Message}");
+                _automation = null;
+                return CachedTaskButtonRects();
+            }
+        }
+
+        private List<RECT>? CachedTaskButtonRects()
+            => _lastTaskButtonRects is { } rects && DateTime.UtcNow - _lastTaskButtonRectsAt < TaskButtonRectsMaxAge
+                ? rects
+                : null;
 
         private bool IsTaskbarHidden()
         {

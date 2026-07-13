@@ -45,3 +45,9 @@ Desktop.ini
 
 # Local MCP server tooling (not part of the app)
 mcps/
+
+# MSIX build output
+src/TaskbarQuota.App/AppPackages/
+
+# External reference checkout (not part of the app)
+t3code-src/

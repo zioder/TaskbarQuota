@@ -29,6 +29,9 @@ namespace TaskbarQuota.Taskbar
         private const string WidgetsButtonAutomationId = "WidgetsButton";
         private const int DefaultWidgetHostWidth = 172;
         private const int TrayClearanceLogicalPx = 6;
+        // Approx width of the Win11 far-left Widgets/weather pill; used to reserve clearance when its exact
+        // bounds can't be read via UIA, so the widget never anchors on top of it (issue #17).
+        private const int WidgetsButtonFallbackLogicalPx = 160;
 
         private static readonly bool IsRtlUI = System.Globalization.CultureInfo.CurrentUICulture.TextInfo.IsRightToLeft;
 
@@ -54,9 +57,21 @@ namespace TaskbarQuota.Taskbar
         private int WidgetHostWidth;
         private int currentOffsetX = int.MinValue;
         private int currentOffsetY = 0;
+        // Last known Widgets/weather pill bounds in taskbar-client coords, captured during the resting
+        // reposition so the synchronous drag path can avoid it without an async UIA read.
+        private RECT? lastWidgetsButtonClientRect;
+        // Last known taskbar button bounds (app icons + system buttons) in taskbar-client coords. On Win11
+        // the app icons are XAML, not classic child windows, so they only come from a UIA scan; cached here
+        // so the synchronous drag path avoids them without an async read (issue #17).
+        private List<RECT> lastTaskButtonClientRects = new();
         private bool isDragging;
         private bool isPointerTracking;
         private bool isDirectDrag;
+
+        // True while the user is actively repositioning the widget (tray "Move" mode or a direct pointer
+        // drag). Background repositions (2s watcher poll, taskbar events) must not fire during this, or the
+        // widget snaps back to a computed lane mid-drag (issue #17 case 2).
+        private bool IsUserRepositioning => isDragging || isPointerTracking || isDirectDrag;
         private int draggingInnerOffsetX;
         private int lastCursorPositionX;
         private int pressCursorPositionX;
@@ -225,7 +240,7 @@ namespace TaskbarQuota.Taskbar
 
         private async Task UpdatePositionImpl(TaskbarChangeReason reason, bool isCentered, bool isWidgetsEnabled)
         {
-            if (appWindow is null) return;
+            if (appWindow is null || IsUserRepositioning) return;
             User32.GetWindowRect(hwndShell, out RECT taskbarScreenRect);
             User32.GetWindowRect(hwndTrayNotify, out RECT trayNotifyScreenRect);
             User32.GetWindowRect(hwndReBar, out RECT barScreenRect);
@@ -244,58 +259,57 @@ namespace TaskbarQuota.Taskbar
                 offsetX = -1;
             }
             bool useDefault = offsetX == -1;
-            // Resting position uses the stable lanes (no running-app buttons) so it doesn't jitter as apps
-            // open/close; manual drag (MoveWidgetWithCursor) keeps the full band-avoiding lanes.
-            var lanes = GetWidgetLanes(taskbarRect, trayNotifyRect, barRect, taskbarScreenRect, stableOnly: true);
 
-            // The Widgets button is a XAML element the child-window lane scan can't see, so fetch its
-            // bounds separately and treat it as an obstacle to clear — for BOTH the default anchor and a
-            // saved manual position (which NormalizeWidgetX would otherwise snap right onto it) (issue #10).
+            // The Widgets/weather pill is a XAML element the child-window scan can't see, so fetch its
+            // bounds separately (UIA, with a cached fallback) and treat it as an obstacle like any other.
             RECT? wbRect = isWidgetsEnabled ? await taskbarWatcher.GetWidgetsButtonRectAsync() : null;
-            var obstacles = new List<RECT>();
-            try
-            {
-                foreach (var wnd in GetOtherInjectedWindows())
-                {
-                    User32.GetWindowRect(wnd, out var injectedBounds);
-                    obstacles.Add(ToTaskbarClientRect(injectedBounds, taskbarScreenRect));
-                }
-            }
-            catch (Exception ex) { Log.Warning(ex, "overlap scan failed"); }
-            if (wbRect is { } wb && wb.right > wb.left)
-                obstacles.Add(ToTaskbarClientRect(wb, taskbarScreenRect));
+            RECT? wbClient = wbRect is { } wb && wb.right > wb.left ? ToTaskbarClientRect(wb, taskbarScreenRect) : null;
+            lastWidgetsButtonClientRect = wbClient;
 
-            // Centered default anchors far-left and grows rightward, so step off obstacles to the RIGHT;
-            // every other case rests toward the tray and steps LEFT. RTL mirrors both.
-            bool centeredDefault = isCentered && useDefault;
-            bool stepLeft = IsRtlUI ? centeredDefault : !centeredDefault;
-
-            if (useDefault && isCentered)
+            // UIA scan of the taskbar's buttons — the only way to see the Win11 XAML app icons. Cache the
+            // client rects so the synchronous drag path can reuse them without an async read.
+            var taskButtonRects = await taskbarWatcher.GetTaskbarButtonRectsAsync();
+            if (taskButtonRects is not null)
             {
-                // Centered Win11 taskbar: far-left is empty, anchor just right of the Widgets button.
-                offsetX = ComputeFarLeftAnchor(taskbarRect, trayNotifyRect, wbRect, taskbarScreenRect, isCentered);
+                var converted = new List<RECT>(taskButtonRects.Count);
+                foreach (var r in taskButtonRects)
+                    converted.Add(ToTaskbarClientRect(r, taskbarScreenRect));
+                lastTaskButtonClientRects = converted;
             }
-            else if (useDefault)
+
+            // Every taskbar button (app icons + system buttons) is an obstacle, so the widget can never rest
+            // on top of the app cluster — same set for resting and dragging (issue #17).
+            var obstacles = CollectObstacleClientRects(taskbarScreenRect, wbClient, lastTaskButtonClientRects);
+
+            // Usable span: from the left end of the bar to just left of the tray/clock (with clearance).
+            int leftBound = IsRtlUI ? Math.Max(0, trayNotifyRect.right) : Math.Max(0, taskbarRect.left);
+            int rightBound = Math.Max(leftBound, (IsRtlUI ? taskbarRect.right : trayNotifyRect.left) - TrayClearancePx);
+            if (!IsRtlUI) rightBound = Math.Min(rightBound, taskbarRect.right);
+
+            // Preferred X: the saved manual position, or the side-appropriate default anchor.
+            int preferredX;
+            if (!useDefault)
+                preferredX = offsetX;
+            else if (isCentered)
+                preferredX = ComputeFarLeftAnchor(taskbarRect, trayNotifyRect, wbRect, taskbarScreenRect, isCentered, isWidgetsEnabled);
+            else
+                preferredX = IsRtlUI ? leftBound : rightBound - WidgetHostWidth;
+
+            // Only ever rest inside a gap that FULLY fits the widget; if none does, don't move it into an
+            // overlap — keep the last valid spot (issue #17). First run with no fit hugs the tray.
+            var gaps = ComputeFreeGaps(leftBound, rightBound, obstacles);
+            int? placed = PlaceInFittingGap(preferredX, gaps, WidgetHostWidth);
+            if (placed is not { } fitX)
             {
-                // Left-aligned bar: left end is Start/search/apps, so rest toward the tray.
-                offsetX = IsRtlUI ? Math.Max(0, taskbarRect.left) : trayNotifyRect.left - WidgetHostWidth;
+                if (currentOffsetX != int.MinValue)
+                    return;
+                offsetX = Math.Max(leftBound, rightBound - WidgetHostWidth);
             }
             else
             {
-                // Saved manual position: snap to the nearest valid lane first.
-                offsetX = NormalizeWidgetX(offsetX, lanes, preferRightLane: true);
+                offsetX = fitX;
             }
 
-            offsetX = StepClearOfObstacles(offsetX, obstacles, stepLeft);
-
-            // Keep it on the bar and clear of the tray. If the preferred gap between apps and tray is too
-            // small, prioritize tray access over staying right of the app cluster.
-            int traySafeMax = Math.Max(0, trayNotifyRect.left - WidgetHostWidth - TrayClearancePx);
-            int minXBound = IsRtlUI
-                ? 0
-                : Math.Min(Math.Max(0, isCentered ? 0 : barRect.right), traySafeMax);
-            int maxXBound = Math.Max(minXBound, traySafeMax);
-            offsetX = Math.Clamp(offsetX, minXBound, maxXBound);
             offsetX = ClampToMonitorContainingTray(offsetX, WidgetHostWidth, taskbarScreenRect, notificationScreenRect, barScreenRect);
 
             int offsetY = barRect.top;
@@ -436,103 +450,146 @@ namespace TaskbarQuota.Taskbar
             if (appWindow is null) return;
             User32.GetWindowRect(hwndShell, out RECT taskbarRect);
             User32.GetWindowRect(hwndTrayNotify, out RECT trayNotifyRect);
-            User32.GetWindowRect(hwndReBar, out RECT barRect);
             var notificationRect = GetNotificationAreaScreenRect(taskbarRect, trayNotifyRect);
             var taskbarClientRect = ToTaskbarClientRect(taskbarRect, taskbarRect);
             var trayNotifyClientRect = ToTaskbarClientRect(notificationRect, taskbarRect);
-            var barClientRect = ToTaskbarClientRect(barRect, taskbarRect);
-            var lanes = GetWidgetLanes(taskbarClientRect, trayNotifyClientRect, barClientRect, taskbarRect);
-            int targetX = cursorX - taskbarRect.left - draggingInnerOffsetX;
-            int delta = cursorX - lastCursorPositionX;
-            targetX = NormalizeDragX(targetX, delta, lanes);
 
-            appWindow.Move(new PointInt32(targetX, currentOffsetY));
+            // Drag avoids the same obstacle set as the resting position (app icons via the cached UIA scan,
+            // plus the pill), so the user can only drop the widget into a gap that fully fits it (issue #17).
+            var obstacles = CollectObstacleClientRects(taskbarRect, lastWidgetsButtonClientRect, lastTaskButtonClientRects);
+            int leftBound = IsRtlUI ? Math.Max(0, trayNotifyClientRect.right) : Math.Max(0, taskbarClientRect.left);
+            int rightBound = Math.Max(leftBound, (IsRtlUI ? taskbarClientRect.right : trayNotifyClientRect.left) - TrayClearancePx);
+            if (!IsRtlUI) rightBound = Math.Min(rightBound, taskbarClientRect.right);
+
+            int targetX = cursorX - taskbarRect.left - draggingInnerOffsetX;
+            var gaps = ComputeFreeGaps(leftBound, rightBound, obstacles);
+            int? placed = PlaceInFittingGap(targetX, gaps, WidgetHostWidth);
+            if (placed is { } fitX)
+            {
+                appWindow.Move(new PointInt32(fitX, currentOffsetY));
+                currentOffsetX = fitX;
+            }
             lastCursorPositionX = cursorX;
         }
 
-        // stableOnly: when true the forbidden band excludes the running-apps button list, whose bounds
-        // grow/shrink every time an app is opened or focused. Including them in the RESTING-position
-        // computation makes the widget hop around as you switch apps (most visible on a centered Win11
-        // taskbar) — issue #7 case 1. Manual dragging still avoids them, so the user can't drop the widget
-        // on top of the app buttons.
-        private TaskbarLanes GetWidgetLanes(RECT taskbarRect, RECT trayNotifyRect, RECT barRect, RECT taskbarScreenRect, bool stableOnly = false)
+        // Collects the taskbar-client rects of everything the widget must not overlap: the Start button and
+        // search box (classic child windows), every taskbar button from the UIA scan (the Win11 XAML app
+        // icons plus system buttons), the Widgets/weather pill, and any other injected sibling widgets. The
+        // ReBarWindow32 container is excluded — it spans the whole item area and would leave no gaps.
+        // taskButtonClientRects is the cached UIA set so both the resting and drag paths use identical
+        // obstacles (issue #17).
+        private List<RECT> CollectObstacleClientRects(RECT taskbarScreenRect, RECT? widgetsPillClient, List<RECT> taskButtonClientRects)
         {
-            int forbiddenLeft = barRect.left;
-            int forbiddenRight = barRect.right;
+            var result = new List<RECT>();
+
             if (hwndStart != IntPtr.Zero && User32.GetWindowRect(hwndStart, out RECT startRect) && startRect.right > startRect.left)
-            {
-                startRect = ToTaskbarClientRect(startRect, taskbarScreenRect);
-                forbiddenLeft = Math.Min(forbiddenLeft, startRect.left);
-                forbiddenRight = Math.Max(forbiddenRight, startRect.right);
-            }
-            foreach (var bounds in GetTaskbarItemBandWindows(includeAppButtons: !stableOnly))
-            {
-                var localBounds = ToTaskbarClientRect(bounds, taskbarScreenRect);
-                forbiddenLeft = Math.Min(forbiddenLeft, localBounds.left);
-                forbiddenRight = Math.Max(forbiddenRight, localBounds.right);
-            }
+                result.Add(ToTaskbarClientRect(startRect, taskbarScreenRect));
 
-            int leftMin;
-            int leftMax;
-            int rightMin;
-            int rightMax;
-            if (IsRtlUI)
-            {
-                leftMin = trayNotifyRect.right;
-                leftMax = forbiddenLeft - WidgetHostWidth;
-                rightMin = forbiddenRight;
-                rightMax = taskbarRect.right - WidgetHostWidth;
-            }
-            else
-            {
-                leftMin = Math.Max(0, taskbarRect.left);
-                leftMax = forbiddenLeft - WidgetHostWidth;
-                rightMin = Math.Max(forbiddenRight, trayNotifyRect.left - WidgetHostWidth);
-                rightMax = trayNotifyRect.left - WidgetHostWidth;
-            }
+            // Classic taskbars (Win10 / third-party shells) expose Start/search as child windows here; on
+            // Win11 these return little and the UIA button set below carries the app icons.
+            foreach (var bounds in GetTaskbarItemBandWindows(includeAppButtons: true, excludeContainer: true))
+                result.Add(ToTaskbarClientRect(bounds, taskbarScreenRect));
 
-            leftMax = Math.Max(leftMin, leftMax);
-            rightMax = Math.Max(rightMin, rightMax);
-            return new TaskbarLanes(leftMin, leftMax, rightMin, rightMax);
+            result.AddRange(taskButtonClientRects);
+
+            if (widgetsPillClient is { } pill && pill.right > pill.left)
+                result.Add(pill);
+
+            try
+            {
+                foreach (var wnd in GetOtherInjectedWindows())
+                {
+                    if (User32.GetWindowRect(wnd, out var injectedBounds) && injectedBounds.right > injectedBounds.left)
+                        result.Add(ToTaskbarClientRect(injectedBounds, taskbarScreenRect));
+                }
+            }
+            catch (Exception ex) { Log.Warning(ex, "overlap scan failed"); }
+
+            return result;
+        }
+
+        // Merges the obstacle rects (clipped to [leftBound, rightBound]) and returns the free horizontal
+        // gaps between them. Each gap is a [start, end) span the widget could occupy.
+        internal static List<(int start, int end)> ComputeFreeGaps(int leftBound, int rightBound, List<RECT> obstacles)
+        {
+            var gaps = new List<(int, int)>();
+            if (rightBound <= leftBound)
+                return gaps;
+
+            var blocked = new List<(int start, int end)>();
+            foreach (var o in obstacles)
+            {
+                int s = Math.Max(leftBound, o.left);
+                int e = Math.Min(rightBound, o.right);
+                if (e > s)
+                    blocked.Add((s, e));
+            }
+            blocked.Sort((a, b) => a.start.CompareTo(b.start));
+
+            int cursor = leftBound;
+            foreach (var (s, e) in blocked)
+            {
+                if (s > cursor)
+                    gaps.Add((cursor, s));
+                cursor = Math.Max(cursor, e);
+            }
+            if (cursor < rightBound)
+                gaps.Add((cursor, rightBound));
+
+            return gaps;
+        }
+
+        // Picks the position closest to preferredX that fully fits a widget of the given width inside one of
+        // the free gaps. Returns null when no gap is wide enough — the caller then declines to move rather
+        // than force an overlap (issue #17).
+        internal static int? PlaceInFittingGap(int preferredX, List<(int start, int end)> gaps, int width)
+        {
+            int? best = null;
+            long bestDist = long.MaxValue;
+            foreach (var (start, end) in gaps)
+            {
+                if (end - start < width)
+                    continue;
+                int candidate = Math.Clamp(preferredX, start, end - width);
+                long dist = Math.Abs((long)candidate - preferredX);
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    best = candidate;
+                }
+            }
+            return best;
         }
 
         // The default "far left" X: hugging the left end of the taskbar's item area. On Win11 the Widgets
         // button is pinned far-left, so we sit just right of it; on a left-aligned classic taskbar we sit
         // right of the Start button; otherwise the very left edge. RTL mirrors to the visual start (right).
-        private int ComputeFarLeftAnchor(RECT taskbarRect, RECT trayNotifyRect, RECT? wbRect, RECT taskbarScreenRect, bool isCentered)
+        private int ComputeFarLeftAnchor(RECT taskbarRect, RECT trayNotifyRect, RECT? wbRect, RECT taskbarScreenRect, bool isCentered, bool isWidgetsEnabled)
         {
+            int fallbackPillWidth = (int)Math.Ceiling(WidgetsButtonFallbackLogicalPx * dpiScale);
+
             if (IsRtlUI)
             {
                 if (wbRect is { } wb && wb.right > wb.left)
                     return ToTaskbarClientRect(wb, taskbarScreenRect).left - WidgetHostWidth;
-                return taskbarRect.right - WidgetHostWidth;
+                // Widgets pill sits at the visual start (right) but its bounds are unknown: reserve clearance.
+                int rightAnchor = taskbarRect.right - WidgetHostWidth;
+                if (isWidgetsEnabled)
+                    rightAnchor -= fallbackPillWidth;
+                return rightAnchor;
             }
 
             int anchor = Math.Max(0, taskbarRect.left);
             if (wbRect is { } w && w.right > w.left)
                 anchor = Math.Max(anchor, ToTaskbarClientRect(w, taskbarScreenRect).right);
+            else if (isWidgetsEnabled)
+                // Widgets enabled but its exact bounds are unavailable (UIA not ready): step past a
+                // conservative pill width so we don't anchor on top of the weather pill (issue #17).
+                anchor = Math.Max(anchor, Math.Max(0, taskbarRect.left) + fallbackPillWidth);
             else if (!isCentered && hwndStart != IntPtr.Zero
                      && User32.GetWindowRect(hwndStart, out RECT startRect) && startRect.right > startRect.left)
                 anchor = Math.Max(anchor, ToTaskbarClientRect(startRect, taskbarScreenRect).right);
             return anchor;
-        }
-
-        // Nudge a candidate X off any obstacle it overlaps: to the obstacle's left edge (stepLeft) or its
-        // right edge. Obstacles are sorted so repeated overlaps resolve in one pass in the step direction.
-        private int StepClearOfObstacles(int x, List<RECT> obstacles, bool stepLeft)
-        {
-            if (obstacles.Count == 0)
-                return x;
-
-            var ordered = new List<RECT>(obstacles);
-            ordered.Sort((a, b) => stepLeft ? b.right.CompareTo(a.right) : a.left.CompareTo(b.left));
-            foreach (var o in ordered)
-            {
-                if (o.right <= x || o.left >= x + WidgetHostWidth)
-                    continue;
-                x = stepLeft ? o.left - WidgetHostWidth : o.right;
-            }
-            return x;
         }
 
         // On multi-monitor setups where one taskbar spans displays (e.g. Open-Shell), the widget can land
@@ -605,53 +662,41 @@ namespace TaskbarQuota.Taskbar
                 bottom = Math.Max(a.bottom, b.bottom),
             };
 
-        private int NormalizeWidgetX(int x, TaskbarLanes lanes, bool preferRightLane)
+        // Carries per-pass options through the EnumChildWindows callback via its GCHandle lParam, so the
+        // scan is reentrancy-safe (UpdatePositionImpl runs on background threads while a drag runs on the
+        // UI thread) instead of relying on a shared field.
+        private sealed class BandEnumContext
         {
-            if (x <= lanes.LeftMax)
-                return Math.Clamp(x, lanes.LeftMin, lanes.LeftMax);
-            if (x >= lanes.RightMin)
-                return Math.Clamp(x, lanes.RightMin, lanes.RightMax);
-            return preferRightLane ? lanes.RightMin : lanes.LeftMax;
+            public readonly List<RECT> List = new();
+            public bool IncludeAppButtons;
+            public bool ExcludeContainer;
         }
 
-        private int NormalizeDragX(int targetX, int cursorDelta, TaskbarLanes lanes)
+        private List<RECT> GetTaskbarItemBandWindows(bool includeAppButtons = true, bool excludeContainer = false)
         {
-            if (targetX <= lanes.LeftMax)
-                return Math.Clamp(targetX, lanes.LeftMin, lanes.LeftMax);
-            if (targetX >= lanes.RightMin)
-                return Math.Clamp(targetX, lanes.RightMin, lanes.RightMax);
-
-            int currentX = appWindow?.Position.X ?? targetX;
-            if (currentX >= lanes.RightMin)
-                return lanes.RightMin;
-            if (currentX <= lanes.LeftMax)
-                return lanes.LeftMax;
-
-            return cursorDelta < 0 ? lanes.RightMin : lanes.LeftMax;
-        }
-
-        private List<RECT> GetTaskbarItemBandWindows(bool includeAppButtons = true)
-        {
-            _enumIncludeAppButtons = includeAppButtons;
-            var windows = new List<RECT>();
-            var gc = GCHandle.Alloc(windows);
+            var ctx = new BandEnumContext { IncludeAppButtons = includeAppButtons, ExcludeContainer = excludeContainer };
+            var gc = GCHandle.Alloc(ctx);
             try { User32.EnumChildWindows(hwndShell, EnumTaskbarItemBandWindow, GCHandle.ToIntPtr(gc)); }
             finally { gc.Free(); }
-            return windows;
+            return ctx.List;
         }
 
-        // Set by GetTaskbarItemBandWindows just before each EnumChildWindows pass (UI thread, not reentrant).
-        private bool _enumIncludeAppButtons = true;
-
-        private bool EnumTaskbarItemBandWindow(IntPtr hWnd, IntPtr lParam)
+        private static bool EnumTaskbarItemBandWindow(IntPtr hWnd, IntPtr lParam)
         {
+            if (GCHandle.FromIntPtr(lParam).Target is not BandEnumContext ctx)
+                return true;
+
             var builder = new StringBuilder(256);
             User32.GetClassName(hWnd, builder, builder.Capacity);
             string className = builder.ToString();
             // MSTaskSwWClass / MSTaskListWClass are the running-app buttons (volatile width). Skip them when
             // computing the stable resting position so opening/focusing an app never nudges the widget.
             bool isVolatileAppButton = className is "MSTaskSwWClass" or "MSTaskListWClass";
-            if (isVolatileAppButton && !_enumIncludeAppButtons)
+            if (isVolatileAppButton && !ctx.IncludeAppButtons)
+                return true;
+            // ReBarWindow32 is the container spanning the whole item area — excluded for gap solving so it
+            // doesn't swallow every free gap; still included for the legacy forbidden-band callers.
+            if (className == "ReBarWindow32" && ctx.ExcludeContainer)
                 return true;
             if (className is not ("Start" or "TrayDummySearchControl" or "ReBarWindow32" or "MSTaskSwWClass" or "MSTaskListWClass"))
                 return true;
@@ -663,8 +708,7 @@ namespace TaskbarQuota.Taskbar
             if (width <= 0 || height <= 0)
                 return true;
 
-            var list = GCHandle.FromIntPtr(lParam).Target as List<RECT>;
-            list?.Add(bounds);
+            ctx.List.Add(bounds);
             return true;
         }
 
@@ -700,7 +744,6 @@ namespace TaskbarQuota.Taskbar
             }
         }
 
-        private readonly record struct TaskbarLanes(int LeftMin, int LeftMax, int RightMin, int RightMax);
 
         private IntPtr CreateHostWindow(IntPtr parent)
         {

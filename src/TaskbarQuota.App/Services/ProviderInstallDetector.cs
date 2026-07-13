@@ -15,7 +15,7 @@ namespace TaskbarQuota;
 internal static class ProviderInstallDetector
 {
     private static readonly string[] KnownClis =
-        ["antigravity", "codex", "grok", "claude", "devin", "gh", "opencode", "cline"];
+        ["antigravity", "codex", "grok", "claude", "devin", "gh", "opencode", "cline", "kimi"];
 
     private static readonly ConcurrentDictionary<string, bool> CliAvailability = new(StringComparer.OrdinalIgnoreCase);
     private static volatile bool _cliCacheReady;
@@ -289,6 +289,23 @@ internal static class ProviderInstallDetector
         }
 
         return false;
+    }
+
+    private static bool IsKimiCodeInstalled()
+    {
+        var kimiBin = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".kimi-code", "bin", "kimi.exe");
+        return File.Exists(kimiBin)
+            || IsCliAvailable("kimi");
+    }
+
+    private static bool IsZCodeInstalled()
+    {
+        var localPrograms = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Programs", "ZCode");
+        return File.Exists(Path.Combine(localPrograms, "ZCode.exe"));
     }
 
     private static bool IsDesktopAppInstalled(string appFolderName)

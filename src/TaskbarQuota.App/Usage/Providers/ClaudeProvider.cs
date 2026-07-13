@@ -215,7 +215,7 @@ namespace TaskbarQuota.Usage.Providers
             double pct = spend.Limit is { } lim && lim > 0
                 ? Math.Clamp(spend.Amount / lim * 100, 0, 100)
                 : 0;
-            return new RateWindow(pct, label: "Spend limit");
+            return new RateWindow(pct, label: "Spend limit") { ShowCostValue = true };
         }
 
         private static RateWindow WithLabel(RateWindow window, string label)

@@ -71,6 +71,8 @@ namespace TaskbarQuota.Usage
             ProviderId.Devin => ["Devin "],
             ProviderId.Cline => ["Cline Usage-Billing ", "Cline "],
             ProviderId.ClinePass => ["Cline Pass ", "ClinePass ", "Cline "],
+            ProviderId.Zai => ["Z.ai "],
+            ProviderId.Kimi => ["Kimi "],
             _ => Array.Empty<string>(),
         };
     }

@@ -16,6 +16,8 @@ namespace TaskbarQuota.Usage
         Devin,
         Cline,
         ClinePass,
+        Zai,
+        Kimi,
     }
 
     /// <summary>A single rate-limit window (for example session or weekly), expressed as percent used.</summary>
@@ -28,6 +30,11 @@ namespace TaskbarQuota.Usage
         /// <summary>Optional bar label override (e.g. "Spend limit" for Claude Enterprise), when the
         /// window isn't the provider's default Session/Weekly meter.</summary>
         public string? Label { get; init; }
+        /// <summary>When true this meter's value is a monetary/credit spend (rendered from the snapshot's
+        /// <see cref="UsageSnapshot.Cost"/>, e.g. "$9.27/$100.00") rather than a plain used-percent. Kept
+        /// separate from <see cref="Label"/> so a mere label override (e.g. Codex "Weekly") never flips a
+        /// usage-% bar into a spend value.</summary>
+        public bool ShowCostValue { get; init; }
 
         public RateWindow(double usedPercent, int? windowMinutes = null, DateTimeOffset? resetAt = null, string? resetDescription = null, string? label = null)
         {

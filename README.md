@@ -53,10 +53,25 @@ When you alt-tab from Cursor into a PowerShell session running Claude Code, the 
 - Windows Terminal + `claude` in the command line → **Claude** usage  
 - VS Code focused → **GitHub Copilot** usage  
 - OpenCode model switch (Zen vs Go) → provider updates without restarting TaskbarQuota  
+- Cline surface switch (Usage-Billing vs ClinePass) → provider updates without restarting TaskbarQuota  
 
 After detection, usage is fetched from **local credentials** or **provider APIs** (see [Supported providers](#supported-providers)). Click the widget for a flyout; open the full window for every provider at once, reset times, and manual credential fixes.
 
 ## Features
+
+### What's new in 1.0.18
+
+- **Z.ai support** — TaskbarQuota now reads the Z.ai Coding Plan quota (5-hour prompt pool as **Session**, 7-day **Weekly**, plus a monthly **MCP** tool-call meter shown by default and hideable per row) from the ZCode config at `%USERPROFILE%\.zcode\v2\config.json`.
+- **Kimi support** — detects the terminal-only `kimi` CLI and reads its 5-hour rate limit as **Session** and the 7-day coding quota as **Weekly**, via the Kimi Code OAuth credential (`%USERPROFILE%\.kimi-code\credentials\kimi-code.json`) or a manually entered `KIMI_CODE_API_KEY`.
+- **ChatGPT desktop app detection** — OpenAI renamed the Codex desktop app to **ChatGPT**; the foreground `ChatGPT.exe` is now attributed to Codex usage. (#15)
+- **Codex weekly label** — when OpenAI returns a single (weekly) rate window after temporarily dropping the 5-hour session limit, the widget now labels it **Weekly** instead of Session. (#18)
+- **Taskbar widget positioning overhaul** — a gap solver keeps the widget clear of the weather/Widgets pill, the centered app icons, and the system tray; drag-in-progress is no longer stomped by background repositions, and the widget only settles where it fully fits. (#17)
+
+### What's new in 1.0.17
+
+- **Cline support** — TaskbarQuota now detects the `cline` CLI and shows either **Cline Usage-Billing** credit balance or **ClinePass** subscription windows.
+- **Live Cline surface switching** — watches `%USERPROFILE%\.cline\data\settings\providers.json` so switching between Cline Usage-Billing and ClinePass updates the active card without restarting TaskbarQuota.
+- **Cline account auth refresh** — reads local Cline WorkOS tokens and refreshes expired access tokens in memory without rewriting Cline's settings file.
 
 ### What's new in 1.0.16
 
@@ -105,9 +120,10 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 This is the core behavior — everything else (widget, flyout, fetch cache) hangs off it.
 
 - **Desktop apps** — process name of the focused window: Cursor, Antigravity, Codex, Claude, Devin, VS Code / Insiders (Copilot), and similar.
-- **Terminal agents** — if a known terminal is focused, WMI/process scan looks at command lines for Claude Code, Codex, `cursor-agent`, OpenCode, `gh copilot`, Grok, Devin, Antigravity CLI, and related launchers (Windows Terminal, PowerShell, `pwsh`, WezTerm, Alacritty, …).
+- **Terminal agents** — if a known terminal is focused, WMI/process scan looks at command lines for Claude Code, Codex, `cursor-agent`, OpenCode, `cline`, `gh copilot`, Grok, Devin, Antigravity CLI, and related launchers (Windows Terminal, PowerShell, `pwsh`, WezTerm, Alacritty, …).
 - **Fast switching** — coordinator polls about every **500 ms**, so changing app or shell updates the active provider quickly; usage API calls are cached for **60 seconds** so providers are not spammed.
 - **OpenCode model switch** — watches OpenCode model state to move between OpenCode Zen and OpenCode Go without restarting the app.
+- **Cline surface switch** — watches Cline provider state to move between Cline Usage-Billing and ClinePass without restarting the app.
 - **Sticky last provider** — unrelated foreground apps do not clear the widget; last detected tool stays until you focus a supported app or terminal again.
 - **Idle hide** — optional fade when no supported AI process is running; comes back when you focus a supported app or terminal session.
 
@@ -122,6 +138,10 @@ This is the core behavior — everything else (widget, flyout, fetch cache) hang
 | **Cursor** | Usage summary | Cursor `state.vscdb`, browser cookies, or manual cookie header → Cursor / cursor.com APIs |
 | **OpenCode Zen** | Billing usage and balance | Browser cookies for `opencode.ai` or manual cookie → workspace billing pages |
 | **OpenCode Go** | Rolling, weekly, and monthly windows | Same cookie path as Zen → OpenCode server workspace APIs |
+| **Cline Usage-Billing** | Pay-as-you-go credit balance | `%USERPROFILE%\.cline\data\settings\providers.json` WorkOS auth → Cline account API |
+| **ClinePass** | 5-hour, weekly, and monthly windows | Same Cline settings file → Cline subscription usage-limits API |
+| **Z.ai** | Session (5-hour), weekly, and monthly MCP windows | API key from `%USERPROFILE%\.zcode\v2\config.json` (or `Z_AI_API_KEY`) → Z.ai monitor quota API |
+| **Kimi** | Session (5-hour rate limit) and weekly coding quota | Kimi Code OAuth from `%USERPROFILE%\.kimi-code\credentials\kimi-code.json` (or `KIMI_CODE_API_KEY`) → Kimi Code usage API |
 | **Grok** | Credits meter and monthly window | Grok CLI token from `%USERPROFILE%\.grok\auth.json` (or `%GROK_HOME%`) → xAI CLI proxy billing API |
 | **Devin** | Weekly and daily quota, extra usage balance | Devin CLI `credentials.toml` or Devin desktop app `state.vscdb` → Codeium SeatManagement usage API |
 

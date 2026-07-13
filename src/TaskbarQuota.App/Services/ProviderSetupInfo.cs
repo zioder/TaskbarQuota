@@ -18,6 +18,8 @@ internal static class ProviderSetupInfo
         ProviderId.OpenCode or ProviderId.OpenCodeGo => "https://opencode.ai",
         ProviderId.Cline => "https://app.cline.bot/dashboard/credits",
         ProviderId.ClinePass => "https://app.cline.bot/dashboard/subscription",
+        ProviderId.Zai => "https://z.ai",
+        ProviderId.Kimi => "https://www.kimi.com/code/console",
         _ => null,
     };
 }

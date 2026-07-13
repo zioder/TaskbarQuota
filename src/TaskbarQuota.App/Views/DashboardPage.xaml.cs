@@ -316,6 +316,9 @@ namespace TaskbarQuota.Views
             ProviderId.OpenCodeGo => new ProviderCredentialViewModel(id, "OpenCode Go",
                 "Paste an opencode.ai Cookie header to override browser detection.",
                 CredentialKind.Cookie),
+            ProviderId.Kimi => new ProviderCredentialViewModel(id, "Kimi Code",
+                "Paste your Kimi Code API key (KIMI_CODE_API_KEY) to fetch Coding Plan usage without CLI login.",
+                CredentialKind.ApiKey, "KIMI_CODE_API_KEY"),
             _ => throw new System.ArgumentException($"No credential fix for {id}", nameof(id)),
         };
 

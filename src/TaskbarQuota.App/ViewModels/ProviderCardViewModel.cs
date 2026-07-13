@@ -434,6 +434,8 @@ namespace TaskbarQuota.ViewModels
             ProviderId.Devin => "https://app.devin.ai",
             ProviderId.Cline => "https://app.cline.bot/dashboard/credits",
             ProviderId.ClinePass => "https://app.cline.bot/dashboard/subscription",
+            ProviderId.Zai => "https://z.ai/manage-apikey/coding-plan/personal/my-plan",
+            ProviderId.Kimi => "https://www.kimi.com/code/console",
             _ => string.Empty,
         };
 

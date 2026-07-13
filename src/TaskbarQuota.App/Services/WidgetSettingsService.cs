@@ -281,6 +281,12 @@ public static class WidgetSettingsService
                 new(RowModelSpecific, "Completions"),
                 new(RowExtra, "Extra quota rows"),
             ],
+            ProviderId.Zai =>
+            [
+                new(RowPrimary, "Session"),
+                new(RowSecondary, "Weekly"),
+                new(RowExtra, "MCP"),
+            ],
             ProviderId.Claude =>
             [
                 new(RowPrimary, "Session"),
@@ -510,7 +516,8 @@ public static class WidgetSettingsService
         => $"{provider}:{rowId}";
 
     private static bool DefaultRowVisible(ProviderId provider, string rowId)
-        => provider != ProviderId.Codex
+        => provider == ProviderId.Zai && rowId == RowExtra
+            || provider != ProviderId.Codex
               || rowId == RowPrimary
               || rowId == RowSecondary
               || rowId == RowCredits

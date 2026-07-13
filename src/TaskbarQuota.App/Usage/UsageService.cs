@@ -32,6 +32,8 @@ namespace TaskbarQuota.Usage
             Register(new DevinProvider());
             Register(new ClineProvider());
             Register(new ClinePassProvider());
+            Register(new ZaiProvider());
+            Register(new KimiProvider());
         }
 
         public void Register(IUsageProvider provider) => _providers[provider.Id] = provider;
