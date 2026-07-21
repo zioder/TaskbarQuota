@@ -32,6 +32,7 @@ namespace TaskbarQuota.Taskbar
         private const int DefaultWidgetHostWidth = 172;
         private const int TrayClearanceLogicalPx = 6;
         private static readonly TimeSpan PositionDisposeWait = TimeSpan.FromSeconds(3);
+        private const int ERROR_CLASS_ALREADY_EXISTS = 1410;
         // Approx width of the Win11 far-left Widgets/weather pill; used to reserve clearance when its exact
         // bounds can't be read via UIA, so the widget never anchors on top of it (issue #17).
         private const int WidgetsButtonFallbackLogicalPx = 160;
@@ -1195,7 +1196,13 @@ namespace TaskbarQuota.Taskbar
                         lpszClassName = WidgetClassName,
                     };
                     if (User32.RegisterClassEx(ref wndClass) == 0)
-                        throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not register the taskbar widget window class.");
+                    {
+                        // A prior UnregisterClass may have failed while a window still held the class, in
+                        // which case it is still registered and usable — that is not a failure to create.
+                        int error = Marshal.GetLastWin32Error();
+                        if (error != ERROR_CLASS_ALREADY_EXISTS)
+                            throw new Win32Exception(error, "Could not register the taskbar widget window class.");
+                    }
                     windowClassRegistered = true;
                 }
 
@@ -1218,10 +1225,13 @@ namespace TaskbarQuota.Taskbar
                 windowClassUsers--;
                 if (windowClassUsers == 0 && windowClassRegistered)
                 {
+                    // Clear the flag even when UnregisterClass fails. Leaving it set with zero users makes
+                    // the next RegisterWindowClass skip registration and hand out a class that may no longer
+                    // exist, so every later widget creation fails until the app restarts. Re-registering an
+                    // already-registered class is a recoverable no-op; the reverse is not.
                     if (!User32.UnregisterClass(WidgetClassName, Kernel32.GetModuleHandle(null)))
-                        Log.Warning("Could not unregister the taskbar widget window class");
-                    else
-                        windowClassRegistered = false;
+                        Log.Warning("Could not unregister the taskbar widget window class; will re-register on next use");
+                    windowClassRegistered = false;
                 }
             }
         }
@@ -1306,6 +1316,7 @@ namespace TaskbarQuota.Taskbar
             {
                 ReleaseWindowClass();
                 positionUpdateGate.Release();
+                DisposeSynchronizationPrimitives();
             }
         }
 
@@ -1324,7 +1335,20 @@ namespace TaskbarQuota.Taskbar
             finally
             {
                 positionUpdateGate.Release();
+                DisposeSynchronizationPrimitives();
             }
+        }
+
+        /// <summary>
+        /// Releases the cancellation source and gate. Called only from the two terminal dispose paths,
+        /// after the final Release, since a stalled UpdatePositionImpl reads positionUpdateCancellation.Token
+        /// and would throw ObjectDisposedException if these were freed in Dispose itself. Without this each
+        /// widget recreation (DPI change, monitor plug, Explorer restart) leaked both handles.
+        /// </summary>
+        private void DisposeSynchronizationPrimitives()
+        {
+            try { positionUpdateCancellation.Dispose(); } catch { }
+            try { positionUpdateGate.Dispose(); } catch { }
         }
 
         private void DisposeWindowResources()
