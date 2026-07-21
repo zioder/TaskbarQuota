@@ -39,6 +39,7 @@ namespace TaskbarQuota.Controls
         private const double RowLabelGlyphReserve = 18;
         private const double GlyphViewportSize = 100;
         private const double NormalizedGlyphExtent = 88;
+        private const double StaleOpacity = 0.55;
 
         public event Action? Clicked;
         public event Action<DisplayMode>? DisplayModeChanged;
@@ -130,6 +131,9 @@ namespace TaskbarQuota.Controls
             _lastRenderSignature = signature;
             _lastResult = result;
             ApplyTaskbarForeground();
+            // Values restored from the previous session render dimmed until a live fetch confirms them,
+            // so a boot-time snapshot never reads as current data (issue #21).
+            Panel.Opacity = result.IsStale ? StaleOpacity : 1.0;
 
             var widgetName = WidgetDisplayName(result.DisplayName);
             BadgeText.Text = Abbrev(widgetName);
@@ -150,6 +154,21 @@ namespace TaskbarQuota.Controls
             ApplySourceBadge(result);
 
             _forcePercentagesOnly = false;
+            if (result.IsPending && result.Fetch is null)
+            {
+                // No fetch has completed yet (first paint after boot). Show a neutral placeholder rather
+                // than the failure rendering — a full red bar with "!" reads as invalid data (issue #21).
+                _rows = new()
+                {
+                    new WidgetUsageRow(CompactLabel(result.Provider?.SessionLabel ?? "Usage"), 0, "--", HasBar: false),
+                    new WidgetUsageRow(CompactLabel(result.Provider?.WeeklyLabel ?? "Usage"), 0, "--", HasBar: false),
+                };
+                RenderRows();
+                AnimateRender(isFirstReveal, providerSwitch: providerChanged);
+                ToolTipService.SetToolTip(this, $"{widgetName}: {result.Error ?? "Loading..."}");
+                return;
+            }
+
             if (!result.Ok || result.Fetch is null)
             {
                 // Claude needs an interactive OAuth login — say so instead of a red blank bar.
@@ -211,10 +230,11 @@ namespace TaskbarQuota.Controls
             var plan = FormatPlanLabel(result.Id, widgetName, usage.LoginMethod);
             var costTooltip = WidgetCostTooltipLine(result.Id, usage.Cost);
             var resetCreditsTooltip = WidgetResetCreditsTooltipLine(usage.ResetCredits);
+            var staleTooltip = StaleTooltipLine(result);
             ToolTipService.SetToolTip(this,
                 string.IsNullOrEmpty(plan)
-                    ? $"{WidgetTooltipTitle(widgetName, result.Source)}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}"
-                    : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}");
+                    ? $"{WidgetTooltipTitle(widgetName, result.Source)}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}"
+                    : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}");
         }
 
         /// <summary>
@@ -1121,6 +1141,12 @@ namespace TaskbarQuota.Controls
         private static string Abbrev(string name)
             => string.IsNullOrEmpty(name) ? "?" : name.Substring(0, 1).ToUpperInvariant();
 
+        /// <summary>Names the age of a snapshot restored from the previous session; empty when live.</summary>
+        private static string StaleTooltipLine(UsageResult result)
+            => result.IsStale && result.Fetch is { } fetch
+                ? $"\nLast updated {fetch.FetchedAt.ToLocalTime():t} — refreshing…"
+                : string.Empty;
+
         private static string BuildRenderSignature(UsageResult result)
         {
             var parts = new List<string>
@@ -1128,6 +1154,8 @@ namespace TaskbarQuota.Controls
                 result.Id.ToString(),
                 result.DisplayName,
                 result.Error ?? string.Empty,
+                result.IsPending ? "pending" : "settled",
+                result.IsStale ? "stale" : "live",
                 result.Source.Kind.ToString(),
                 result.Source.DisplayName,
             };

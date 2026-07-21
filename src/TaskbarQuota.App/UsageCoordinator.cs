@@ -19,7 +19,8 @@ namespace TaskbarQuota
         public static UsageCoordinator Instance { get; } = new();
 
         private readonly ActiveAppDetector _detector = new();
-        private readonly UsageService _service = new();
+        // Persist last-good snapshots so the taskbar widget renders real numbers right after a reboot.
+        private readonly UsageService _service = new(UsageSnapshotStore.DefaultDirectory);
         private readonly SemaphoreSlim _gate = new(1, 1);
         // Separate gate for the cheap detection phase so it is never blocked by an in-flight usage fetch.
         private readonly SemaphoreSlim _detectGate = new(1, 1);
@@ -791,6 +792,8 @@ namespace TaskbarQuota
                 }
                 LastState = result;
                 StateChanged?.Invoke(result);
+
+                await PublishWidgetProviderStateAsync(target, force).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -800,6 +803,22 @@ namespace TaskbarQuota
             {
                 _gate.Release();
             }
+        }
+
+        /// <summary>
+        /// The tick fetches the ACTIVE provider, but the taskbar widget only accepts results for
+        /// <see cref="WidgetDisplayProvider"/> (e.g. the active provider is hidden from the widget, or none
+        /// is detected yet). When the two differ the widget never received a result and kept rendering the
+        /// startup placeholder while the flyout showed live data — issue #21. Publish the widget's provider
+        /// too, without touching <see cref="LastState"/> (that tracks the active provider).
+        /// </summary>
+        private async Task PublishWidgetProviderStateAsync(ProviderId published, bool force)
+        {
+            if (WidgetDisplayProvider is not { } widgetTarget || widgetTarget == published)
+                return;
+
+            var widgetResult = await _service.FetchAsync(widgetTarget, force).ConfigureAwait(false);
+            StateChanged?.Invoke(widgetResult.WithSource(SourceFor(widgetTarget)));
         }
 
         private void PromoteRecentProvider(ProviderId provider)
