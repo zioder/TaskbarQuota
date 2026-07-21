@@ -110,6 +110,7 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 ### Taskbar widget
 
 - **In-taskbar compact UI** — usage bars and/or percentages injected beside the system tray (reparents a layered WinUI island into `Shell_TrayWnd`).
+- **All taskbars** — creates a widget on the primary taskbar and every Windows secondary taskbar, with a separately saved drag position for each display.
 - **Follows taskbar layout** — recenters when the taskbar moves, centers, or when Widgets / tray geometry changes.
 - **Draggable placement** — drag to reposition; offset is saved under `%LOCALAPPDATA%\TaskbarQuota\`.
 - **Click for flyout** — quick provider strip and settings shortcut above the widget.

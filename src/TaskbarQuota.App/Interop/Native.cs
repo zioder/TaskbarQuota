@@ -23,7 +23,7 @@ namespace TaskbarQuota.Interop
         [DllImport("user32.dll")]
         public static extern IntPtr DefWindowProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam);
 
-        [DllImport("user32.dll")]
+        [DllImport("user32.dll", SetLastError = true)]
         public static extern ushort RegisterClassEx([In] ref WNDCLASSEX lpwcx);
 
         [DllImport("user32.dll")]
@@ -49,6 +49,9 @@ namespace TaskbarQuota.Interop
 
         [DllImport("user32.dll")]
         public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool EnumWindows(EnumWindowProc lpEnumFunc, IntPtr lParam);
 
         [DllImport("user32.dll")]
         public static extern IntPtr GetAncestor(IntPtr hwnd, GetAncestorFlags gaFlags);
@@ -120,6 +123,9 @@ namespace TaskbarQuota.Interop
 
         [DllImport("user32.dll")]
         public static extern bool GetMonitorInfo([In] IntPtr hMonitor, ref MONITORINFO lpmi);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, EntryPoint = "GetMonitorInfo")]
+        public static extern bool GetMonitorInfo([In] IntPtr hMonitor, ref MONITORINFOEX lpmi);
     }
 
     public enum MonitorFromFlags : uint
@@ -138,6 +144,23 @@ namespace TaskbarQuota.Interop
         public uint dwFlags;
 
         public static MONITORINFO Create() => new() { cbSize = Marshal.SizeOf<MONITORINFO>() };
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    public struct MONITORINFOEX
+    {
+        public int cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string szDevice;
+
+        public static MONITORINFOEX Create() => new()
+        {
+            cbSize = Marshal.SizeOf<MONITORINFOEX>(),
+            szDevice = string.Empty,
+        };
     }
 
     public static class Shell32
