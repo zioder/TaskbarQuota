@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using H.NotifyIcon.Core;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
@@ -9,18 +11,18 @@ using TaskbarQuota.Usage;
 
 namespace TaskbarQuota.Taskbar
 {
-    /// <summary>Owns the tray icon and the injected taskbar widget, and pushes coordinator state into the widget.</summary>
+    /// <summary>Owns the tray icon and injected taskbar widgets, and pushes coordinator state into every widget.</summary>
     internal static class TaskBarManager
     {
         private static TrayIconWithContextMenu? _trayIcon;
         private static System.Drawing.Icon? _trayIconSource;
-        private static TaskBarWidget? _widget;
+        private static readonly Dictionary<IntPtr, TaskBarWidget> Widgets = new();
         private static FlyoutWindow? _flyout;
         private static DispatcherQueue? _dispatcher;
         private static Action? _showMainWindow;
         private static DispatcherTimer? _widgetHealthTimer;
         private static bool _initialized;
-        private static bool _isCreatingWidget;
+        private static bool _isReconcilingWidgets;
         private static ProviderId? _lastLoggedWidgetApplyProvider;
 
         public static void Initialize(DispatcherQueue dispatcher, Action showMainWindow)
@@ -29,7 +31,7 @@ namespace TaskbarQuota.Taskbar
             _showMainWindow = showMainWindow;
 
             CreateTrayIcon();
-            EnsureWidget();
+            EnsureWidgets();
 
             if (!_initialized)
             {
@@ -48,8 +50,14 @@ namespace TaskbarQuota.Taskbar
         private static void CreateTrayIcon()
         {
             var open = new PopupMenuItem("Open TaskbarQuota", (_, _) => _dispatcher?.TryEnqueue(() => _showMainWindow?.Invoke()));
-            var move = new PopupMenuItem("Move taskbar widget", (_, _) => _dispatcher?.TryEnqueue(() => _widget?.StartDragging()));
-            var reset = new PopupMenuItem("Reset widget position", (_, _) => _dispatcher?.TryEnqueue(() => _widget?.UpdatePosition(resetManualPosition: true)));
+            var move = new PopupMenuItem("Move primary taskbar widget", (_, _) => _dispatcher?.TryEnqueue(
+                () => PrimaryWidget()?.StartDragging()));
+            var reset = new PopupMenuItem("Reset widget positions", (_, _) => _dispatcher?.TryEnqueue(
+                () =>
+                {
+                    foreach (var widget in Widgets.Values.ToArray())
+                        widget.UpdatePosition(resetManualPosition: true);
+                }));
             var quit = new PopupMenuItem("Quit", (_, _) => _dispatcher?.TryEnqueue(App.Quit));
 
             System.Drawing.Icon? icon = null;
@@ -87,106 +95,147 @@ namespace TaskbarQuota.Taskbar
                 return;
 
             _widgetHealthTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
-            _widgetHealthTimer.Tick += (_, _) => EnsureWidget();
+            _widgetHealthTimer.Tick += (_, _) => EnsureWidgets();
             _widgetHealthTimer.Start();
         }
 
-        private static void EnsureWidget()
+        private static void EnsureWidgets()
         {
-            if (_isCreatingWidget)
+            if (_isReconcilingWidgets)
                 return;
 
-            if (_widget is { } widget)
-            {
-                if (widget.IsAlive)
-                    return;
-
-                Log.Warning("Taskbar widget window disappeared; recreating");
-                try { widget.Dispose(); } catch (Exception ex) { Log.Warning(ex, "Failed to dispose missing taskbar widget"); }
-                _widget = null;
-            }
-
-            ShowWidget();
-        }
-
-        private static void ShowWidget()
-        {
-            if (_widget != null) return;
-            _isCreatingWidget = true;
+            _isReconcilingWidgets = true;
             try
             {
-                var widget = new TaskBarWidget();
-                widget.Initialize();
-                widget.Destroying += (_, _) => _widget = null;
-                if (widget.Summary is { } summary)
-                    summary.Clicked += () => _dispatcher?.TryEnqueue(ToggleFlyout);
-                _widget = widget;
-                SyncWidgetState();
-                PrewarmFlyout();
-            }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "Failed to create taskbar widget");
+                if (!TaskbarWindowTarget.TryFindAll(out var targets))
+                {
+                    Log.Warning("Could not enumerate Windows taskbars; keeping existing widgets until the next health check");
+                    return;
+                }
+                var targetsByHandle = targets.ToDictionary(target => target.Handle);
+
+                foreach (var pair in Widgets.ToArray())
+                {
+                    if (targetsByHandle.TryGetValue(pair.Key, out var target)
+                        && pair.Value.IsAlive
+                        && pair.Value.IsDpiCurrent
+                        && pair.Value.MatchesTarget(target))
+                    {
+                        continue;
+                    }
+
+                    Widgets.Remove(pair.Key);
+                    Log.Warning($"Taskbar widget, target taskbar, or DPI changed; recreating taskbar=0x{pair.Key.ToInt64():X}");
+                    try { pair.Value.Dispose(); }
+                    catch (Exception ex) { Log.Warning(ex, "Failed to dispose missing taskbar widget"); }
+                }
+
+                foreach (var target in targets)
+                {
+                    if (!Widgets.ContainsKey(target.Handle))
+                        CreateWidget(target);
+                }
             }
             finally
             {
-                _isCreatingWidget = false;
+                _isReconcilingWidgets = false;
             }
         }
 
+        private static void CreateWidget(TaskbarWindowTarget target)
+        {
+            TaskBarWidget? widget = null;
+            try
+            {
+                widget = new TaskBarWidget(target);
+                widget.Initialize();
+                widget.Destroying += (sender, _) =>
+                {
+                    if (sender is TaskBarWidget destroyedWidget)
+                        _dispatcher?.TryEnqueue(DispatcherQueuePriority.High, () => OnWidgetDestroying(destroyedWidget));
+                };
+                if (widget.Summary is { } summary)
+                    summary.Clicked += () => _dispatcher?.TryEnqueue(() => ToggleFlyout(widget));
+                Widgets[target.Handle] = widget;
+                SyncWidgetState(widget);
+                PrewarmFlyout();
+                Log.Information($"Taskbar widget created: taskbar=0x{target.Handle.ToInt64():X}, primary={target.IsPrimary}");
+            }
+            catch (Exception ex)
+            {
+                try { widget?.Dispose(); } catch { }
+                Log.Error(ex, $"Failed to create taskbar widget for taskbar=0x{target.Handle.ToInt64():X}");
+            }
+        }
+
+        private static void OnWidgetDestroying(TaskBarWidget widget)
+        {
+            if (Widgets.TryGetValue(widget.TaskbarHandle, out var current) && ReferenceEquals(current, widget))
+                Widgets.Remove(widget.TaskbarHandle);
+
+            try { widget.Dispose(); }
+            catch (Exception ex) { Log.Warning(ex, "Failed to dispose destroyed taskbar widget"); }
+        }
+
+        private static TaskBarWidget? PrimaryWidget()
+            => Widgets.Values.FirstOrDefault(widget => widget.IsAlive && widget.IsPrimaryTaskbar)
+                ?? Widgets.Values.FirstOrDefault(widget => widget.IsAlive);
+
         private static void SyncWidgetState()
         {
-            var widget = _widget;
-            if (widget?.Summary is not { } summary)
+            foreach (var widget in Widgets.Values.ToArray())
+                SyncWidgetState(widget);
+        }
+
+        private static void SyncWidgetState(TaskBarWidget widget)
+        {
+            if (!widget.IsAlive || widget.Summary is not { } summary)
                 return;
 
             var coordinator = UsageCoordinator.Instance;
-            summary.DispatcherQueue.TryEnqueue(() =>
+            var target = coordinator.WidgetDisplayProvider;
+            bool shouldShowWidget = coordinator.IsActiveToolPresent && target is not null;
+            widget.SetVisible(shouldShowWidget);
+
+            // No enabled+available provider -> hide the native host instead of leaving a transparent
+            // taskbar child window over the notification area (#10).
+            if (target is not { } targetProvider)
             {
-                var target = coordinator.WidgetDisplayProvider;
-                bool shouldShowWidget = coordinator.IsActiveToolPresent && target is not null;
-                widget.SetVisible(shouldShowWidget);
+                summary.SetActiveToolVisible(false);
+                return;
+            }
 
-                // No enabled+available provider -> hide the native host instead of leaving a transparent
-                // taskbar child window over the notification area (#10).
-                if (target is not { } targetProvider)
-                {
-                    summary.SetActiveToolVisible(false);
-                    return;
-                }
+            UsageResult? toApply = coordinator.LastState is { } last && last.Id == targetProvider
+                ? last
+                : coordinator.Service.TryGetCached(targetProvider, out var cached)
+                    ? cached
+                    : coordinator.Service.TryGetLastSuccessfulLiveResult(targetProvider, out var lastSuccess)
+                        ? lastSuccess
+                        : coordinator.Service.Get(targetProvider) is { } usageProvider
+                            ? UsageResult.Pending(targetProvider, usageProvider, "Loading...")
+                            : null;
 
-                UsageResult? toApply = coordinator.LastState is { } last && last.Id == targetProvider
-                    ? last
-                    : coordinator.Service.TryGetCached(targetProvider, out var cached)
-                        ? cached
-                        : coordinator.Service.TryGetLastSuccessfulLiveResult(targetProvider, out var lastSuccess)
-                            ? lastSuccess
-                            : coordinator.Service.Get(targetProvider) is { } usageProvider
-                                ? UsageResult.Pending(targetProvider, usageProvider, "Loading...")
-                                : null;
+            if (toApply is { } result)
+            {
+                summary.Apply(result, force: true);
+                LogWidgetApply(result.Id, "sync");
+            }
 
-                if (toApply is { } result)
-                {
-                    summary.Apply(result, force: true);
-                    LogWidgetApply(result.Id, "sync");
-                }
+            summary.SetActiveToolVisible(shouldShowWidget);
 
-                summary.SetActiveToolVisible(shouldShowWidget);
-
-                // Hydrating from a placeholder/failed snapshot leaves the widget showing a non-value while
-                // the flyout fetches its own data. Kick a fetch so the widget resolves on its own (#21).
-                if (toApply is null or { Ok: false })
-                    _ = coordinator.TickAsync(force: true);
-            });
+            // Hydrating from a placeholder/failed snapshot leaves the widget showing a non-value while
+            // the flyout fetches its own data. Kick a fetch so the widget resolves on its own (#21).
+            if (toApply is null or { Ok: false })
+                _ = coordinator.TickAsync(force: true);
         }
 
-        private static void ToggleFlyout()
+        private static void ToggleFlyout(TaskBarWidget widget)
         {
-            if (_widget is null) return;
+            if (!widget.IsAlive) return;
             try
             {
                 _flyout ??= new FlyoutWindow();
-                _flyout.ToggleAbove(_widget.Handle);
+                _flyout.ToggleAbove(widget.Handle);
             }
             catch (Exception ex)
             {
@@ -213,23 +262,26 @@ namespace TaskbarQuota.Taskbar
         }
 
         private static void OnStateChanged(UsageResult result)
-        {
-            var widget = _widget;
-            if (widget?.Summary is null) return;
+            => _dispatcher?.TryEnqueue(DispatcherQueuePriority.High, () => ApplyStateChanged(result));
 
+        private static void ApplyStateChanged(UsageResult result)
+        {
             var active = UsageCoordinator.Instance.WidgetDisplayProvider;
             if (active is null || result.Id != active)
                 return;
 
-            widget.Summary.DispatcherQueue.TryEnqueue(DispatcherQueuePriority.High, () =>
+            foreach (var widget in Widgets.Values.ToArray())
             {
-                widget.Summary.Apply(result);
+                if (!widget.IsAlive || widget.Summary is not { } summary)
+                    continue;
+
+                summary.Apply(result);
                 LogWidgetApply(result.Id, "state");
                 bool isVisible = UsageCoordinator.Instance.IsActiveToolPresent
                     && UsageCoordinator.Instance.WidgetDisplayProvider is not null;
                 widget.SetVisible(isVisible);
-                widget.Summary.SetActiveToolVisible(isVisible);
-            });
+                summary.SetActiveToolVisible(isVisible);
+            }
         }
 
         private static void LogWidgetApply(ProviderId provider, string source)
@@ -246,15 +298,19 @@ namespace TaskbarQuota.Taskbar
         private static void OnActiveProviderChanged(ProviderId? _) { }
 
         private static void OnActiveToolPresenceChanged(bool isPresent)
+            => _dispatcher?.TryEnqueue(() => ApplyActiveToolPresenceChanged(isPresent));
+
+        private static void ApplyActiveToolPresenceChanged(bool isPresent)
         {
-            var widget = _widget;
-            if (widget?.Summary is null) return;
             bool isVisible = isPresent && UsageCoordinator.Instance.WidgetDisplayProvider is not null;
-            widget.Summary.DispatcherQueue.TryEnqueue(() =>
+            foreach (var widget in Widgets.Values.ToArray())
             {
+                if (!widget.IsAlive || widget.Summary is not { } summary)
+                    continue;
+
                 widget.SetVisible(isVisible);
-                widget.Summary.SetActiveToolVisible(isVisible);
-            });
+                summary.SetActiveToolVisible(isVisible);
+            }
         }
 
         private static void OnWidgetSettingsChanged(object? sender, EventArgs e)
@@ -274,8 +330,11 @@ namespace TaskbarQuota.Taskbar
             if (_trayIcon != null) { _trayIcon.TryRemove(); _trayIcon.Dispose(); _trayIcon = null; }
             try { _flyout?.Close(); } catch { }
             _flyout = null;
-            _widget?.Dispose();
-            _widget = null;
+            foreach (var widget in Widgets.Values.ToArray())
+            {
+                try { widget.Dispose(); } catch { }
+            }
+            Widgets.Clear();
         }
     }
 }

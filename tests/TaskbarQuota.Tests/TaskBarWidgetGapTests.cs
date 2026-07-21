@@ -197,4 +197,41 @@ public class TaskBarWidgetGapTests
 
         Assert.Equal(600, TaskBarWidget.PlaceInFittingGap(450, gaps, 172));
     }
+
+    [Fact]
+    public void ComputeUsableHorizontalBounds_PrimaryTaskbar_StopsBeforeTray()
+    {
+        var taskbar = R(0, 1920);
+        var tray = R(1600, 1920);
+
+        var bounds = TaskBarWidget.ComputeUsableHorizontalBounds(taskbar, tray, clearance: 6, isRtl: false);
+
+        Assert.Equal((0, 1594), bounds);
+    }
+
+    [Fact]
+    public void ComputeUsableHorizontalBounds_SecondaryTaskbar_UsesFreeOuterEdge()
+    {
+        var taskbar = R(0, 1920);
+
+        var bounds = TaskBarWidget.ComputeUsableHorizontalBounds(taskbar, notificationRect: null, clearance: 6, isRtl: false);
+
+        Assert.Equal((0, 1914), bounds);
+        Assert.Equal(1742, TaskBarWidget.PlaceInFittingGap(
+            preferredX: bounds.right - 172,
+            TaskBarWidget.ComputeFreeGaps(bounds.left, bounds.right, new List<RECT>()),
+            width: 172));
+    }
+
+    [Fact]
+    public void ComputeUsableHorizontalBounds_RtlSecondaryTaskbar_LeavesClearanceAtLeftEdge()
+    {
+        var bounds = TaskBarWidget.ComputeUsableHorizontalBounds(
+            R(0, 1920),
+            notificationRect: null,
+            clearance: 6,
+            isRtl: true);
+
+        Assert.Equal((6, 1920), bounds);
+    }
 }
