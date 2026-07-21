@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="TaskbarQuota.Controls.CostDonut"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Grid x:Name="Root" SizeChanged="OnSizeChanged" MinWidth="180" MinHeight="180">
+        <!-- Arc segments are injected into this canvas from code-behind. -->
+        <Canvas x:Name="ArcCanvas"/>
+
+        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="0">
+            <TextBlock x:Name="CenterLabel"
+                       Text="$0.00"
+                       HorizontalAlignment="Center"
+                       FontWeight="SemiBold"
+                       FontSize="30"
+                       Foreground="{ThemeResource TextFillColorPrimaryBrush}"/>
+            <TextBlock x:Name="CenterSubLabel"
+                       Text="API value"
+                       HorizontalAlignment="Center"
+                       FontSize="12"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"/>
+        </StackPanel>
+    </Grid>
+</UserControl>

@@ -27,6 +27,13 @@
                              PaneDisplayMode="Left"
                              OpenPaneLength="220"
                              SelectionChanged="Nav_SelectionChanged">
+            <muxc:NavigationView.FooterMenuItems>
+                <muxc:NavigationViewItem Content="Cost" Tag="Cost">
+                    <muxc:NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE1D6;"/>
+                    </muxc:NavigationViewItem.Icon>
+                </muxc:NavigationViewItem>
+            </muxc:NavigationView.FooterMenuItems>
             <Frame x:Name="ContentFrame"
                    Padding="24,16,24,0"
                    HorizontalAlignment="Stretch"
