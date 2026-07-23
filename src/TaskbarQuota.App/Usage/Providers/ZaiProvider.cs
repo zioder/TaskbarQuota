@@ -112,7 +112,7 @@ namespace TaskbarQuota.Usage.Providers
             int? windowMinutes = entry.WindowMinutes;
             string? resetDesc = entry.NextResetTime.HasValue
                 ? CodexProvider.FormatResetCountdown(entry.NextResetTime)
-                : entry.WindowDescription != null ? $"{entry.WindowDescription} window" : null;
+                : null;
             return new RateWindow(percent, windowMinutes: windowMinutes, resetAt: entry.NextResetTime, resetDescription: resetDesc, label: label);
         }
 
