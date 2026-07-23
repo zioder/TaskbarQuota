@@ -1,5 +1,7 @@
 using System;
 using System.Text.Json;
+using TaskbarQuota;
+using TaskbarQuota.Controls;
 using TaskbarQuota.Usage;
 using TaskbarQuota.Usage.Providers;
 
@@ -218,6 +220,32 @@ public class ZaiProviderTests
         var ex = Assert.Throws<ProviderException>(() => ZaiProvider.BuildResult(doc.RootElement));
         Assert.Equal(ProviderErrorKind.Other, ex.Kind);
         Assert.Contains("no active coding plan", ex.Message);
+    }
+
+    [Fact]
+    public void WidgetRows_ForZai_ToggleSessionAndMcpRows()
+    {
+        WidgetSettingsService.ResetRowVisibilityForTesting();
+        try
+        {
+            var usage = new UsageSnapshot(new RateWindow(10));
+            usage.ExtraRateWindows.Add(new NamedRateWindow("zai-mcp", "MCP", new RateWindow(0, label: "MCP")));
+            var result = UsageResult.Success(ProviderId.Zai, new ZaiProvider(), new ProviderFetchResult(usage, "api"));
+
+            var defaultLabels = WidgetSummary.BuildRowLabelsForTesting(result, usage);
+            Assert.Equal(new[] { "Session", "MCP" }, defaultLabels);
+
+            WidgetSettingsService.SetRowVisibleForTesting(ProviderId.Zai, WidgetSettingsService.RowExtra, false);
+            Assert.Equal(new[] { "Session" }, WidgetSummary.BuildRowLabelsForTesting(result, usage));
+
+            WidgetSettingsService.SetRowVisibleForTesting(ProviderId.Zai, WidgetSettingsService.RowExtra, true);
+            WidgetSettingsService.SetRowVisibleForTesting(ProviderId.Zai, WidgetSettingsService.RowPrimary, false);
+            Assert.Equal(new[] { "MCP" }, WidgetSummary.BuildRowLabelsForTesting(result, usage));
+        }
+        finally
+        {
+            WidgetSettingsService.ResetRowVisibilityForTesting();
+        }
     }
 
     [Fact]
