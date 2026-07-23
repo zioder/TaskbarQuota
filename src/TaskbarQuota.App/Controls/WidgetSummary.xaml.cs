@@ -369,7 +369,7 @@ namespace TaskbarQuota.Controls
                 return rows;
             }
 
-            if (result.Id == ProviderId.Claude)
+            if (result.Id is ProviderId.Claude or ProviderId.Zai)
             {
                 var rows = BuildBaseRows(result, usage);
                 if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
