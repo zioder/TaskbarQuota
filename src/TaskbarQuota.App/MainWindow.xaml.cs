@@ -151,12 +151,6 @@ namespace TaskbarQuota
                 ContentFrame.Navigate(typeof(SettingsPage), null, info);
                 return;
             }
-            if (args.SelectedItemContainer is NavigationViewItem { Tag: "Cost" })
-            {
-                if (ContentFrame.CurrentSourcePageType != typeof(Views.CostPage))
-                    ContentFrame.Navigate(typeof(Views.CostPage), null, info);
-                return;
-            }
             if (_navigationBinder?.SelectFromNavigation(args) == true)
             {
                 if (ContentFrame.CurrentSourcePageType != typeof(DashboardPage))
