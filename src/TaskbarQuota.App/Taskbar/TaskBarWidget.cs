@@ -32,6 +32,7 @@ namespace TaskbarQuota.Taskbar
         private const int DefaultWidgetHostWidth = 172;
         private const int TrayClearanceLogicalPx = 6;
         private static readonly TimeSpan PositionDisposeWait = TimeSpan.FromSeconds(3);
+        private const int ERROR_CLASS_ALREADY_EXISTS = 1410;
         // Approx width of the Win11 far-left Widgets/weather pill; used to reserve clearance when its exact
         // bounds can't be read via UIA, so the widget never anchors on top of it (issue #17).
         private const int WidgetsButtonFallbackLogicalPx = 160;
@@ -83,8 +84,14 @@ namespace TaskbarQuota.Taskbar
         // True while the user is actively repositioning the widget (tray "Move" mode or a direct pointer
         // drag). Background repositions (2s watcher poll, taskbar events) must not fire during this, or the
         // widget snaps back to a computed lane mid-drag (issue #17 case 2).
-        private bool IsUserRepositioning => isDragging || isPointerTracking || isDirectDrag;
+        // isSettling covers the async snap right after release: without it a watcher poll landing mid-snap
+        // would recompute a resting position from the not-yet-saved offset and yank the widget away.
+        private bool IsUserRepositioning => isDragging || isPointerTracking || isDirectDrag || isSettling;
+        private bool isSettling;
         private int draggingInnerOffsetX;
+        // Where the drag currently sits, and the free gap it is tracking the cursor inside.
+        private int? dragPreviewX;
+        private (int start, int end)? activeDragGap;
         private int lastCursorPositionX;
         private int pressCursorPositionX;
         private bool initialized;
@@ -475,6 +482,7 @@ namespace TaskbarQuota.Taskbar
             hostContent.PointerPressed += Content_PointerPressed;
             hostContent.PointerReleased += Content_PointerReleased;
             isDragging = true;
+            PrimeObstacleCacheForDrag();
             if (!host!.HasFocus && hwnd != User32.GetForegroundWindow())
                 User32.SetForegroundWindow(hwnd);
         }
@@ -491,11 +499,12 @@ namespace TaskbarQuota.Taskbar
             widgetSummary.IsHitTestVisible = true;
             if (revert)
             {
+                dragPreviewX = null;
+                activeDragGap = null;
                 appWindow.Move(new PointInt32(currentOffsetX, currentOffsetY));
                 return;
             }
-            currentOffsetX = appWindow.Position.X;
-            SaveCustomPosition(currentOffsetX);
+            _ = SnapToValidPositionAsync(dragPreviewX ?? appWindow.Position.X);
         }
 
         private void Content_KeyUp(object sender, KeyRoutedEventArgs e)
@@ -531,6 +540,7 @@ namespace TaskbarQuota.Taskbar
             if (appWindow is null || widgetSummary is null) return;
             isPointerTracking = true;
             isDirectDrag = false;
+            PrimeObstacleCacheForDrag();
             widgetSummary.CapturePointer(e.Pointer);
             User32.GetCursorPos(out var point);
             pressCursorPositionX = point.x;
@@ -562,8 +572,7 @@ namespace TaskbarQuota.Taskbar
                 widgetSummary.ReleasePointerCaptures();
             if (isDirectDrag && appWindow is not null)
             {
-                currentOffsetX = appWindow.Position.X;
-                SaveCustomPosition(currentOffsetX);
+                _ = SnapToValidPositionAsync(dragPreviewX ?? appWindow.Position.X);
                 if (widgetSummary is not null)
                     widgetSummary.SuppressNextClick = true;
                 e.Handled = true;
@@ -579,6 +588,16 @@ namespace TaskbarQuota.Taskbar
             widgetSummary?.ReleasePointerCaptures();
         }
 
+        /// <summary>
+        /// Drags the widget with the cursor inside whichever free gap the CURSOR currently occupies, so it
+        /// tracks the pointer smoothly across a whole zone and never overlaps a shell element.
+        ///
+        /// Selecting the gap by cursor position (rather than by distance to the widget, as before) is what
+        /// fixes issue #21: while the cursor crosses the centred icon cluster the widget simply waits,
+        /// pinned to the edge of the gap it is in, and picks up the pointer again the moment the cursor
+        /// enters the next gap. The old "nearest fitting gap" rule flipped between the left and right zones
+        /// mid-drag, which read as the widget jumping between lanes at random or refusing to move.
+        /// </summary>
         private void MoveWidgetWithCursor(int cursorX)
         {
             if (appWindow is null) return;
@@ -593,24 +612,202 @@ namespace TaskbarQuota.Taskbar
             var taskbarClientRect = ToTaskbarClientRect(taskbarRect, taskbarRect);
             var trayNotifyClientRect = ToTaskbarClientRect(notificationRect, taskbarRect);
 
-            // Drag avoids the same obstacle set as the resting position (app icons via the cached UIA scan,
-            // plus the pill), so the user can only drop the widget into a gap that fully fits it (issue #17).
-            var obstacles = CollectObstacleClientRects(taskbarRect, lastWidgetsButtonClientRect, lastTaskButtonClientRects);
             var (leftBound, rightBound) = ComputeUsableHorizontalBounds(
                 taskbarClientRect,
                 hasNotificationArea ? trayNotifyClientRect : null,
                 TrayClearancePx,
                 IsRtlUI);
-
-            int targetX = cursorX - taskbarRect.left - draggingInnerOffsetX;
+            var obstacles = CollectObstacleClientRects(taskbarRect, lastWidgetsButtonClientRect, lastTaskButtonClientRects);
             var gaps = ComputeFreeGaps(leftBound, rightBound, obstacles);
-            int? placed = PlaceInFittingGap(targetX, gaps, WidgetHostWidth);
-            if (placed is { } fitX)
+
+            int cursorClientX = cursorX - taskbarRect.left;
+            int desiredX = cursorClientX - draggingInnerOffsetX;
+
+            var gap = SelectDragGap(gaps, cursorClientX, desiredX, WidgetHostWidth, activeDragGap);
+            if (gap is not { } zone)
             {
-                appWindow.Move(new PointInt32(fitX, currentOffsetY));
-                currentOffsetX = fitX;
+                // No gap can hold the widget at all (very crowded bar): leave it where it is.
+                lastCursorPositionX = cursorX;
+                return;
             }
+
+            activeDragGap = zone;
+            int targetX = Math.Clamp(desiredX, zone.start, zone.end - WidgetHostWidth);
+
+            appWindow.Move(new PointInt32(targetX, currentOffsetY));
+            dragPreviewX = targetX;
+            ResyncGrabPoint(cursorClientX, targetX, desiredX);
             lastCursorPositionX = cursorX;
+        }
+
+        /// <summary>
+        /// Re-anchors the grab point whenever the widget is pinned and the cursor has run past it (span end
+        /// or icon cluster). Without this the pointer builds up an invisible offset and the drag feels dead
+        /// until the hand travels all the way back.
+        ///
+        /// Awqat-Salaat solves the same problem by clamping the physical cursor with SetCursorPos, but that
+        /// traps the user's mouse — it cannot be moved past the taskbar end while a drag is held. Moving the
+        /// grab point instead keeps the pointer completely free and still responds the instant the user
+        /// reverses direction. The offset stays within the widget so the grab never leaves the control.
+        /// </summary>
+        private void ResyncGrabPoint(int cursorClientX, int targetX, int desiredX)
+        {
+            if (desiredX == targetX)
+                return;
+
+            draggingInnerOffsetX = Math.Clamp(cursorClientX - targetX, 0, WidgetHostWidth);
+        }
+
+        /// <summary>
+        /// Chooses the gap the dragged widget lives in for this pointer sample:
+        /// the gap under the cursor when it fits the widget; otherwise the gap the drag is already in
+        /// (so passing over an icon cluster doesn't teleport the widget); otherwise the nearest fitting gap.
+        /// Returns null when no gap can hold the widget.
+        /// </summary>
+        internal static (int start, int end)? SelectDragGap(
+            List<(int start, int end)> gaps, int cursorX, int desiredX, int width, (int start, int end)? current)
+        {
+            (int start, int end)? underCursor = null;
+            (int start, int end)? sticky = null;
+            (int start, int end)? nearest = null;
+            long nearestDistance = long.MaxValue;
+
+            foreach (var gap in gaps)
+            {
+                if (gap.end - gap.start < width)
+                    continue;
+
+                if (cursorX >= gap.start && cursorX < gap.end)
+                    underCursor = gap;
+
+                // The current gap is matched by overlap, not equality: obstacle bounds shift by a pixel or
+                // two between samples as the shell relayouts, which would otherwise drop the sticky gap.
+                if (current is { } c && gap.start < c.end && gap.end > c.start)
+                    sticky = gap;
+
+                long distance = Math.Abs((long)Math.Clamp(desiredX, gap.start, gap.end - width) - desiredX);
+                if (distance < nearestDistance)
+                {
+                    nearestDistance = distance;
+                    nearest = gap;
+                }
+            }
+
+            return underCursor ?? sticky ?? nearest;
+        }
+
+        /// <summary>
+        /// Settles the widget after a drag: snaps the dropped position to the nearest gap that fully fits
+        /// it, so it rests beside shell elements instead of on top of them. Obstacle bounds are re-read
+        /// here (UIA, off the UI thread) rather than during the drag, which keeps the drag itself smooth.
+        /// Falls back to the pre-drag position when nothing fits.
+        /// </summary>
+        private async Task SnapToValidPositionAsync(int droppedX)
+        {
+            if (appWindow is null) return;
+
+            isSettling = true;
+            try
+            {
+                if (!TryGetLayoutRects(
+                        out RECT taskbarScreenRect,
+                        out RECT notificationScreenRect,
+                        out _,
+                        out bool hasNotificationArea))
+                {
+                    return;
+                }
+                var taskbarRect = ToTaskbarClientRect(taskbarScreenRect, taskbarScreenRect);
+                var trayNotifyRect = ToTaskbarClientRect(notificationScreenRect, taskbarScreenRect);
+
+                await RefreshObstacleCacheAsync(taskbarScreenRect);
+
+                // A newer drag or press may have started while this settle was suspended on the UIA read
+                // above, and the widget may have been torn down. Either way this result is stale: letting
+                // it run would move the window, clear the new drag's dragPreviewX/activeDragGap, and
+                // persist a position the user has already dragged away from.
+                if (disposedValue || appWindow is null || !IsAlive || isDragging || isPointerTracking)
+                    return;
+
+                var obstacles = CollectObstacleClientRects(taskbarScreenRect, lastWidgetsButtonClientRect, lastTaskButtonClientRects);
+                var (leftBound, rightBound) = ComputeUsableHorizontalBounds(
+                    taskbarRect,
+                    hasNotificationArea ? trayNotifyRect : null,
+                    TrayClearancePx,
+                    IsRtlUI);
+                var gaps = ComputeFreeGaps(leftBound, rightBound, obstacles);
+
+                int settledX = PlaceInFittingGap(droppedX, gaps, WidgetHostWidth)
+                    ?? (currentOffsetX != int.MinValue ? currentOffsetX : ClampToSpan(droppedX, leftBound, rightBound, WidgetHostWidth));
+
+                appWindow.Move(new PointInt32(settledX, currentOffsetY));
+                currentOffsetX = settledX;
+                dragPreviewX = null;
+                activeDragGap = null;
+                SaveCustomPosition(settledX);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to settle widget after drag");
+            }
+            finally
+            {
+                isSettling = false;
+            }
+        }
+
+        /// <summary>
+        /// Re-reads the obstacle bounds only visible through UI Automation (the Win11 XAML app icons and
+        /// the Widgets/weather pill) into the caches the synchronous drag path reads. Called when a drag
+        /// starts and when it ends, so the gaps the drag tracks reflect the bar as it is right now.
+        /// </summary>
+        private async Task RefreshObstacleCacheAsync(RECT taskbarScreenRect)
+        {
+            if (SystemInfos.IsTaskBarWidgetsEnabled()
+                && await taskbarWatcher.GetWidgetsButtonRectAsync() is { } wb && wb.right > wb.left)
+            {
+                lastWidgetsButtonClientRect = ToTaskbarClientRect(wb, taskbarScreenRect);
+            }
+
+            if (await taskbarWatcher.GetTaskbarButtonRectsAsync() is { } taskButtonRects)
+            {
+                var converted = new List<RECT>(taskButtonRects.Count);
+                foreach (var r in taskButtonRects)
+                    converted.Add(ToTaskbarClientRect(r, taskbarScreenRect));
+                lastTaskButtonClientRects = converted;
+            }
+        }
+
+        private void PrimeObstacleCacheForDrag()
+        {
+            activeDragGap = null;
+            User32.GetWindowRect(hwndShell, out RECT taskbarScreenRect);
+            _ = PrimeObstacleCacheAsync(taskbarScreenRect);
+        }
+
+        /// <summary>
+        /// Fire-and-forget wrapper for the drag-start cache prime. A UIA read can fail while Explorer is
+        /// rebuilding; without this the discarded task would surface an unobserved exception instead of a
+        /// warning, and the drag simply falls back to the previously cached obstacle bounds.
+        /// </summary>
+        private async Task PrimeObstacleCacheAsync(RECT taskbarScreenRect)
+        {
+            try
+            {
+                await RefreshObstacleCacheAsync(taskbarScreenRect);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to prime the taskbar obstacle cache for a drag");
+            }
+        }
+
+
+        /// <summary>Keeps a widget of <paramref name="width"/> inside [leftBound, rightBound].</summary>
+        internal static int ClampToSpan(int desiredX, int leftBound, int rightBound, int width)
+        {
+            int maxX = rightBound - width;
+            return maxX <= leftBound ? leftBound : Math.Clamp(desiredX, leftBound, maxX);
         }
 
         // Collects the taskbar-client rects of everything the widget must not overlap: the Start button and
@@ -646,7 +843,27 @@ namespace TaskbarQuota.Taskbar
             }
             catch (Exception ex) { Log.Warning(ex, "overlap scan failed"); }
 
-            return result;
+            return FilterContainerRects(result, taskbarScreenRect.right - taskbarScreenRect.left);
+        }
+
+        /// <summary>
+        /// Drops obstacle rects that are really containers, not elements. The UIA tree exposes grouping
+        /// elements whose bounds span most of the bar; treating one as an obstacle wipes out every free gap,
+        /// which is why the widget could get stuck in a narrow band or refuse to move at all (issue #21).
+        /// </summary>
+        internal static List<RECT> FilterContainerRects(List<RECT> rects, int taskbarWidth)
+        {
+            if (taskbarWidth <= 0)
+                return rects;
+
+            int maxObstacleWidth = taskbarWidth / 2;
+            var kept = new List<RECT>(rects.Count);
+            foreach (var r in rects)
+            {
+                if (r.right - r.left <= maxObstacleWidth)
+                    kept.Add(r);
+            }
+            return kept;
         }
 
         // Merges the obstacle rects (clipped to [leftBound, rightBound]) and returns the free horizontal
@@ -1003,7 +1220,13 @@ namespace TaskbarQuota.Taskbar
                         lpszClassName = WidgetClassName,
                     };
                     if (User32.RegisterClassEx(ref wndClass) == 0)
-                        throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not register the taskbar widget window class.");
+                    {
+                        // A prior UnregisterClass may have failed while a window still held the class, in
+                        // which case it is still registered and usable — that is not a failure to create.
+                        int error = Marshal.GetLastWin32Error();
+                        if (error != ERROR_CLASS_ALREADY_EXISTS)
+                            throw new Win32Exception(error, "Could not register the taskbar widget window class.");
+                    }
                     windowClassRegistered = true;
                 }
 
@@ -1026,10 +1249,13 @@ namespace TaskbarQuota.Taskbar
                 windowClassUsers--;
                 if (windowClassUsers == 0 && windowClassRegistered)
                 {
+                    // Clear the flag even when UnregisterClass fails. Leaving it set with zero users makes
+                    // the next RegisterWindowClass skip registration and hand out a class that may no longer
+                    // exist, so every later widget creation fails until the app restarts. Re-registering an
+                    // already-registered class is a recoverable no-op; the reverse is not.
                     if (!User32.UnregisterClass(WidgetClassName, Kernel32.GetModuleHandle(null)))
-                        Log.Warning("Could not unregister the taskbar widget window class");
-                    else
-                        windowClassRegistered = false;
+                        Log.Warning("Could not unregister the taskbar widget window class; will re-register on next use");
+                    windowClassRegistered = false;
                 }
             }
         }
@@ -1114,6 +1340,7 @@ namespace TaskbarQuota.Taskbar
             {
                 ReleaseWindowClass();
                 positionUpdateGate.Release();
+                DisposeSynchronizationPrimitives();
             }
         }
 
@@ -1132,7 +1359,20 @@ namespace TaskbarQuota.Taskbar
             finally
             {
                 positionUpdateGate.Release();
+                DisposeSynchronizationPrimitives();
             }
+        }
+
+        /// <summary>
+        /// Releases the cancellation source and gate. Called only from the two terminal dispose paths,
+        /// after the final Release, since a stalled UpdatePositionImpl reads positionUpdateCancellation.Token
+        /// and would throw ObjectDisposedException if these were freed in Dispose itself. Without this each
+        /// widget recreation (DPI change, monitor plug, Explorer restart) leaked both handles.
+        /// </summary>
+        private void DisposeSynchronizationPrimitives()
+        {
+            try { positionUpdateCancellation.Dispose(); } catch { }
+            try { positionUpdateGate.Dispose(); } catch { }
         }
 
         private void DisposeWindowResources()

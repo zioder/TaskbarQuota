@@ -51,3 +51,4 @@ src/TaskbarQuota.App/AppPackages/
 
 # External reference checkout (not part of the app)
 t3code-src/
+BuildAndRun.ps1

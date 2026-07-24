@@ -87,6 +87,108 @@ public class TaskBarWidgetGapTests
         Assert.Null(TaskBarWidget.PlaceInFittingGap(50, gaps, 172));
     }
 
+    // The drag itself is unconstrained (issue #21): it only clamps to the span, so it can never stall or
+    // skip a zone. Snapping to a free gap happens once, on release.
+    [Fact]
+    public void ClampToSpan_InsideSpan_KeepsRequestedPosition()
+    {
+        Assert.Equal(500, TaskBarWidget.ClampToSpan(500, 0, 1000, 172));
+    }
+
+    [Fact]
+    public void ClampToSpan_PastRightEdge_StopsAtSpanEnd()
+    {
+        Assert.Equal(828, TaskBarWidget.ClampToSpan(9999, 0, 1000, 172));
+    }
+
+    [Fact]
+    public void ClampToSpan_BeforeLeftEdge_StopsAtSpanStart()
+    {
+        Assert.Equal(100, TaskBarWidget.ClampToSpan(-50, 100, 1000, 172));
+    }
+
+    [Fact]
+    public void ClampToSpan_SpanNarrowerThanWidget_PinsToStartInsteadOfRefusing()
+    {
+        Assert.Equal(100, TaskBarWidget.ClampToSpan(400, 100, 200, 172));
+    }
+
+    // Centred taskbar: icon cluster at [400,600] leaves a left zone and a right zone.
+    private static readonly List<(int start, int end)> CentredLayout = new() { (0, 400), (600, 1000) };
+
+    [Fact]
+    public void SelectDragGap_CursorInAZone_TracksThatZone()
+    {
+        var gap = TaskBarWidget.SelectDragGap(CentredLayout, cursorX: 200, desiredX: 150, width: 172, current: null);
+
+        Assert.Equal((0, 400), gap);
+    }
+
+    [Fact]
+    public void SelectDragGap_CursorCrossesTheIconCluster_KeepsTheZoneItStartedIn()
+    {
+        // Cursor is over the icons at x=500 — no zone contains it. The widget must wait in the left zone,
+        // not teleport to the right one (the random lane-jumping in issue #21).
+        var gap = TaskBarWidget.SelectDragGap(CentredLayout, cursorX: 500, desiredX: 450, width: 172, current: (0, 400));
+
+        Assert.Equal((0, 400), gap);
+    }
+
+    [Fact]
+    public void SelectDragGap_CursorReachesTheFarSide_HandsOverToThatZone()
+    {
+        var gap = TaskBarWidget.SelectDragGap(CentredLayout, cursorX: 700, desiredX: 650, width: 172, current: (0, 400));
+
+        Assert.Equal((600, 1000), gap);
+    }
+
+    [Fact]
+    public void SelectDragGap_StickyZoneSurvivesObstacleRectsShiftingByAPixel()
+    {
+        var relaidOut = new List<(int start, int end)> { (0, 398), (602, 1000) };
+
+        var gap = TaskBarWidget.SelectDragGap(relaidOut, cursorX: 500, desiredX: 450, width: 172, current: (0, 400));
+
+        Assert.Equal((0, 398), gap);
+    }
+
+    [Fact]
+    public void SelectDragGap_IgnoresZonesTooNarrowForTheWidget()
+    {
+        var gaps = new List<(int, int)> { (0, 100), (600, 1000) };
+
+        // Cursor sits inside the narrow zone, which cannot hold the widget: fall through to the one that can.
+        var gap = TaskBarWidget.SelectDragGap(gaps, cursorX: 50, desiredX: 20, width: 172, current: null);
+
+        Assert.Equal((600, 1000), gap);
+    }
+
+    [Fact]
+    public void SelectDragGap_NoZoneFits_ReturnsNull()
+    {
+        var gaps = new List<(int, int)> { (0, 100), (600, 700) };
+
+        Assert.Null(TaskBarWidget.SelectDragGap(gaps, cursorX: 50, desiredX: 20, width: 172, current: null));
+    }
+
+    [Fact]
+    public void FilterContainerRects_DropsRectsSpanningMoreThanHalfTheTaskbar()
+    {
+        // A UIA grouping element covering most of the bar would otherwise erase every free gap.
+        var kept = TaskBarWidget.FilterContainerRects(new List<RECT> { R(0, 900), R(400, 460) }, taskbarWidth: 1000);
+
+        Assert.Single(kept);
+        Assert.Equal(400, kept[0].left);
+    }
+
+    [Fact]
+    public void FilterContainerRects_KeepsEverythingWhenTaskbarWidthUnknown()
+    {
+        var rects = new List<RECT> { R(0, 900) };
+
+        Assert.Same(rects, TaskBarWidget.FilterContainerRects(rects, taskbarWidth: 0));
+    }
+
     [Fact]
     public void PlaceInFittingGap_SkipsTooSmallGap_PicksWiderOne()
     {

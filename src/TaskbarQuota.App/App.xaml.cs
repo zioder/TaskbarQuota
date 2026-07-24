@@ -14,6 +14,13 @@ namespace TaskbarQuota
         public static DispatcherQueue? Dispatcher { get; private set; }
         public static event Action? Quitting;
         public static bool IsQuitting { get; private set; }
+
+        /// <summary>HWND of the main window, for interop that needs a window handle (e.g. the share sheet).
+        /// Returns <see cref="IntPtr.Zero"/> when the main window isn't open.</summary>
+        public static IntPtr MainWindowHandle =>
+            ((App)Current)._mainWindow is { } w
+                ? WinRT.Interop.WindowNative.GetWindowHandle(w)
+                : IntPtr.Zero;
         internal const int TaskbarInitializationMaxAttempts = 20;
         private const int TaskbarInitializationInitialDelayMilliseconds = 1500;
         private const int TaskbarInitializationRetryDelayMilliseconds = 2500;

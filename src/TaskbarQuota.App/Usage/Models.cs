@@ -196,12 +196,14 @@ namespace TaskbarQuota.Usage
     {
         public UsageSnapshot Usage { get; }
         public string SourceLabel { get; }
-        public DateTimeOffset FetchedAt { get; } = DateTimeOffset.Now;
+        public DateTimeOffset FetchedAt { get; }
 
-        public ProviderFetchResult(UsageSnapshot usage, string sourceLabel)
+        /// <param name="fetchedAt">Original fetch time; only passed when restoring a persisted snapshot.</param>
+        public ProviderFetchResult(UsageSnapshot usage, string sourceLabel, DateTimeOffset? fetchedAt = null)
         {
             Usage = usage;
             SourceLabel = sourceLabel;
+            FetchedAt = fetchedAt ?? DateTimeOffset.Now;
         }
     }
 

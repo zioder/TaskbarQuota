@@ -223,7 +223,9 @@ namespace TaskbarQuota.Taskbar
 
             summary.SetActiveToolVisible(shouldShowWidget);
 
-            if (toApply is null)
+            // Hydrating from a placeholder/failed snapshot leaves the widget showing a non-value while
+            // the flyout fetches its own data. Kick a fetch so the widget resolves on its own (#21).
+            if (toApply is null or { Ok: false })
                 _ = coordinator.TickAsync(force: true);
         }
 

@@ -39,6 +39,7 @@ namespace TaskbarQuota.Controls
         private const double RowLabelGlyphReserve = 18;
         private const double GlyphViewportSize = 100;
         private const double NormalizedGlyphExtent = 88;
+        private const double StaleOpacity = 0.55;
 
         public event Action? Clicked;
         public event Action<DisplayMode>? DisplayModeChanged;
@@ -130,6 +131,9 @@ namespace TaskbarQuota.Controls
             _lastRenderSignature = signature;
             _lastResult = result;
             ApplyTaskbarForeground();
+            // Values restored from the previous session render dimmed until a live fetch confirms them,
+            // so a boot-time snapshot never reads as current data (issue #21).
+            Panel.Opacity = RestingPanelOpacity;
 
             var widgetName = WidgetDisplayName(result.DisplayName);
             BadgeText.Text = Abbrev(widgetName);
@@ -150,6 +154,21 @@ namespace TaskbarQuota.Controls
             ApplySourceBadge(result);
 
             _forcePercentagesOnly = false;
+            if (result.IsPending && result.Fetch is null)
+            {
+                // No fetch has completed yet (first paint after boot). Show a neutral placeholder rather
+                // than the failure rendering — a full red bar with "!" reads as invalid data (issue #21).
+                _rows = new()
+                {
+                    new WidgetUsageRow(CompactLabel(result.Provider?.SessionLabel ?? "Usage"), 0, "--", HasBar: false),
+                    new WidgetUsageRow(CompactLabel(result.Provider?.WeeklyLabel ?? "Usage"), 0, "--", HasBar: false),
+                };
+                RenderRows();
+                AnimateRender(isFirstReveal, providerSwitch: providerChanged);
+                ToolTipService.SetToolTip(this, $"{widgetName}: {result.Error ?? "Loading..."}");
+                return;
+            }
+
             if (!result.Ok || result.Fetch is null)
             {
                 // Claude needs an interactive OAuth login — say so instead of a red blank bar.
@@ -211,10 +230,11 @@ namespace TaskbarQuota.Controls
             var plan = FormatPlanLabel(result.Id, widgetName, usage.LoginMethod);
             var costTooltip = WidgetCostTooltipLine(result.Id, usage.Cost);
             var resetCreditsTooltip = WidgetResetCreditsTooltipLine(usage.ResetCredits);
+            var staleTooltip = StaleTooltipLine(result);
             ToolTipService.SetToolTip(this,
                 string.IsNullOrEmpty(plan)
-                    ? $"{WidgetTooltipTitle(widgetName, result.Source)}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}"
-                    : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}");
+                    ? $"{WidgetTooltipTitle(widgetName, result.Source)}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}"
+                    : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}");
         }
 
         /// <summary>
@@ -504,7 +524,8 @@ namespace TaskbarQuota.Controls
             ToolTipService.SetToolTip(this,
                 $"{WidgetTooltipTitle(result.DisplayName, result.Source)} · {usage.LoginMethod}\n" +
                 $"Usage: {usage.Cost?.Display ?? "--"}\n" +
-                $"Balance: {(balanceText != null ? "$" + balanceText.Split(' ')[0] : "--")}");
+                $"Balance: {(balanceText != null ? "$" + balanceText.Split(' ')[0] : "--")}" +
+                StaleTooltipLine(result));
         }
 
         /// <summary>
@@ -525,7 +546,8 @@ namespace TaskbarQuota.Controls
 
             ToolTipService.SetToolTip(this,
                 $"{WidgetTooltipTitle(result.DisplayName, result.Source)} · {usage.LoginMethod}\n" +
-                $"Credit balance: {usage.Cost?.Display ?? "--"}");
+                $"Credit balance: {usage.Cost?.Display ?? "--"}" +
+                StaleTooltipLine(result));
         }
 
         private void ApplyCreditsDisplay(UsageResult result, UsageSnapshot usage, CostSnapshot credits, bool providerChanged = false)
@@ -578,6 +600,7 @@ namespace TaskbarQuota.Controls
                 tooltip += $"\nAdditional usage: {addl.StatusText} ({addl.SpendText})";
             if (usage.Primary.ResetDescription is { } resetDesc)
                 tooltip += $"\nresets in {resetDesc}";
+            tooltip += StaleTooltipLine(result);
             ToolTipService.SetToolTip(this, tooltip);
         }
 
@@ -677,12 +700,15 @@ namespace TaskbarQuota.Controls
 
             var plan = FormatPlanLabel(ProviderId.Antigravity, "Antigravity", usage.LoginMethod);
             var title = WidgetTooltipTitle("Antigravity", result.Source);
-            ToolTipService.SetToolTip(this,
-                string.IsNullOrEmpty(plan) ? $"{title}\n" : $"{title} · {plan}\n" +
+            // Header and body are built separately because `cond ? a : b + c` binds the concatenation to
+            // the false branch only — inlining these dropped the whole body whenever plan was empty.
+            var header = string.IsNullOrEmpty(plan) ? $"{title}\n" : $"{title} · {plan}\n";
+            var body =
                 $"Gemini: {WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent)}" +
                 (usage.Primary.ResetDescription is { } r1 ? $" (resets {r1})" : "") + "\n" +
                 $"Non-Gemini: {WidgetSettingsService.FormatDisplayPercent(usage.Secondary?.UsedPercent ?? 0)}" +
-                (usage.Secondary?.ResetDescription is { } r2 ? $" (resets {r2})" : ""));
+                (usage.Secondary?.ResetDescription is { } r2 ? $" (resets {r2})" : "");
+            ToolTipService.SetToolTip(this, header + body + StaleTooltipLine(result));
         }
 
         private void OnWidgetSettingsChanged(object? sender, EventArgs e)
@@ -709,11 +735,12 @@ namespace TaskbarQuota.Controls
         // soft-refresh's partial dim) so the switch feels like a transition rather than a redraw.
         private void AnimateProviderSwitch()
         {
+            double targetOpacity = RestingPanelOpacity;
             Panel.Opacity = 0;
 
             _softRefreshStoryboard?.Stop();
             _softRefreshStoryboard = new Storyboard();
-            _softRefreshStoryboard.Children.Add(CreateDoubleAnimation(Panel, "Opacity", 0, 1, 200));
+            _softRefreshStoryboard.Children.Add(CreateDoubleAnimation(Panel, "Opacity", 0, targetOpacity, 200));
             _softRefreshStoryboard.Begin();
         }
 
@@ -727,13 +754,24 @@ namespace TaskbarQuota.Controls
 
         private void AnimateSoftRefresh()
         {
-            Panel.Opacity = 0.72;
+            // Start below the resting value so the refresh still reads as a pulse, but never brighten
+            // past it — a stale snapshot must stay dimmed once the animation settles.
+            double targetOpacity = RestingPanelOpacity;
+            double startOpacity = Math.Min(0.72, targetOpacity);
+            Panel.Opacity = startOpacity;
 
             _softRefreshStoryboard?.Stop();
             _softRefreshStoryboard = new Storyboard();
-            _softRefreshStoryboard.Children.Add(CreateDoubleAnimation(Panel, "Opacity", 0.72, 1, 180));
+            _softRefreshStoryboard.Children.Add(CreateDoubleAnimation(Panel, "Opacity", startOpacity, targetOpacity, 180));
             _softRefreshStoryboard.Begin();
         }
+
+        /// <summary>
+        /// The opacity the panel must settle at for the result currently shown. A DoubleAnimation's final
+        /// To value becomes the property's resting value, so every animation that touches Panel.Opacity has
+        /// to end here or it animates away the stale-snapshot dimming applied in Apply (#21).
+        /// </summary>
+        private double RestingPanelOpacity => _lastResult?.IsStale == true ? StaleOpacity : 1.0;
 
         private void AnimateVisibility(double toOpacity, double toOffset, int milliseconds)
         {
@@ -1121,6 +1159,12 @@ namespace TaskbarQuota.Controls
         private static string Abbrev(string name)
             => string.IsNullOrEmpty(name) ? "?" : name.Substring(0, 1).ToUpperInvariant();
 
+        /// <summary>Names the age of a snapshot restored from the previous session; empty when live.</summary>
+        private static string StaleTooltipLine(UsageResult result)
+            => result.IsStale && result.Fetch is { } fetch
+                ? $"\nLast updated {fetch.FetchedAt.ToLocalTime():t} — refreshing…"
+                : string.Empty;
+
         private static string BuildRenderSignature(UsageResult result)
         {
             var parts = new List<string>
@@ -1128,6 +1172,8 @@ namespace TaskbarQuota.Controls
                 result.Id.ToString(),
                 result.DisplayName,
                 result.Error ?? string.Empty,
+                result.IsPending ? "pending" : "settled",
+                result.IsStale ? "stale" : "live",
                 result.Source.Kind.ToString(),
                 result.Source.DisplayName,
             };
