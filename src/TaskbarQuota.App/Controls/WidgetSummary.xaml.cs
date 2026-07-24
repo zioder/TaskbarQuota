@@ -524,7 +524,8 @@ namespace TaskbarQuota.Controls
             ToolTipService.SetToolTip(this,
                 $"{WidgetTooltipTitle(result.DisplayName, result.Source)} · {usage.LoginMethod}\n" +
                 $"Usage: {usage.Cost?.Display ?? "--"}\n" +
-                $"Balance: {(balanceText != null ? "$" + balanceText.Split(' ')[0] : "--")}");
+                $"Balance: {(balanceText != null ? "$" + balanceText.Split(' ')[0] : "--")}" +
+                StaleTooltipLine(result));
         }
 
         /// <summary>
@@ -545,7 +546,8 @@ namespace TaskbarQuota.Controls
 
             ToolTipService.SetToolTip(this,
                 $"{WidgetTooltipTitle(result.DisplayName, result.Source)} · {usage.LoginMethod}\n" +
-                $"Credit balance: {usage.Cost?.Display ?? "--"}");
+                $"Credit balance: {usage.Cost?.Display ?? "--"}" +
+                StaleTooltipLine(result));
         }
 
         private void ApplyCreditsDisplay(UsageResult result, UsageSnapshot usage, CostSnapshot credits, bool providerChanged = false)
@@ -598,6 +600,7 @@ namespace TaskbarQuota.Controls
                 tooltip += $"\nAdditional usage: {addl.StatusText} ({addl.SpendText})";
             if (usage.Primary.ResetDescription is { } resetDesc)
                 tooltip += $"\nresets in {resetDesc}";
+            tooltip += StaleTooltipLine(result);
             ToolTipService.SetToolTip(this, tooltip);
         }
 
@@ -697,12 +700,15 @@ namespace TaskbarQuota.Controls
 
             var plan = FormatPlanLabel(ProviderId.Antigravity, "Antigravity", usage.LoginMethod);
             var title = WidgetTooltipTitle("Antigravity", result.Source);
-            ToolTipService.SetToolTip(this,
-                string.IsNullOrEmpty(plan) ? $"{title}\n" : $"{title} · {plan}\n" +
+            // Header and body are built separately because `cond ? a : b + c` binds the concatenation to
+            // the false branch only — inlining these dropped the whole body whenever plan was empty.
+            var header = string.IsNullOrEmpty(plan) ? $"{title}\n" : $"{title} · {plan}\n";
+            var body =
                 $"Gemini: {WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent)}" +
                 (usage.Primary.ResetDescription is { } r1 ? $" (resets {r1})" : "") + "\n" +
                 $"Non-Gemini: {WidgetSettingsService.FormatDisplayPercent(usage.Secondary?.UsedPercent ?? 0)}" +
-                (usage.Secondary?.ResetDescription is { } r2 ? $" (resets {r2})" : ""));
+                (usage.Secondary?.ResetDescription is { } r2 ? $" (resets {r2})" : "");
+            ToolTipService.SetToolTip(this, header + body + StaleTooltipLine(result));
         }
 
         private void OnWidgetSettingsChanged(object? sender, EventArgs e)
