@@ -59,6 +59,14 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 
 ## Features
 
+### What's new in 1.0.19
+
+- **Widgets on every taskbar** — multi-monitor setups get a widget on each taskbar instead of only the primary one, each confined to its own monitor. (#23)
+- **Z.ai Session row fixes** — the Session row is shown again and honors the MCP toggle, and the Session subtitle is hidden while the 5-hour window has not started yet. (#24, #26)
+- **Steadier widget drag** — dragging no longer jumps between lanes mid-drag; the gap the widget was dropped into is tracked so background repositions keep it there. (#27)
+- **Usage restored on boot** — the last usage snapshot is rendered at startup instead of a failure state while the first fetch is still running, with a stale suffix on the tooltips. (#27)
+- **Widget lifetime fixes** — fixed a window-class wedge and a per-widget handle leak when widgets are recreated. (#27)
+
 ### What's new in 1.0.18
 
 - **Z.ai support** — TaskbarQuota now reads the Z.ai Coding Plan quota (5-hour prompt pool as **Session**, 7-day **Weekly**, plus a monthly **MCP** tool-call meter shown by default and hideable per row) from the ZCode config at `%USERPROFILE%\.zcode\v2\config.json`.
