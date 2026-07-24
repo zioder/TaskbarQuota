@@ -139,7 +139,16 @@ namespace TaskbarQuota.Cost.Scanners
             }
         }
 
+        // TryGetInt64 rather than GetInt64: a Number that is fractional, NaN/Infinity, or wider than Int64
+        // makes GetInt64 throw, and that exception is not a JsonException, so it would escape the parse
+        // guard above and abort the whole scan instead of skipping one malformed row. Negative counts are
+        // treated the same way — they cannot be a real token count.
         private static long GetLong(JsonElement obj, string name) =>
-            obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt64() : 0;
+            obj.TryGetProperty(name, out var v)
+            && v.ValueKind == JsonValueKind.Number
+            && v.TryGetInt64(out long value)
+            && value >= 0
+                ? value
+                : 0;
     }
 }

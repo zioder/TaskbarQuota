@@ -722,6 +722,13 @@ namespace TaskbarQuota.Taskbar
 
                 await RefreshObstacleCacheAsync(taskbarScreenRect);
 
+                // A newer drag or press may have started while this settle was suspended on the UIA read
+                // above, and the widget may have been torn down. Either way this result is stale: letting
+                // it run would move the window, clear the new drag's dragPreviewX/activeDragGap, and
+                // persist a position the user has already dragged away from.
+                if (disposedValue || appWindow is null || !IsAlive || isDragging || isPointerTracking)
+                    return;
+
                 var obstacles = CollectObstacleClientRects(taskbarScreenRect, lastWidgetsButtonClientRect, lastTaskButtonClientRects);
                 var (leftBound, rightBound) = ComputeUsableHorizontalBounds(
                     taskbarRect,
@@ -775,7 +782,24 @@ namespace TaskbarQuota.Taskbar
         {
             activeDragGap = null;
             User32.GetWindowRect(hwndShell, out RECT taskbarScreenRect);
-            _ = RefreshObstacleCacheAsync(taskbarScreenRect);
+            _ = PrimeObstacleCacheAsync(taskbarScreenRect);
+        }
+
+        /// <summary>
+        /// Fire-and-forget wrapper for the drag-start cache prime. A UIA read can fail while Explorer is
+        /// rebuilding; without this the discarded task would surface an unobserved exception instead of a
+        /// warning, and the drag simply falls back to the previously cached obstacle bounds.
+        /// </summary>
+        private async Task PrimeObstacleCacheAsync(RECT taskbarScreenRect)
+        {
+            try
+            {
+                await RefreshObstacleCacheAsync(taskbarScreenRect);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to prime the taskbar obstacle cache for a drag");
+            }
         }
 
 

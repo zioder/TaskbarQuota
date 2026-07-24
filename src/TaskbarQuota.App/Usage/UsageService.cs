@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Usage.Providers;
 
 namespace TaskbarQuota.Usage
@@ -19,6 +20,14 @@ namespace TaskbarQuota.Usage
         private readonly Dictionary<ProviderId, UsageResult> _lastSuccessfulLiveResults = new();
         private readonly object _lock = new();
         private readonly string? _snapshotDirectory;
+
+        // How long a persisted snapshot may keep its original timestamp while the usage values are
+        // unchanged. Well inside UsageSnapshotStore.MaxRestoreAge, so a still-live entry can never age out
+        // on disk, while unchanged polls still avoid a write on almost every tick.
+        private static readonly TimeSpan SnapshotRefreshInterval = TimeSpan.FromHours(1);
+
+        // Serializes snapshot writes; see QueueSnapshotSave.
+        private static readonly SemaphoreSlim SnapshotWriteGate = new(1, 1);
 
         /// <param name="snapshotDirectory">
         /// Where the last-good snapshots are persisted so the widget can render real numbers at boot
@@ -155,17 +164,52 @@ namespace TaskbarQuota.Usage
                     return;
                 }
 
-                // Unchanged usage re-stores the same instance every poll; skip the disk write for those.
-                if (_lastSuccessfulLiveResults.TryGetValue(id, out var existing) && ReferenceEquals(existing, result))
+                // Unchanged usage re-stores an equivalent value every poll, so skip the disk write for
+                // those — but re-persist periodically anyway, because each write refreshes the SavedAt
+                // stamp that UsageSnapshotStore expiry reads. Skipping forever would let a continuously
+                // confirmed entry age past MaxRestoreAge and be discarded on the next boot. The older
+                // instance stays as the comparison baseline: its age is what triggers the next rewrite.
+                if (_lastSuccessfulLiveResults.TryGetValue(id, out var existing)
+                    && SameUsage(existing, result)
+                    && existing.Fetch is { } existingFetch
+                    && DateTimeOffset.Now - existingFetch.FetchedAt < SnapshotRefreshInterval)
+                {
                     return;
+                }
 
                 _lastSuccessfulLiveResults[id] = result;
                 toPersist = new Dictionary<ProviderId, UsageResult>(_lastSuccessfulLiveResults);
             }
 
-            // Off the fetch path: persistence is best-effort and must never delay a usage update.
-            _ = Task.Run(() => UsageSnapshotStore.Save(_snapshotDirectory, toPersist));
+            // Off the fetch path: persistence is best-effort and must never delay a usage update. Writes
+            // are serialized because Save stages through a single shared temp path — two providers
+            // persisting concurrently would otherwise interleave the write/move and could leave a
+            // truncated file or let an older snapshot land on top of a newer one.
+            QueueSnapshotSave(_snapshotDirectory, toPersist);
         }
+
+        /// <summary>
+        /// Persists a snapshot set on a background thread, one write at a time. Callers hand off and
+        /// return immediately; failures are logged rather than surfaced, since losing a snapshot only
+        /// costs the next boot its restored values.
+        /// </summary>
+        private static void QueueSnapshotSave(string directory, IReadOnlyDictionary<ProviderId, UsageResult> toPersist)
+            => _ = Task.Run(async () =>
+            {
+                await SnapshotWriteGate.WaitAsync().ConfigureAwait(false);
+                try
+                {
+                    UsageSnapshotStore.Save(directory, toPersist);
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, "Failed to persist the usage snapshot");
+                }
+                finally
+                {
+                    SnapshotWriteGate.Release();
+                }
+            });
 
         public bool TryGetLastSuccessfulLiveResult(ProviderId id, out UsageResult result)
         {
@@ -373,7 +417,12 @@ namespace TaskbarQuota.Usage
         /// <summary>Marks a snapshot as restored-from-disk (see <see cref="IsStale"/>).</summary>
         public UsageResult AsStale() => WithStale(true);
 
-        /// <summary>Clears the stale mark once a live fetch has confirmed the values.</summary>
+        /// <summary>
+        /// Clears the stale mark once a live fetch has confirmed the values. FetchedAt is deliberately
+        /// left alone: it means "when these values last changed", which is what the widget's
+        /// "Last updated" line reports. Snapshot expiry tracks confirmation separately, via the SavedAt
+        /// stamp UsageSnapshotStore writes on each persist.
+        /// </summary>
         public UsageResult AsFresh() => IsStale ? WithStale(false) : this;
 
         private UsageResult WithStale(bool isStale)

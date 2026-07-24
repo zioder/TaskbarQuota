@@ -31,7 +31,10 @@ namespace TaskbarQuota.Cost
                 if (m.Contains("opus")) return "claude-opus-4-8";
                 if (m.Contains("haiku")) return "claude-haiku-4-5";
                 if (m.Contains("sonnet")) return "claude-sonnet-5";
-                return "claude-sonnet-5"; // unknown Claude tier → sonnet (mid) rather than unpriced
+                // An unrecognised tier (a model released after this build) must stay unpriced. Guessing a
+                // mid rate here would silently bill e.g. an Opus-class id at Sonnet rates and quietly
+                // falsify the headline figure, which is exactly what this resolver promises not to do.
+                return null;
             }
 
             // OpenAI / Codex — gpt-5.5, gpt-5.3-codex, gpt-5.4-mini, …

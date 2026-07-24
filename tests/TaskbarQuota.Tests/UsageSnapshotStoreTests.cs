@@ -64,15 +64,29 @@ public class UsageSnapshotStoreTests : IDisposable
     }
 
     [Fact]
-    public void Load_DropsSnapshotOlderThanMaxRestoreAge()
+    public void Load_DropsSnapshotNotConfirmedWithinMaxRestoreAge()
     {
-        var stale = DateTimeOffset.Now - UsageSnapshotStore.MaxRestoreAge - TimeSpan.FromMinutes(5);
         UsageSnapshotStore.Save(_dir, new Dictionary<ProviderId, UsageResult>
         {
-            [ProviderId.Cursor] = Result(ProviderId.Cursor, 10, 20, resetAt: null, fetchedAt: stale),
+            [ProviderId.Cursor] = Result(ProviderId.Cursor, 10, 20, resetAt: null),
         });
+        AgeSavedAt(DateTimeOffset.Now - UsageSnapshotStore.MaxRestoreAge - TimeSpan.FromMinutes(5));
 
         Assert.Empty(UsageSnapshotStore.Load(_dir, id => Provider(id)));
+    }
+
+    /// <summary>
+    /// Rewrites the persisted SavedAt stamp. Save always stamps "now" by design, so a genuinely old file
+    /// can only be simulated by editing what is on disk.
+    /// </summary>
+    private void AgeSavedAt(DateTimeOffset savedAt)
+    {
+        var path = Path.Combine(_dir, "usage-snapshots.json");
+        var json = File.ReadAllText(path);
+        var node = System.Text.Json.Nodes.JsonNode.Parse(json)!;
+        foreach (var entry in node["Entries"]!.AsArray())
+            entry!["SavedAt"] = savedAt;
+        File.WriteAllText(path, node.ToJsonString());
     }
 
     [Fact]
@@ -82,7 +96,26 @@ public class UsageSnapshotStoreTests : IDisposable
 
         Assert.True(restored.IsStale);
         Assert.False(restored.AsFresh().IsStale);
+        // FetchedAt means "when the values last changed", so confirming them must not restamp it —
+        // the widget's "Last updated" line reads from here.
         Assert.Same(restored.Fetch, restored.AsFresh().Fetch);
+    }
+
+    [Fact]
+    public void Load_KeepsAnEntryConfirmedRecentlyEvenWhenItsValuesAreOld()
+    {
+        // Usage that has not moved in days keeps its original FetchedAt, but the previous session
+        // re-confirmed it live just before shutdown. Expiry must follow the confirmation, not the value.
+        var valueChangedAt = DateTimeOffset.Now - UsageSnapshotStore.MaxRestoreAge - TimeSpan.FromHours(6);
+        UsageSnapshotStore.Save(_dir, new Dictionary<ProviderId, UsageResult>
+        {
+            [ProviderId.Codex] = Result(ProviderId.Codex, 10, 20, resetAt: DateTimeOffset.Now.AddHours(3), fetchedAt: valueChangedAt),
+        });
+
+        var restored = UsageSnapshotStore.Load(_dir, id => Provider(id));
+
+        Assert.True(restored.ContainsKey(ProviderId.Codex));
+        Assert.Equal(valueChangedAt, restored[ProviderId.Codex].Fetch!.FetchedAt);
     }
 
     [Fact]

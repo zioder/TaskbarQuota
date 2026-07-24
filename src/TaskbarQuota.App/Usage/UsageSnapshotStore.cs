@@ -54,7 +54,12 @@ namespace TaskbarQuota.Usage
                         continue;
                     if (providerLookup(id) is not { } provider)
                         continue;
-                    if (now - entry.FetchedAt > MaxRestoreAge)
+                    // Age off what was last CONFIRMED long ago, not what last CHANGED long ago. A usage
+                    // value that simply hasn't moved keeps its original FetchedAt indefinitely, so testing
+                    // that here would discard an entry the previous session re-confirmed live moments
+                    // before shutdown. SavedAt is absent on files written before this stamp existed, so
+                    // fall back to FetchedAt for those.
+                    if (now - (entry.SavedAt ?? entry.FetchedAt) > MaxRestoreAge)
                         continue;
                     if (entry.Usage is not { } usage)
                         continue;
@@ -77,12 +82,14 @@ namespace TaskbarQuota.Usage
         {
             try
             {
+                var savedAt = DateTimeOffset.Now;
                 var entries = results
                     .Where(kv => kv.Value.Fetch is not null)
                     .Select(kv => new StoredEntry
                     {
                         Provider = kv.Key.ToString(),
                         FetchedAt = kv.Value.Fetch!.FetchedAt,
+                        SavedAt = savedAt,
                         SourceLabel = kv.Value.Fetch!.SourceLabel,
                         Usage = FromSnapshot(kv.Value.Fetch!.Usage),
                     })
@@ -220,6 +227,12 @@ namespace TaskbarQuota.Usage
         {
             public string? Provider { get; set; }
             public DateTimeOffset FetchedAt { get; set; }
+
+            /// <summary>
+            /// When this entry was last written to disk, i.e. last confirmed live. Null on files written
+            /// before this field existed. Drives restore expiry; FetchedAt drives the "Last updated" line.
+            /// </summary>
+            public DateTimeOffset? SavedAt { get; set; }
             public string? SourceLabel { get; set; }
             public StoredUsage? Usage { get; set; }
         }

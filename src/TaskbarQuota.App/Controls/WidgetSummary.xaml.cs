@@ -133,7 +133,7 @@ namespace TaskbarQuota.Controls
             ApplyTaskbarForeground();
             // Values restored from the previous session render dimmed until a live fetch confirms them,
             // so a boot-time snapshot never reads as current data (issue #21).
-            Panel.Opacity = result.IsStale ? StaleOpacity : 1.0;
+            Panel.Opacity = RestingPanelOpacity;
 
             var widgetName = WidgetDisplayName(result.DisplayName);
             BadgeText.Text = Abbrev(widgetName);
@@ -729,11 +729,12 @@ namespace TaskbarQuota.Controls
         // soft-refresh's partial dim) so the switch feels like a transition rather than a redraw.
         private void AnimateProviderSwitch()
         {
+            double targetOpacity = RestingPanelOpacity;
             Panel.Opacity = 0;
 
             _softRefreshStoryboard?.Stop();
             _softRefreshStoryboard = new Storyboard();
-            _softRefreshStoryboard.Children.Add(CreateDoubleAnimation(Panel, "Opacity", 0, 1, 200));
+            _softRefreshStoryboard.Children.Add(CreateDoubleAnimation(Panel, "Opacity", 0, targetOpacity, 200));
             _softRefreshStoryboard.Begin();
         }
 
@@ -747,13 +748,24 @@ namespace TaskbarQuota.Controls
 
         private void AnimateSoftRefresh()
         {
-            Panel.Opacity = 0.72;
+            // Start below the resting value so the refresh still reads as a pulse, but never brighten
+            // past it — a stale snapshot must stay dimmed once the animation settles.
+            double targetOpacity = RestingPanelOpacity;
+            double startOpacity = Math.Min(0.72, targetOpacity);
+            Panel.Opacity = startOpacity;
 
             _softRefreshStoryboard?.Stop();
             _softRefreshStoryboard = new Storyboard();
-            _softRefreshStoryboard.Children.Add(CreateDoubleAnimation(Panel, "Opacity", 0.72, 1, 180));
+            _softRefreshStoryboard.Children.Add(CreateDoubleAnimation(Panel, "Opacity", startOpacity, targetOpacity, 180));
             _softRefreshStoryboard.Begin();
         }
+
+        /// <summary>
+        /// The opacity the panel must settle at for the result currently shown. A DoubleAnimation's final
+        /// To value becomes the property's resting value, so every animation that touches Panel.Opacity has
+        /// to end here or it animates away the stale-snapshot dimming applied in Apply (#21).
+        /// </summary>
+        private double RestingPanelOpacity => _lastResult?.IsStale == true ? StaleOpacity : 1.0;
 
         private void AnimateVisibility(double toOpacity, double toOffset, int milliseconds)
         {
