@@ -446,10 +446,8 @@ namespace TaskbarQuota.Taskbar
                     targetAppWindow.MoveAndResize(new RectInt32(offsetX, offsetY, WidgetHostWidth, barRect.bottom - barRect.top));
                     currentOffsetX = offsetX; currentOffsetY = offsetY;
                 }
-                else if (Math.Abs(currentOffsetX - offsetX) >= RepositionDeadbandPx)
+                else if (ShouldReposition(currentOffsetX, offsetX, RepositionDeadbandPx))
                 {
-                    // Deadband: ignore sub-threshold recompute deltas (rounding / transient tray width changes)
-                    // so the widget doesn't visibly twitch on routine taskbar events.
                     targetAppWindow.Move(new PointInt32(offsetX, offsetY));
                     currentOffsetX = offsetX;
                 }
@@ -468,6 +466,16 @@ namespace TaskbarQuota.Taskbar
                     positionUpdateGate.Release();
             }
         }
+
+        /// <summary>Deadband: ignore sub-threshold recompute deltas (rounding / transient tray width
+        /// changes) so the widget doesn't visibly twitch on routine taskbar events.</summary>
+        /// <remarks><paramref name="currentOffsetX"/> is <see cref="int.MinValue"/> until the widget
+        /// has been placed once, which must always reposition. Subtracting from that sentinel
+        /// overflows: when <paramref name="offsetX"/> is 0 the difference is exactly
+        /// <see cref="int.MinValue"/>, and <c>Math.Abs</c> of that throws. Widen to long.</remarks>
+        internal static bool ShouldReposition(int currentOffsetX, int offsetX, int deadbandPx)
+            => currentOffsetX == int.MinValue
+            || Math.Abs((long)currentOffsetX - offsetX) >= deadbandPx;
 
         public void StartDragging()
         {
