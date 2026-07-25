@@ -12,6 +12,8 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Custom Program.Main enforces a single instance; see Program.cs -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
 
     <!-- Unpackaged, self-contained so it runs without prerequisites and can inject into the taskbar -->
     <WindowsPackageType>None</WindowsPackageType>

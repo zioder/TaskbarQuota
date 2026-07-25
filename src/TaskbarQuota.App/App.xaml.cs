@@ -98,6 +98,29 @@ namespace TaskbarQuota
             }
         }
 
+        /// <summary>Handles an activation that a second process redirected to this instance
+        /// (Start menu, Microsoft Store "Open", another double-click). Surfaces the existing
+        /// window instead of letting a duplicate widget appear.</summary>
+        internal static void HandleRedirectedActivation(string? activationArguments)
+        {
+            if (!ShouldSurfaceWindowOnActivation(activationArguments))
+                return;
+
+            var dispatcher = Dispatcher;
+            if (dispatcher is null)
+            {
+                Log.Warning("Redirected activation arrived before the dispatcher was ready");
+                return;
+            }
+
+            dispatcher.TryEnqueue(() => ((App)Current).ShowMainWindow());
+        }
+
+        /// <summary>A redirected startup-widget launch must stay in the tray, matching the
+        /// behaviour of a cold start with the same argument.</summary>
+        internal static bool ShouldSurfaceWindowOnActivation(string? activationArguments)
+            => !IsWidgetStartup(activationArguments);
+
         private void ScheduleTaskbarInitialization()
         {
             _taskbarInitializationTimer?.Dispose();
