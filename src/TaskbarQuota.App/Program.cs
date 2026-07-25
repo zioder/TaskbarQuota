@@ -53,8 +53,9 @@ namespace TaskbarQuota
                     return false;
                 }
 
-                RedirectActivationTo(activationArguments, keyInstance);
-                return true;
+                // A failed redirect means the activation went nowhere. Launching normally costs a
+                // duplicate widget, but exiting here would make the click do nothing at all.
+                return TryRedirectActivationTo(activationArguments, keyInstance);
             }
             catch (Exception ex)
             {
@@ -82,29 +83,69 @@ namespace TaskbarQuota
                 ? launch.Arguments
                 : null;
 
-        private static void RedirectActivationTo(AppActivationArguments args, AppInstance keyInstance)
+        /// <summary>Hands this process's activation to <paramref name="keyInstance"/>.
+        /// Returns false when the activation was not delivered, so the caller can fall back to
+        /// launching normally rather than exiting and losing it.</summary>
+        private static bool TryRedirectActivationTo(AppActivationArguments args, AppInstance keyInstance)
         {
-            // The redirect must complete while this thread pumps COM messages, otherwise the
-            // cross-process call deadlocks. CoWaitForMultipleObjects keeps the STA pumping.
             var redirectCompleted = CreateEvent(IntPtr.Zero, true, false, null);
-            _ = Task.Run(async () =>
+            if (redirectCompleted == IntPtr.Zero)
             {
-                try
-                {
-                    await keyInstance.RedirectActivationToAsync(args);
-                }
-                finally
-                {
-                    SetEvent(redirectCompleted);
-                }
-            });
+                Log.Warning($"CreateEvent failed while redirecting activation (win32 error {Marshal.GetLastWin32Error()})");
+                return false;
+            }
 
-            _ = CoWaitForMultipleObjects(CWMO_DEFAULT, INFINITE, 1, [redirectCompleted], out _);
-            CloseHandle(redirectCompleted);
+            try
+            {
+                // Read after the wait, which the SetEvent below happens-before. Reading the task's
+                // own state would race: the event is signalled before the task is marked completed.
+                Exception? redirectFailure = null;
+
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await keyInstance.RedirectActivationToAsync(args);
+                    }
+                    catch (Exception ex)
+                    {
+                        redirectFailure = ex;
+                    }
+                    finally
+                    {
+                        SetEvent(redirectCompleted);
+                    }
+                });
+
+                // The redirect must complete while this thread pumps COM messages, otherwise the
+                // cross-process call deadlocks. CoWaitForMultipleObjects keeps the STA pumping.
+                // Bounded, so a wedged key instance can't hang this process indefinitely.
+                var waitResult = CoWaitForMultipleObjects(
+                    CWMO_DEFAULT, RedirectTimeoutMilliseconds, 1, [redirectCompleted], out _);
+
+                if (waitResult != WAIT_OBJECT_0)
+                {
+                    Log.Warning($"Activation redirect did not complete within {RedirectTimeoutMilliseconds}ms (result 0x{waitResult:X8})");
+                    return false;
+                }
+
+                if (redirectFailure is not null)
+                {
+                    Log.Warning(redirectFailure, "Activation redirect to the running instance failed");
+                    return false;
+                }
+
+                return true;
+            }
+            finally
+            {
+                CloseHandle(redirectCompleted);
+            }
         }
 
         private const uint CWMO_DEFAULT = 0;
-        private const uint INFINITE = 0xFFFFFFFF;
+        private const uint WAIT_OBJECT_0 = 0;
+        private const uint RedirectTimeoutMilliseconds = 10_000;
 
         [DllImport("ole32.dll")]
         private static extern uint CoWaitForMultipleObjects(
