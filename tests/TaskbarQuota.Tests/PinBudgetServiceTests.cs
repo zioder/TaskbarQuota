@@ -164,7 +164,7 @@ public class PinBudgetServiceTests
     [InlineData(1326, new[] { LongTile, LongTile }, true)]
     [InlineData(1326, new[] { LongTile, LongTile, ShortTile }, true)]
     public void WidthIsTheBindingConstraintNotTheSlotBudget(int available, int[] tiles, bool expected)
-        => Assert.Equal(expected, PinBudgetService.RowWidth(tiles) + 6 <= available);
+        => Assert.Equal(expected, PinBudgetService.RowWidth(tiles) <= available);
 
     private static List<(ProviderId, int)> Pinned(params (ProviderId, int)[] entries) => [.. entries];
 }

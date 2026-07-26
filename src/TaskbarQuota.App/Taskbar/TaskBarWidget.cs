@@ -461,8 +461,6 @@ namespace TaskbarQuota.Taskbar
             isRecomputingLayout = true;
             try
             {
-                int iconWidth = WidgetSummary.IconOnlyWidth(WidgetSettingsService.Current);
-
                 Array.Clear(tileSuppressed);
                 var slots = new List<int>(tiles.Length);
                 for (int i = 0; i < tiles.Length; i++)
@@ -689,8 +687,7 @@ namespace TaskbarQuota.Taskbar
         /// <param name="rowCounts">Rows each tile wants to show, left to right.</param>
         /// <param name="activeIndex">Position of the active tool's tile, or -1 when none is active.</param>
         /// <param name="measure">
-        /// (position, level) =&gt; rendered width, where level is a positive row count,
-        /// <see cref="WidgetSummary.LevelCompact"/>, or <see cref="WidgetSummary.LevelGlyph"/>.
+        /// (position, form) => rendered width for that tile in the given form.
         /// </param>
         /// <returns>The chosen detail level per tile.</returns>
         internal static WidgetSummary.SummaryForm[] SolveTileLayout(

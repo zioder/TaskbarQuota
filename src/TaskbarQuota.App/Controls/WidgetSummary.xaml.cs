@@ -95,14 +95,13 @@ namespace TaskbarQuota.Controls
             };
 
         /// <summary>
-        /// How much of this tile renders on the taskbar. Pinned tiles that aren't the active tool are
-        /// capped to their leading rows so a row toggle can never grow them enough to evict a neighbour,
-        /// and a tile with nowhere left to shrink falls back to its provider glyph rather than vanishing —
-        /// a pin is a promise that the provider stays on the bar (issue #25). The tooltip always carries
-        /// the full set of rows, whatever is rendered.
+        /// How much of this tile renders on the taskbar. In normal use every pinned provider renders in
+        /// full — the reduced forms exist for callers that need a smaller tile, but the taskbar host does
+        /// not select them: keeping the row inside the bar is the pin budget's job, and trimming a pinned
+        /// provider the user configured is worse than refusing the pin (issue #25).
         /// </summary>
-        /// <param name="level">
-        /// <see cref="LevelGlyph"/> for the bare provider glyph, <see cref="LevelCompact"/> for the glyph
+        /// <param name="form">
+        /// <see cref="SummaryForm.Glyph"/> for the bare provider glyph, <see cref="SummaryForm.Compact"/> for the glyph
         /// plus its headline figure, or a positive row ceiling.
         /// </param>
         public void SetSummaryMode(SummaryForm form)
@@ -136,7 +135,9 @@ namespace TaskbarQuota.Controls
         /// </summary>
         private void SetSummaryTooltip(string text)
         {
-            if (_isIconOnly || _isCompact)
+            if (_isIconOnly)
+                text += "\nIcon only — not enough room on the taskbar.";
+            else if (_isCompact)
                 text += "\nCompact — not enough room on the taskbar.";
             else if (_rows.Count > _maxVisibleRows)
                 text += $"\n+{_rows.Count - _maxVisibleRows} more row(s) — shown when this tool is active.";
@@ -171,6 +172,9 @@ namespace TaskbarQuota.Controls
         private static int IconWidthFor(WidgetDisplayMode mode)
             => mode == WidgetDisplayMode.PercentagesOnly ? IconHostSizePercentagesOnly : IconHostSizeBars;
 
+        /// <summary>Rows this tile currently has to show, before any host-imposed ceiling.</summary>
+        public int RowCount => Math.Max(1, _rows.Count);
+
         /// <summary>
         /// The width this tile WOULD take at a given row ceiling, without rendering it.
         ///
@@ -179,9 +183,6 @@ namespace TaskbarQuota.Controls
         /// refresh animation, and the host re-runs this on every usage publish. The column widths are a
         /// pure function of the rows and the display mode, so they are computed directly instead.
         /// </summary>
-        /// <summary>Rows this tile currently has to show, before any host-imposed ceiling.</summary>
-        public int RowCount => Math.Max(1, _rows.Count);
-
         public int MeasureDesiredWidth(SummaryForm form)
         {
             var mode = _forcePercentagesOnly ? WidgetDisplayMode.PercentagesOnly : WidgetSettingsService.Current;

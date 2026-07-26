@@ -38,10 +38,12 @@ public static class PinBudgetService
     private const int TileBaseLogicalPx = 45;
     private const int TileGroupLogicalPx = 180;
     private const int RowsPerGroup = 2;
-    // Small slack so a tile is never admitted flush against a shell element. Modest because the widths are
-    // the widget's own measurements, not a model — an estimate is only used for a provider that has never
-    // been rendered.
-    private const int FitSafetyMarginLogicalPx = 6;
+    // Slack for a set containing a provider that has never been rendered, whose width can only be modelled.
+    private const int EstimatedFitMarginLogicalPx = 12;
+    // No slack once every width is the widget's own measurement. A margin here refuses layouts that
+    // provably fit — the widget was rendering three tiles at 702px of a 706px span while the pin for the
+    // third was being rejected at 702 + 6 > 706. There is no model error left to absorb.
+    private const int MeasuredFitMarginLogicalPx = 0;
 
     /// <summary>What one provider costs, from the number of rows its tile would render.</summary>
     public static int SlotCost(ProviderId provider)
@@ -85,15 +87,21 @@ public static class PinBudgetService
     /// courtesy tile rather than overflowing.
     /// </remarks>
     internal static bool FitsTaskbar(IReadOnlyList<int> rowCounts, int availableWidth)
-        => FitsWidth(rowCounts.Select(EstimateTileWidth).ToList(), availableWidth);
+        => FitsWidth(rowCounts.Select(EstimateTileWidth).ToList(), availableWidth, EstimatedFitMarginLogicalPx);
 
-    private static bool FitsWidth(IReadOnlyList<int> tileWidths, int availableWidth)
+    private static bool FitsWidth(IReadOnlyList<int> tileWidths, int availableWidth, int margin)
         => availableWidth <= Taskbar.TaskbarSpace.UnknownWidth
-        || RowWidth(tileWidths) + FitSafetyMarginLogicalPx <= availableWidth;
+        || RowWidth(tileWidths) + margin <= availableWidth;
 
     /// <summary>Whether these providers' tiles fit, using each one's measured width where known.</summary>
     private static bool FitsTaskbar(IReadOnlyList<ProviderId> providers, int availableWidth)
-        => FitsWidth(providers.Select(TileWidth).ToList(), availableWidth);
+    {
+        bool allMeasured = providers.All(p => Taskbar.TaskbarSpace.TryGetTileWidth(p, out _));
+        return FitsWidth(
+            providers.Select(TileWidth).ToList(),
+            availableWidth,
+            allMeasured ? MeasuredFitMarginLogicalPx : EstimatedFitMarginLogicalPx);
+    }
 
     public static bool IsLong(ProviderId provider) => SlotCost(provider) == LongSlots;
 
@@ -122,9 +130,9 @@ public static class PinBudgetService
         var pinned = PinnedProviders();
         string name = ProviderName(provider);
 
-        if (pinned.Count >= UsageCoordinator.MaxWidgetTiles)
+if (pinned.Count >= UsageCoordinator.MaxWidgetTiles)
         {
-            reason = $"The taskbar shows at most {UsageCoordinator.MaxWidgetTiles} pinned providers, and you already "
+            reason = $"The taskbar can show at most {UsageCoordinator.MaxWidgetTiles} providers at once, and you already "
                 + $"have {string.Join(", ", pinned.Select(ProviderName))} pinned. Unpin one of those to make room for {name}.";
             return false;
         }
@@ -145,6 +153,13 @@ public static class PinBudgetService
         var candidate = pinned.Append(provider).ToList();
         if (!FitsTaskbar(candidate, Taskbar.TaskbarSpace.AvailableLogicalWidth))
         {
+            // A refusal the user did not expect is impossible to diagnose from the message alone, since it
+            // turns on measurements they cannot see. Record what the decision was actually made from.
+            Diagnostics.Log.Debug(
+                $"[pin] refused {provider}: tiles=[{string.Join(", ", candidate.Select(p => $"{p}:{TileWidth(p)}{(Taskbar.TaskbarSpace.TryGetTileWidth(p, out _) ? "" : "~")}"))}] "
+                + $"row={RowWidth(candidate.Select(TileWidth).ToList())} "
+                + $"available={Taskbar.TaskbarSpace.AvailableLogicalWidth}");
+
             reason = $"There isn't room on the taskbar for {name} ({Describe(provider)}) next to "
                 + $"{string.Join(" and ", pinned.Select(p => $"{ProviderName(p)} ({Describe(p)})"))}. "
                 + $"Turn off some rows for {name} or for a pinned provider, unpin one, or set the Windows "
