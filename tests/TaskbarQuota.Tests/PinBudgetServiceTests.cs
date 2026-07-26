@@ -140,5 +140,31 @@ public class PinBudgetServiceTests
     public void FallsBackToTheWeightBudgetBeforeAnythingIsMeasured()
         => Assert.True(PinBudgetService.FitsTaskbar(new List<int> { 2, 3, 3 }, availableWidth: 0));
 
+    // Measured tile widths: a two-row provider renders around 223px, a three-row one around 405px.
+    private const int ShortTile = 223;
+    private const int LongTile = 405;
+
+    /// <summary>
+    /// What each combination actually costs, so the weight rule is never mistaken for the real limit. The
+    /// slot budget allows two long providers plus a short one; the taskbar it has to fit does not, unless
+    /// the bar is unusually wide. Width is the binding constraint and these are the numbers.
+    /// </summary>
+    [Theory]
+    // A centre-aligned Windows taskbar leaves roughly 684-750px between the icon cluster and the tray.
+    [InlineData(728, new[] { ShortTile, ShortTile }, true)]
+    [InlineData(728, new[] { ShortTile, ShortTile, ShortTile }, true)]
+    [InlineData(728, new[] { LongTile, ShortTile }, true)]
+    [InlineData(728, new[] { LongTile, ShortTile, ShortTile }, false)]
+    [InlineData(728, new[] { LongTile, LongTile }, false)]
+    [InlineData(728, new[] { LongTile, LongTile, ShortTile }, false)]
+    // A narrower span drops the three-short case too.
+    [InlineData(684, new[] { ShortTile, ShortTile, ShortTile }, false)]
+    [InlineData(684, new[] { LongTile, ShortTile }, true)]
+    // Left-aligning the taskbar frees roughly 1326px, where the wide combinations do fit.
+    [InlineData(1326, new[] { LongTile, LongTile }, true)]
+    [InlineData(1326, new[] { LongTile, LongTile, ShortTile }, true)]
+    public void WidthIsTheBindingConstraintNotTheSlotBudget(int available, int[] tiles, bool expected)
+        => Assert.Equal(expected, PinBudgetService.RowWidth(tiles) + 6 <= available);
+
     private static List<(ProviderId, int)> Pinned(params (ProviderId, int)[] entries) => [.. entries];
 }
