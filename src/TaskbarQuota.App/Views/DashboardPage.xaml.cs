@@ -353,7 +353,43 @@ namespace TaskbarQuota.Views
                 return;
 
             WidgetSettingsService.SetProviderVisible(card.ProviderId, toggle.IsChecked == true);
+            card.IsProviderWidgetVisible = WidgetSettingsService.IsProviderVisible(card.ProviderId);
+            // Hiding a provider from the widget also drops its pin, so keep the pin button in step.
+            card.IsProviderPinned = WidgetSettingsService.IsProviderPinned(card.ProviderId);
+            ProviderPinToggle.IsChecked = card.IsProviderPinned;
+            ProviderPinToggle.IsEnabled = card.IsProviderPinToggleEnabled;
         }
+
+        private void ProviderPinToggle_Click(object sender, RoutedEventArgs e)
+        {
+            if (_suppressWidgetEvents)
+                return;
+            if (sender is not ToggleButton toggle || toggle.Tag is not ProviderCardViewModel card)
+                return;
+
+            bool wantPinned = toggle.IsChecked == true;
+            if (wantPinned && !Services.PinBudgetService.CanPin(card.ProviderId, out var reason))
+            {
+                // Over budget: refuse rather than silently unpinning something the user still wants, and
+                // show why plus what to change — a toggle that springs back with no explanation reads as
+                // a broken button.
+                toggle.IsChecked = false;
+                PinBlockedTip.Target = toggle;
+                PinBlockedTip.Subtitle = reason;
+                PinBlockedTip.IsOpen = true;
+                return;
+            }
+
+            PinBlockedTip.IsOpen = false;
+
+            WidgetSettingsService.SetProviderPinned(card.ProviderId, wantPinned);
+            card.IsProviderPinned = WidgetSettingsService.IsProviderPinned(card.ProviderId);
+            card.IsProviderWidgetVisible = WidgetSettingsService.IsProviderVisible(card.ProviderId);
+            ToolTipService.SetToolTip(toggle, DefaultPinTooltip);
+        }
+
+        private const string DefaultPinTooltip =
+            "Keep this provider on the taskbar even when another tool is active";
 
         private void OpenSetupUrl_Click(object sender, RoutedEventArgs e)
         {

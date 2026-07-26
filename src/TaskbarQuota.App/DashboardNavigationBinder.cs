@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Specialized;
+using System.Linq;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -32,6 +33,7 @@ namespace TaskbarQuota
             };
             _viewModel.Cards.CollectionChanged += Cards_CollectionChanged;
             _viewModel.SelectedCardChanged += ViewModel_SelectedCardChanged;
+            WidgetSettingsService.Changed += OnWidgetSettingsChanged;
             Rebuild();
         }
 
@@ -58,6 +60,10 @@ namespace TaskbarQuota
             _viewModel.SelectProvider(id);
             return true;
         }
+
+        // Pins can change from the dashboard card, from Settings, or from the budget auto-unpinning one.
+        private void OnWidgetSettingsChanged(object? sender, EventArgs e)
+            => _nav.DispatcherQueue.TryEnqueue(RefreshPinBadges);
 
         private void Cards_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
         {
@@ -92,7 +98,7 @@ namespace TaskbarQuota
                     Icon = CreateProviderIcon(card.ProviderId),
                     HorizontalAlignment = iconOnly ? HorizontalAlignment.Center : HorizontalAlignment.Stretch,
                 };
-                ToolTipService.SetToolTip(item, card.DisplayName);
+                ApplyPinBadge(item, card.ProviderId, card.DisplayName);
                 _nav.MenuItems.Add(item);
             }
 
@@ -128,6 +134,44 @@ namespace TaskbarQuota
                 SetActiveVisual(navItem, isSelected);
             }
         }
+
+        /// <summary>
+        /// Marks the providers that are pinned to the taskbar. In icon-only mode the strip is nothing but
+        /// glyphs, so without a marker there is no way to tell which of them are pinned short of opening
+        /// each one.
+        /// </summary>
+        private static void ApplyPinBadge(NavigationViewItem item, ProviderId id, string displayName)
+        {
+            bool pinned = WidgetSettingsService.IsProviderPinned(id);
+            item.InfoBadge = pinned
+                ? new InfoBadge
+                {
+                    IconSource = new FontIconSource { Glyph = PinGlyph, FontSize = 10 },
+                    Style = (Style)Application.Current.Resources["AttentionIconInfoBadgeStyle"],
+                }
+                : null;
+
+            ToolTipService.SetToolTip(item, pinned ? $"{displayName} — pinned to the taskbar" : displayName);
+        }
+
+        /// <summary>
+        /// Refreshes the pin markers in place. A full rebuild would recreate every PathIcon, which is what
+        /// the Replace guard above exists to avoid.
+        /// </summary>
+        private void RefreshPinBadges()
+        {
+            foreach (var menuItem in _nav.MenuItems)
+            {
+                if (menuItem is not NavigationViewItem { Tag: ProviderId id } item)
+                    continue;
+
+                var card = _viewModel.Cards.FirstOrDefault(c => c.ProviderId == id);
+                ApplyPinBadge(item, id, card?.DisplayName ?? id.ToString());
+            }
+        }
+
+        // Segoe Fluent "Pin" glyph.
+        private const string PinGlyph = "";
 
         private static IconElement CreateProviderIcon(ProviderId id)
         {

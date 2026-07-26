@@ -25,7 +25,6 @@ namespace TaskbarQuota.Controls
         private const int MinLabelColumnWidth = 0;
         private const int MinResetColumnWidth = 0;
         private const int ValueColumnWidth = 34;
-        private const string MaxCreditValueSample = "10,000/10,000";
         private const int WidgetFontSize = 11;
         private const int BarHeight = 6;
         private const int SingleRowBarHeight = 8;
@@ -40,6 +39,11 @@ namespace TaskbarQuota.Controls
         private const double GlyphViewportSize = 100;
         private const double NormalizedGlyphExtent = 88;
         private const double StaleOpacity = 0.55;
+        // Root.Padding left+right, plus the 2px slack CalculateDesiredWidth reserves. Must track the
+        // Padding set on Root in the XAML — the width math is analytic, so a mismatch clips a column.
+        private const int RootHorizontalPadding = 10;
+        private const int PanelColumnSpacing = 5;
+        private const int SlideMilliseconds = 300;
 
         public event Action? Clicked;
         public event Action<DisplayMode>? DisplayModeChanged;
@@ -47,9 +51,26 @@ namespace TaskbarQuota.Controls
 
         public bool SuppressNextClick { get; set; }
 
+        /// <summary>
+        /// Skips the cross-fade on the next render. Set when a tile is taking over another provider as part
+        /// of a re-order: the movement is being conveyed by <see cref="AnimateSlide"/>, and fading the
+        /// content at the same time turns a clean shift into a flicker.
+        /// </summary>
+        public bool SuppressNextTransition { get; set; }
+
+        /// <summary>
+        /// The width (logical px) this tile last asked its host for. The taskbar host sums this across the
+        /// tiles it shows to size the multi-provider widget and to decide how many tiles actually fit.
+        /// </summary>
+        public int DesiredLogicalWidth { get; private set; }
+
         private readonly List<RenderedRow> _renderedRows = new();
         private List<WidgetUsageRow> _rows = new();
         private bool _forcePercentagesOnly;
+        private int _maxVisibleRows = int.MaxValue;
+        private bool _isIconOnly;
+        private bool _isCompact;
+        private bool _hideReset;
         private UsageResult? _lastResult;
         private ProviderId? _lastAppliedProvider;
         private string? _lastRenderSignature;
@@ -57,6 +78,7 @@ namespace TaskbarQuota.Controls
         private bool _isActiveToolVisible = true;
         private Storyboard? _visibilityStoryboard;
         private Storyboard? _softRefreshStoryboard;
+        private Storyboard? _slideStoryboard;
 
         /// <summary>
         /// Returns the display name for the constrained taskbar widget.
@@ -71,6 +93,125 @@ namespace TaskbarQuota.Controls
                 "GitHub Copilot" => "Copilot",
                 _ => fullName,
             };
+
+        /// <summary>
+        /// How much of this tile renders on the taskbar. Pinned tiles that aren't the active tool are
+        /// capped to their leading rows so a row toggle can never grow them enough to evict a neighbour,
+        /// and a tile with nowhere left to shrink falls back to its provider glyph rather than vanishing —
+        /// a pin is a promise that the provider stays on the bar (issue #25). The tooltip always carries
+        /// the full set of rows, whatever is rendered.
+        /// </summary>
+        /// <param name="level">
+        /// <see cref="LevelGlyph"/> for the bare provider glyph, <see cref="LevelCompact"/> for the glyph
+        /// plus its headline figure, or a positive row ceiling.
+        /// </param>
+        public void SetSummaryMode(SummaryForm form)
+        {
+            bool iconOnly = form.IsGlyph;
+            bool compact = form.IsCompact;
+            int maxVisibleRows = Math.Max(1, form.Rows);
+            if (_isIconOnly == iconOnly
+                && _isCompact == compact
+                && _maxVisibleRows == maxVisibleRows
+                && _hideReset == form.HideReset)
+            {
+                return;
+            }
+
+            _isIconOnly = iconOnly;
+            _isCompact = compact;
+            _maxVisibleRows = maxVisibleRows;
+            _hideReset = form.HideReset;
+            // Re-run Apply rather than just RenderRows so the tooltip is rebuilt too — in icon-only mode it
+            // is the only place the numbers survive.
+            if (_lastResult is { } result)
+                Apply(result, force: true);
+            else
+                RenderRows();
+        }
+
+        /// <summary>
+        /// Sets the tile's tooltip, noting when the taskbar is showing less than the full picture. A
+        /// degraded tile must say why, or a pinned provider that quietly shrank looks broken.
+        /// </summary>
+        private void SetSummaryTooltip(string text)
+        {
+            if (_isIconOnly || _isCompact)
+                text += "\nCompact — not enough room on the taskbar.";
+            else if (_rows.Count > _maxVisibleRows)
+                text += $"\n+{_rows.Count - _maxVisibleRows} more row(s) — shown when this tool is active.";
+
+            ToolTipService.SetToolTip(this, text);
+        }
+
+        /// <summary>
+        /// How much of a tile renders. The ladder, richest first: every row with its reset countdown, the
+        /// same rows without the countdown, fewer rows, a single meter with no label, then a bare glyph.
+        /// Dropping the countdown is the cheapest useful step — it is a whole column (~44px) and the same
+        /// information is already in the tooltip.
+        /// </summary>
+        public readonly record struct SummaryForm(int Rows, bool HideReset)
+        {
+            /// <summary>Provider glyph only; every figure lives in the tooltip.</summary>
+            public static SummaryForm Glyph => new(-1, false);
+            /// <summary>Glyph plus a single unlabelled meter — bar and value.</summary>
+            public static SummaryForm Compact => new(0, false);
+
+            public bool IsGlyph => Rows < 0;
+            public bool IsCompact => Rows == 0;
+
+            public override string ToString()
+                => IsGlyph ? "glyph" : IsCompact ? "compact" : HideReset ? $"{Rows}r-" : $"{Rows}r";
+        }
+
+        /// <summary>Width (logical px) a tile occupies once collapsed to its glyph.</summary>
+        public static int IconOnlyWidth(WidgetDisplayMode mode)
+            => IconWidthFor(mode) + RootHorizontalPadding;
+
+        private static int IconWidthFor(WidgetDisplayMode mode)
+            => mode == WidgetDisplayMode.PercentagesOnly ? IconHostSizePercentagesOnly : IconHostSizeBars;
+
+        /// <summary>
+        /// The width this tile WOULD take at a given row ceiling, without rendering it.
+        ///
+        /// The host has to compare layouts (all rows vs capped rows) before choosing one, and rendering
+        /// each candidate to read its width made the tile visibly flash: every re-render restarts the
+        /// refresh animation, and the host re-runs this on every usage publish. The column widths are a
+        /// pure function of the rows and the display mode, so they are computed directly instead.
+        /// </summary>
+        /// <summary>Rows this tile currently has to show, before any host-imposed ceiling.</summary>
+        public int RowCount => Math.Max(1, _rows.Count);
+
+        public int MeasureDesiredWidth(SummaryForm form)
+        {
+            var mode = _forcePercentagesOnly ? WidgetDisplayMode.PercentagesOnly : WidgetSettingsService.Current;
+            if (form.IsGlyph)
+                return IconOnlyWidth(mode);
+            if (form.IsCompact)
+                return CompactWidth(mode);
+
+            return CalculateDesiredWidth(RowsFor(form.Rows, form.HideReset), mode);
+        }
+
+        /// <summary>
+        /// The meter a compact tile shows: the tile's first row, which is the provider's headline window
+        /// (session, 5h, or credit balance).
+        /// </summary>
+        private WidgetUsageRow Headline()
+            => _rows.Count > 0 ? _rows[0] : new WidgetUsageRow("Usage", 0, "--", HasBar: false);
+
+        /// <summary>
+        /// Compact form: glyph, bar and value. The bar matters — a naked "0%" or "0/200" beside a logo does
+        /// not say what is being measured or how full it is, whereas a filled bar reads as a meter at a
+        /// glance and the tooltip names the window.
+        /// </summary>
+        private int CompactWidth(WidgetDisplayMode mode)
+        {
+            var row = Headline();
+            double value = Math.Max(ValueColumnWidth, MeasureTextWidth(row.Value, WidgetFontSize + 1) + 4);
+            double bar = row.HasBar ? BarColumnWidthBarsAndPercentages + PanelColumnSpacing : 0;
+            return (int)Math.Ceiling(IconWidthFor(mode) + bar + value + PanelColumnSpacing + RootHorizontalPadding);
+        }
 
         public HorizontalAlignment ElementsAlignment
         {
@@ -165,7 +306,7 @@ namespace TaskbarQuota.Controls
                 };
                 RenderRows();
                 AnimateRender(isFirstReveal, providerSwitch: providerChanged);
-                ToolTipService.SetToolTip(this, $"{widgetName}: {result.Error ?? "Loading..."}");
+                SetSummaryTooltip( $"{widgetName}: {result.Error ?? "Loading..."}");
                 return;
             }
 
@@ -178,7 +319,7 @@ namespace TaskbarQuota.Controls
                     RenderRows();
                     AnimateRender(isFirstReveal, providerSwitch: providerChanged);
                     var loginSourceText = result.Source.IsKnown ? $" {result.Source.ShortViaText}" : "";
-                    ToolTipService.SetToolTip(this, $"{widgetName}{loginSourceText}: Login required — open the app to connect.");
+                    SetSummaryTooltip( $"{widgetName}{loginSourceText}: Login required — open the app to connect.");
                     return;
                 }
 
@@ -190,7 +331,7 @@ namespace TaskbarQuota.Controls
                 RenderRows();
                 AnimateRender(isFirstReveal, providerSwitch: providerChanged);
                 var sourceText = result.Source.IsKnown ? $" {result.Source.ShortViaText}" : "";
-                ToolTipService.SetToolTip(this, $"{widgetName}{sourceText}: {result.Error ?? "Unavailable"}");
+                SetSummaryTooltip( $"{widgetName}{sourceText}: {result.Error ?? "Unavailable"}");
                 return;
             }
 
@@ -231,7 +372,7 @@ namespace TaskbarQuota.Controls
             var costTooltip = WidgetCostTooltipLine(result.Id, usage.Cost);
             var resetCreditsTooltip = WidgetResetCreditsTooltipLine(usage.ResetCredits);
             var staleTooltip = StaleTooltipLine(result);
-            ToolTipService.SetToolTip(this,
+            SetSummaryTooltip(
                 string.IsNullOrEmpty(plan)
                     ? $"{WidgetTooltipTitle(widgetName, result.Source)}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}"
                     : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}");
@@ -407,6 +548,49 @@ namespace TaskbarQuota.Controls
         internal static IReadOnlyList<string> BuildRowLabelsForTesting(UsageResult result, UsageSnapshot usage)
             => BuildRows(result, usage).Select(row => row.Label).ToList();
 
+        /// <summary>Rows assumed for a provider whose usage has not been fetched yet.</summary>
+        public const int AssumedRowCount = 2;
+
+        /// <summary>
+        /// How many rows this provider's tile would render. Used to price a provider against the pin
+        /// budget before its tile exists, so the dashboard can tell a "short" provider from a "long" one.
+        ///
+        /// Mirrors the provider dispatch in <see cref="Apply"/> — the specialised displays build their own
+        /// row sets rather than going through <see cref="BuildRows"/>, so both have to be consulted. Keep
+        /// the two in step when a provider grows a new display path.
+        /// </summary>
+        public static int CountRenderedRows(UsageResult result)
+        {
+            if (!result.Ok || result.Fetch is not { } fetch)
+                return AssumedRowCount;
+
+            var usage = fetch.Usage;
+            int count = result.Id switch
+            {
+                ProviderId.OpenCode =>
+                    (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowUsage) ? 1 : 0)
+                    + (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowBalance) ? 1 : 0),
+                ProviderId.Cline => 1,
+                ProviderId.Antigravity => CountAntigravityRows(usage),
+                ProviderId.Copilot or ProviderId.Grok when usage.Cost is { Label: "Credits" } =>
+                    CountCreditRows(result.Id, usage),
+                _ => BuildRows(result, usage).Count,
+            };
+
+            return Math.Max(1, count);
+        }
+
+        private static int CountAntigravityRows(UsageSnapshot usage)
+            => (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowPrimary) ? 1 : 0)
+            + (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowModelSpecific) ? 1 : 0)
+            + (usage.Secondary != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowSecondary) ? 1 : 0)
+            + (usage.Monthly != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowMonthly) ? 1 : 0);
+
+        private static int CountCreditRows(ProviderId id, UsageSnapshot usage)
+            => (WidgetSettingsService.IsRowVisible(id, WidgetSettingsService.RowCredits) ? 1 : 0)
+            + (usage.AdditionalUsage is { Enabled: true }
+                && WidgetSettingsService.IsRowVisible(id, WidgetSettingsService.RowAdditionalUsage) ? 1 : 0);
+
         private static bool ShouldShowCodexCredits(UsageSnapshot usage, CostSnapshot credits)
         {
             if (WidgetSettingsService.TryGetRowVisibilityOverride(ProviderId.Codex, WidgetSettingsService.RowCredits, out bool userVisible))
@@ -521,7 +705,7 @@ namespace TaskbarQuota.Controls
             RenderRows();
             AnimateRender(!_hasRevealed, providerSwitch: providerChanged);
 
-            ToolTipService.SetToolTip(this,
+            SetSummaryTooltip(
                 $"{WidgetTooltipTitle(result.DisplayName, result.Source)} · {usage.LoginMethod}\n" +
                 $"Usage: {usage.Cost?.Display ?? "--"}\n" +
                 $"Balance: {(balanceText != null ? "$" + balanceText.Split(' ')[0] : "--")}" +
@@ -544,7 +728,7 @@ namespace TaskbarQuota.Controls
             RenderRows();
             AnimateRender(!_hasRevealed, providerSwitch: providerChanged);
 
-            ToolTipService.SetToolTip(this,
+            SetSummaryTooltip(
                 $"{WidgetTooltipTitle(result.DisplayName, result.Source)} · {usage.LoginMethod}\n" +
                 $"Credit balance: {usage.Cost?.Display ?? "--"}" +
                 StaleTooltipLine(result));
@@ -601,7 +785,24 @@ namespace TaskbarQuota.Controls
             if (usage.Primary.ResetDescription is { } resetDesc)
                 tooltip += $"\nresets in {resetDesc}";
             tooltip += StaleTooltipLine(result);
-            ToolTipService.SetToolTip(this, tooltip);
+            SetSummaryTooltip( tooltip);
+        }
+
+        /// <summary>
+        /// Width reserve for a "used/limit" credits value, so the column doesn't twitch as the used side
+        /// grows. Sized from the tile's OWN limit — the used side can never be wider than the limit — rather
+        /// than from a fixed worst case: reserving room for "10,000/10,000" on a plan whose limit is 300
+        /// padded the tile by tens of pixels of permanent dead space, which on a crowded taskbar was enough
+        /// to cost the provider its tile entirely.
+        /// </summary>
+        internal static string CreditValueSample(string value)
+        {
+            int slash = value.IndexOf('/');
+            if (slash <= 0 || slash == value.Length - 1)
+                return value;
+
+            var limit = value[(slash + 1)..];
+            return new string('0', limit.Length) + "/" + limit;
         }
 
         private static string FormatCreditCount(double value)
@@ -708,7 +909,7 @@ namespace TaskbarQuota.Controls
                 (usage.Primary.ResetDescription is { } r1 ? $" (resets {r1})" : "") + "\n" +
                 $"Non-Gemini: {WidgetSettingsService.FormatDisplayPercent(usage.Secondary?.UsedPercent ?? 0)}" +
                 (usage.Secondary?.ResetDescription is { } r2 ? $" (resets {r2})" : "");
-            ToolTipService.SetToolTip(this, header + body + StaleTooltipLine(result));
+            SetSummaryTooltip( header + body + StaleTooltipLine(result));
         }
 
         private void OnWidgetSettingsChanged(object? sender, EventArgs e)
@@ -719,9 +920,39 @@ namespace TaskbarQuota.Controls
                 RenderRows();
         }
 
+        /// <summary>
+        /// Slides this tile into its new position from <paramref name="fromOffsetX"/> logical px away.
+        ///
+        /// The tiles occupy fixed slots and providers are re-assigned between them, so a re-order is really
+        /// a content swap. Starting each tile at the offset where its provider used to sit and easing that
+        /// back to zero turns the swap into what the eye expects: the existing tiles travel sideways and
+        /// the newcomer arrives from the edge.
+        /// </summary>
+        public void AnimateSlide(double fromOffsetX)
+        {
+            _slideStoryboard?.Stop();
+
+            // The RESTING value is written before starting, and the animation supplies the offset through
+            // its From. Storyboard.Stop reverts a property to its local value, so a slide interrupted by the
+            // next layout pass — which happens constantly, the layout is recomputed on every usage publish —
+            // lands at zero instead of stranding the tile at the offset it started from.
+            RootTranslate.X = 0;
+
+            _slideStoryboard = new Storyboard();
+            _slideStoryboard.Children.Add(CreateDoubleAnimation(RootTranslate, "X", fromOffsetX, 0, SlideMilliseconds));
+            _slideStoryboard.Begin();
+        }
+
         private void AnimateRender(bool isFirstReveal, bool providerSwitch = false)
         {
             _hasRevealed = true;
+            if (SuppressNextTransition)
+            {
+                SuppressNextTransition = false;
+                Panel.Opacity = RestingPanelOpacity;
+                return;
+            }
+
             if (isFirstReveal)
                 AnimateFirstReveal();
             else if (providerSwitch)
@@ -775,10 +1006,19 @@ namespace TaskbarQuota.Controls
 
         private void AnimateVisibility(double toOpacity, double toOffset, int milliseconds)
         {
+            double fromOpacity = Root.Opacity;
+            double fromOffset = RootTranslate.Y;
+
             _visibilityStoryboard?.Stop();
+            // Same rule as AnimateSlide: park the local values at the destination and let the animation
+            // supply the start through From, so an interrupted transition can never leave a tile stuck
+            // invisible or offset.
+            Root.Opacity = toOpacity;
+            RootTranslate.Y = toOffset;
+
             _visibilityStoryboard = new Storyboard();
-            _visibilityStoryboard.Children.Add(CreateDoubleAnimation(Root, "Opacity", Root.Opacity, toOpacity, milliseconds));
-            _visibilityStoryboard.Children.Add(CreateDoubleAnimation(RootTranslate, "Y", RootTranslate.Y, toOffset, milliseconds));
+            _visibilityStoryboard.Children.Add(CreateDoubleAnimation(Root, "Opacity", fromOpacity, toOpacity, milliseconds));
+            _visibilityStoryboard.Children.Add(CreateDoubleAnimation(RootTranslate, "Y", fromOffset, toOffset, milliseconds));
             _visibilityStoryboard.Begin();
         }
 
@@ -805,10 +1045,22 @@ namespace TaskbarQuota.Controls
         private void RenderRows()
         {
             var mode = _forcePercentagesOnly ? WidgetDisplayMode.PercentagesOnly : WidgetSettingsService.Current;
-            var rows = _rows.Count > 0 ? _rows : new List<WidgetUsageRow> { new("Usage", 0, "--") };
 
             ClearDynamicContent();
             ConfigureStaticColumns(mode);
+
+            if (_isIconOnly || _isCompact)
+            {
+                if (_isCompact)
+                    AddCompactMeter();
+                ApplyTaskbarForeground();
+                SetBars();
+                DesiredLogicalWidth = _isCompact ? CompactWidth(mode) : IconOnlyWidth(mode);
+                DesiredHostWidthChanged?.Invoke(DesiredLogicalWidth);
+                return;
+            }
+
+            var rows = RowsFor(_maxVisibleRows, _hideReset);
 
             bool showBars = mode is WidgetDisplayMode.BarsOnly or WidgetDisplayMode.BarsAndPercentages;
             bool showPercentages = mode is WidgetDisplayMode.PercentagesOnly or WidgetDisplayMode.BarsAndPercentages;
@@ -822,6 +1074,9 @@ namespace TaskbarQuota.Controls
                 int row = i % MaxRowsPerGroup;
                 int groupStart = group * MaxRowsPerGroup;
                 int groupCount = Math.Min(MaxRowsPerGroup, rows.Count - groupStart);
+                // Only a tile that holds ONE row overall gets the full-height treatment (the Grok/Copilot
+                // credits meter). A trailing lone row in a multi-group tile stays on the top line, level
+                // with the first row of the group beside it — centring it there just reads as misaligned.
                 bool isSingleRowGroup = rows.Count == 1 && groupCount == 1;
                 var layout = CalculateLayoutMetrics(rows, mode, group);
                 int firstColumn = EnsureGroupColumns(mode, group, layout);
@@ -830,7 +1085,57 @@ namespace TaskbarQuota.Controls
 
             ApplyTaskbarForeground();
             SetBars();
-            DesiredHostWidthChanged?.Invoke(CalculateDesiredWidth());
+            DesiredLogicalWidth = CalculateDesiredWidth(rows, mode);
+            DesiredHostWidthChanged?.Invoke(DesiredLogicalWidth);
+        }
+
+        /// <summary>
+        /// Compact form: the provider glyph and its headline figure, full height, nothing else. The rung
+        /// between a full tile and a bare glyph — a pinned provider on a crowded bar still reports a live
+        /// number instead of just identifying itself.
+        /// </summary>
+        private void AddCompactMeter()
+        {
+            var row = Headline();
+            int column = 1;
+
+            var track = new Border { CornerRadius = new CornerRadius(2), Opacity = 0.28 };
+            var bar = new Border
+            {
+                Background = (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"],
+                CornerRadius = new CornerRadius(2),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Width = 0,
+            };
+
+            if (row.HasBar)
+            {
+                Panel.ColumnDefinitions.Add(new ColumnDefinition
+                {
+                    Width = new GridLength(BarColumnWidthBarsAndPercentages),
+                });
+
+                var barHost = new Grid
+                {
+                    Width = BarWidthBarsAndPercentages,
+                    Height = SingleRowBarHeight,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                };
+                barHost.Children.Add(track);
+                barHost.Children.Add(bar);
+                AddToPanel(barHost, 0, column++, MaxRowsPerGroup);
+            }
+
+            Panel.ColumnDefinitions.Add(new ColumnDefinition
+            {
+                Width = new GridLength(Math.Max(ValueColumnWidth, MeasureTextWidth(row.Value, WidgetFontSize + 1) + 4)),
+            });
+
+            var text = CreateText(row.Value, 0.86, TextAlignment.Center, WidgetFontSize + 1);
+            AddToPanel(text, 0, column, MaxRowsPerGroup);
+
+            _renderedRows.Add(new RenderedRow(row, track, bar, BarWidthBarsAndPercentages, null, text));
         }
 
         private void ClearDynamicContent()
@@ -848,7 +1153,7 @@ namespace TaskbarQuota.Controls
 
         private void ConfigureStaticColumns(WidgetDisplayMode mode)
         {
-            Panel.ColumnSpacing = 5;
+            Panel.ColumnSpacing = PanelColumnSpacing;
             int iconSize = mode == WidgetDisplayMode.PercentagesOnly ? IconHostSizePercentagesOnly : IconHostSizeBars;
             IconColumn.Width = new GridLength(iconSize);
             BadgeHost.Width = iconSize;
@@ -891,6 +1196,55 @@ namespace TaskbarQuota.Controls
             return 1 + (group * columnsPerGroup);
         }
 
+        /// <summary>
+        /// The rows this tile draws at a given ceiling. A capped tile stays a fixed width no matter how
+        /// many rows the user enables; the tooltip still lists every row.
+        /// </summary>
+        private List<WidgetUsageRow> RowsFor(int maxVisibleRows, bool hideReset)
+        {
+            var rows = _rows.Count > 0 ? _rows : new List<WidgetUsageRow> { new("Usage", 0, "--") };
+            if (rows.Count > maxVisibleRows)
+                rows = rows.GetRange(0, maxVisibleRows);
+            // Clearing the countdown here rather than at render time means the column measurement collapses
+            // to zero with it, which is the whole point of the step.
+            return hideReset ? rows.ConvertAll(row => row with { ResetDescription = null }) : rows;
+        }
+
+        /// <summary>
+        /// Total width of the tile for a given row set: the icon column, then per two-row group a label,
+        /// reset and bar/value column, plus inter-column spacing and the root padding. Mirrors exactly what
+        /// <see cref="ConfigureStaticColumns"/> and <see cref="EnsureGroupColumns"/> build, so a measured
+        /// candidate and the rendered result can never disagree.
+        /// </summary>
+        private static int CalculateDesiredWidth(IReadOnlyList<WidgetUsageRow> rows, WidgetDisplayMode mode)
+        {
+            int columnsPerGroup = mode switch
+            {
+                WidgetDisplayMode.PercentagesOnly => 3,
+                WidgetDisplayMode.BarsAndPercentages => 4,
+                _ => 3,
+            };
+
+            double total = mode == WidgetDisplayMode.PercentagesOnly ? IconHostSizePercentagesOnly : IconHostSizeBars;
+            int columnCount = 1;
+            int groups = (rows.Count + MaxRowsPerGroup - 1) / MaxRowsPerGroup;
+
+            for (int group = 0; group < groups; group++)
+            {
+                var layout = CalculateLayoutMetrics(rows, mode, group);
+                total += layout.LabelWidth + layout.ResetWidth;
+                total += mode switch
+                {
+                    WidgetDisplayMode.PercentagesOnly => layout.ValueWidth,
+                    WidgetDisplayMode.BarsAndPercentages => BarColumnWidthBarsAndPercentages + layout.ValueWidth,
+                    _ => BarColumnWidthBarsOnly,
+                };
+                columnCount += columnsPerGroup;
+            }
+
+            return (int)Math.Ceiling(total + (Math.Max(0, columnCount - 1) * PanelColumnSpacing) + RootHorizontalPadding);
+        }
+
         private static WidgetLayoutMetrics CalculateLayoutMetrics(
             IReadOnlyList<WidgetUsageRow> rows,
             WidgetDisplayMode mode,
@@ -919,7 +1273,7 @@ namespace TaskbarQuota.Controls
                 var row = rows[start + i];
                 widestValue = Math.Max(widestValue, MeasureTextWidth(row.Value, labelFont));
                 if (row.Label == "Credits")
-                    widestValue = Math.Max(widestValue, MeasureTextWidth(MaxCreditValueSample, labelFont));
+                    widestValue = Math.Max(widestValue, MeasureTextWidth(CreditValueSample(row.Value), labelFont));
                 // Reserve room for a large dollar balance so amounts like "$1,000.00" aren't clipped.
                 if (row.Label == "Balance")
                     widestValue = Math.Max(widestValue, MeasureTextWidth("$1,000.00", labelFont));
@@ -1128,13 +1482,6 @@ namespace TaskbarQuota.Controls
             Panel.Children.Add(element);
         }
 
-        private int CalculateDesiredWidth()
-        {
-            double columns = Panel.ColumnDefinitions.Sum(c => c.Width.Value);
-            double spacing = Math.Max(0, Panel.ColumnDefinitions.Count - 1) * Panel.ColumnSpacing;
-            double padding = Root.Padding.Left + Root.Padding.Right + 2;
-            return (int)Math.Ceiling(columns + spacing + padding);
-        }
 
         private void SetBars()
         {

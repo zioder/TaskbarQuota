@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.Linq;
 using Microsoft.UI;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
@@ -53,6 +54,7 @@ namespace TaskbarQuota
             _dashboardViewModel.DetailContentWidthChanged += DashboardDetailContentWidthChanged;
             _dashboardViewModel.DetailContentHeightChanged += DashboardDetailContentHeightChanged;
             ProviderStrip.Loaded += (_, _) => RebuildProviderStrip();
+            WidgetSettingsService.Changed += OnWidgetSettingsChanged;
 
             SystemBackdrop = new DesktopAcrylicBackdrop();
             ThemeService.Register(Root);
@@ -71,6 +73,9 @@ namespace TaskbarQuota
 
             Activated += OnActivated;
         }
+
+        private void OnWidgetSettingsChanged(object? sender, EventArgs e)
+            => DispatcherQueue.TryEnqueue(SyncProviderStripPins);
 
         private void OnActivated(object sender, WindowActivatedEventArgs args)
         {
@@ -334,6 +339,19 @@ namespace TaskbarQuota
                 Opacity = 0,
             };
 
+            // Pin mark, top-right of the glyph. The strip is icons only, so without it there is no way to
+            // tell which providers are pinned to the taskbar without opening each one.
+            var pin = new FontIcon
+            {
+                Glyph = PinGlyph,
+                FontSize = 9,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(0, 2, 2, 0),
+                Foreground = GetSelectionBrush(isSelected: true),
+                Visibility = Visibility.Collapsed,
+            };
+
             var buttonContent = new Grid
             {
                 Width = FlyoutLayout.IconButtonWidth,
@@ -341,6 +359,7 @@ namespace TaskbarQuota
             };
             buttonContent.Children.Add(icon);
             buttonContent.Children.Add(indicator);
+            buttonContent.Children.Add(pin);
 
             var button = new Button
             {
@@ -355,12 +374,40 @@ namespace TaskbarQuota
                 Content = buttonContent,
             };
             button.Click += ProviderStripButton_Click;
-            ToolTipService.SetToolTip(button, card.DisplayName);
             AutomationProperties.SetName(button, card.DisplayName);
             AutomationProperties.SetAutomationId(button, $"FlyoutProvider{card.ProviderId}Button");
 
-            _providerStripItems[card.ProviderId] = new FlyoutProviderStripItem(icon, indicator);
+            _providerStripItems[card.ProviderId] = new FlyoutProviderStripItem(icon, indicator, pin);
+            ApplyStripPin(card.ProviderId, button, card.DisplayName);
             return button;
+        }
+
+        // Segoe Fluent Icons "Pin".
+        private const string PinGlyph = "";
+
+        private void ApplyStripPin(ProviderId id, Button button, string displayName)
+        {
+            bool pinned = WidgetSettingsService.IsProviderPinned(id);
+            if (_providerStripItems.TryGetValue(id, out var item))
+                item.Pin.Visibility = pinned ? Visibility.Visible : Visibility.Collapsed;
+
+            ToolTipService.SetToolTip(button, pinned ? $"{displayName} — pinned to the taskbar" : displayName);
+        }
+
+        /// <summary>
+        /// Refreshes the pin marks in place. Pins change from the dashboard card, from Settings, and when
+        /// the pin budget auto-unpins one, and the flyout may be open while any of those happen.
+        /// </summary>
+        private void SyncProviderStripPins()
+        {
+            foreach (var child in ProviderStrip.Children)
+            {
+                if (child is not Button { Tag: ProviderId id } button)
+                    continue;
+
+                var card = _dashboardViewModel.Cards.FirstOrDefault(c => c.ProviderId == id);
+                ApplyStripPin(id, button, card?.DisplayName ?? id.ToString());
+            }
         }
 
         private void ProviderStripButton_Click(object sender, RoutedEventArgs e)
@@ -462,14 +509,16 @@ namespace TaskbarQuota
 
         private sealed class FlyoutProviderStripItem
         {
-            public FlyoutProviderStripItem(ProviderAvatar icon, Border indicator)
+            public FlyoutProviderStripItem(ProviderAvatar icon, Border indicator, FontIcon pin)
             {
                 Icon = icon;
                 Indicator = indicator;
+                Pin = pin;
             }
 
             public ProviderAvatar Icon { get; }
             public Border Indicator { get; }
+            public FontIcon Pin { get; }
         }
     }
 }

@@ -20,6 +20,10 @@ namespace TaskbarQuota.Interop
         [DllImport("user32.dll")]
         public static extern bool IsWindow([In] IntPtr hWnd);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsWindowVisible([In] IntPtr hWnd);
+
         [DllImport("user32.dll")]
         public static extern IntPtr DefWindowProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam);
 

@@ -547,6 +547,22 @@
                                           Click="ProviderWidgetToggle_Click">
                                 <TextBlock Text="{x:Bind ViewModel.SelectedCard.ProviderWidgetToggleText, Mode=OneWay}"/>
                             </ToggleButton>
+                            <ToggleButton x:Name="ProviderPinToggle"
+                                          AutomationProperties.AutomationId="ProviderWidgetPinToggle"
+                                          AutomationProperties.Name="{x:Bind ViewModel.SelectedCard.ProviderPinToggleName, Mode=OneWay}"
+                                          IsChecked="{x:Bind ViewModel.SelectedCard.IsProviderPinned, Mode=OneWay}"
+                                          IsEnabled="{x:Bind ViewModel.SelectedCard.IsProviderPinToggleEnabled, Mode=OneWay}"
+                                          Visibility="{x:Bind ViewModel.SelectedCard.ProviderPinToggleVisibility, Mode=OneWay}"
+                                          Tag="{x:Bind ViewModel.SelectedCard, Mode=OneWay}"
+                                          VerticalAlignment="Center"
+                                          MinWidth="76"
+                                          ToolTipService.ToolTip="Keep this provider on the taskbar even when another tool is active"
+                                          Click="ProviderPinToggle_Click">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE718;" FontSize="14"/>
+                                    <TextBlock Text="{x:Bind ViewModel.SelectedCard.ProviderPinToggleText, Mode=OneWay}"/>
+                                </StackPanel>
+                            </ToggleButton>
                         </StackPanel>
 
                         <VisualStateManager.VisualStateGroups>
@@ -604,5 +620,12 @@
                 </Grid>
             </StackPanel>
         </ScrollViewer>
+
+        <!-- Explains a refused pin. A tooltip on the button is no use here: the user has just clicked it
+             and watched nothing happen, so the reason has to appear without being hunted for. -->
+        <muxc:TeachingTip x:Name="PinBlockedTip"
+                          Title="Can't pin this provider"
+                          PreferredPlacement="Bottom"
+                          IsLightDismissEnabled="True"/>
     </Grid>
 </Page>

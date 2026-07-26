@@ -6,6 +6,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
+using System.Linq;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -16,6 +17,7 @@ using Windows.System;
 using TaskbarQuota.Controls;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Interop;
+using TaskbarQuota.Usage;
 
 namespace TaskbarQuota.Taskbar
 {
@@ -31,6 +33,33 @@ namespace TaskbarQuota.Taskbar
         private const string WidgetsButtonAutomationId = "WidgetsButton";
         private const int DefaultWidgetHostWidth = 172;
         private const int TrayClearanceLogicalPx = 6;
+        // Each tile carries a 2px left + 2px right margin that its own desired width excludes, so the host
+        // width has to add this back per visible tile or a multi-tile layout clips its last column.
+        // Kept tight deliberately: with three tiles, margins and dividers were costing 42px of a ~730px
+        // taskbar span, which is the difference between a third provider fitting and being refused.
+        private const int TileHorizontalMarginLogicalPx = 4;
+        // Fixed width of the "|" divider drawn between adjacent tiles. Fixed rather than measured so the
+        // fit math stays exact and doesn't depend on a layout pass having run.
+        private const int TileSeparatorLogicalPx = 7;
+        // Space assumed available before the first position pass has measured the real taskbar gap. Wide
+        // enough for three tiles; the first pass corrects it either way.
+        private const int DefaultAvailableLogicalWidth = 640;
+        // Rows a pinned tile shows while it is NOT the active tool. Two is one full column group, so such a
+        // tile has a fixed width whatever the user enables, and enabling a row can never evict a neighbour.
+        private const int PinnedTileMaxRows = 2;
+        // Floor for the active tool's tile. It may give up a third row to keep another provider on the bar,
+        // but never drops to a single line — that reads as a glitch rather than as a space saving.
+        private const int MinActiveRows = 2;
+        // A tile only animates when it genuinely moved; below this a value simply changed width.
+        private const int TileMoveThresholdLogicalPx = 8;
+        // How far a newly shown tile eases in from. Short enough to stay inside the host window, so it
+        // reads as arriving rather than being clipped off the taskbar edge.
+        private const int TileEntryOffsetLogicalPx = 28;
+        // Worth of a reset countdown, by whose tile it is on. Both stay below a row (4 points) so a row is
+        // never traded for a countdown, but the active tool keeps its countdowns until every pinned tile
+        // has given theirs up.
+        private const int ActiveResetWeight = 3;
+        private const int PinnedResetWeight = 1;
         private static readonly TimeSpan PositionDisposeWait = TimeSpan.FromSeconds(3);
         private const int ERROR_CLASS_ALREADY_EXISTS = 1410;
         // Approx width of the Win11 far-left Widgets/weather pill; used to reserve clearance when its exact
@@ -64,7 +93,31 @@ namespace TaskbarQuota.Taskbar
 
         private IntPtr hwnd;
         private AppWindow? appWindow;
-        private WidgetSummary? widgetSummary;
+        // Fixed pool of tile slots, created once and reused. Slot i renders tileProviders[i]; reassigning a
+        // slot to another provider re-renders it through WidgetSummary's normal provider-switch path. A
+        // fixed pool means the panel's children never change, so no tile is ever unloaded and re-loaded
+        // (which would drop its WidgetSettingsService subscription) when the display order shifts.
+        private readonly WidgetSummary[] tiles = new WidgetSummary[UsageCoordinator.MaxWidgetTiles];
+        // separators[i] is the "|" divider between slot i and slot i+1.
+        private readonly Microsoft.UI.Xaml.Controls.TextBlock[] separators =
+            new Microsoft.UI.Xaml.Controls.TextBlock[UsageCoordinator.MaxWidgetTiles - 1];
+        private readonly ProviderId?[] tileProviders = new ProviderId?[UsageCoordinator.MaxWidgetTiles];
+        // Slot has a provider AND fits inside the measured taskbar gap. Trimming only ever drops from the
+        // right, so the leading (active) tile is the last one to go.
+        private readonly bool[] tileFits = new bool[UsageCoordinator.MaxWidgetTiles];
+        // Collapsed to the provider glyph because the row didn't fit at full width.
+        private readonly bool[] tileIconOnly = new bool[UsageCoordinator.MaxWidgetTiles];
+        // Has a provider, but is being held back this pass because the row would otherwise overflow. Only
+        // ever the active tool's tile when that provider is not pinned.
+        private readonly bool[] tileSuppressed = new bool[UsageCoordinator.MaxWidgetTiles];
+        private ProviderId? activeTileProvider;
+        // Where each shown provider sat in the last layout, so the next one can animate the difference.
+        private Dictionary<ProviderId, int> lastTilePositions = new();
+        private Microsoft.UI.Xaml.Controls.StackPanel? summaryPanel;
+        private int availableLogicalWidth = DefaultAvailableLogicalWidth;
+        private bool isRecomputingLayout;
+        private bool layoutRepositionPending;
+        private string? lastLayoutSignature;
         private DesktopWindowXamlSource? host;
         private Microsoft.UI.Xaml.FrameworkElement? hostContent;
         private int WidgetHostWidth;
@@ -119,7 +172,14 @@ namespace TaskbarQuota.Taskbar
         }
         public IntPtr TaskbarHandle => hwndShell;
         public bool IsPrimaryTaskbar => isPrimaryTaskbar;
-        public WidgetSummary? Summary => widgetSummary;
+        /// <summary>
+        /// Supplies the best available snapshot for a provider when a slot is (re)assigned to it, so a
+        /// re-ordered tile paints its new provider immediately instead of holding the previous one's rows
+        /// until the next fetch lands. Set by <see cref="TaskBarManager"/>.
+        /// </summary>
+        public Func<ProviderId, UsageResult?>? HydrateProvider { get; set; }
+        /// <summary>Raised when any tile is clicked; provider-agnostic, it just opens the flyout.</summary>
+        public event Action? Clicked;
         public event EventHandler? Destroying;
 
         public TaskBarWidget(TaskbarWindowTarget target)
@@ -171,20 +231,10 @@ namespace TaskbarQuota.Taskbar
 
             host.Initialize(id);
             host.SiteBridge.ResizePolicy = Microsoft.UI.Content.ContentSizePolicy.ResizeContentToParentWindow;
-            widgetSummary = new WidgetSummary
-            {
-                Margin = new Microsoft.UI.Xaml.Thickness(4, 0, 4, 0),
-                HorizontalAlignment = Microsoft.UI.Xaml.HorizontalAlignment.Center,
-                VerticalAlignment = Microsoft.UI.Xaml.VerticalAlignment.Stretch,
-            };
-            widgetSummary.DesiredHostWidthChanged += WidgetSummary_DesiredHostWidthChanged;
-            widgetSummary.PointerPressed += WidgetSummary_PointerPressed;
-            widgetSummary.PointerMoved += WidgetSummary_PointerMoved;
-            widgetSummary.PointerReleased += WidgetSummary_PointerReleased;
-            widgetSummary.PointerCanceled += WidgetSummary_PointerCanceled;
+            summaryPanel = BuildSummaryPanel();
             hostContent = new Microsoft.UI.Xaml.Controls.Grid
             {
-                Children = { widgetSummary },
+                Children = { summaryPanel },
                 Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Colors.Transparent)
             };
             host.Content = hostContent;
@@ -257,10 +307,551 @@ namespace TaskbarQuota.Taskbar
             QueuePositionUpdate(TaskbarChangeReason.None);
         }
 
-        private void WidgetSummary_DesiredHostWidthChanged(int logicalWidth)
+        private Microsoft.UI.Xaml.Controls.StackPanel BuildSummaryPanel()
         {
-            if (ResizeWidgetHost(logicalWidth))
-                UpdatePosition();
+            var panel = new Microsoft.UI.Xaml.Controls.StackPanel
+            {
+                // The inter-tile gap comes from each tile's own 4px L/R margin plus the divider, so no
+                // StackPanel.Spacing — that keeps the width math to content + margins + separators.
+                Orientation = Microsoft.UI.Xaml.Controls.Orientation.Horizontal,
+                HorizontalAlignment = Microsoft.UI.Xaml.HorizontalAlignment.Center,
+                VerticalAlignment = Microsoft.UI.Xaml.VerticalAlignment.Stretch,
+            };
+
+            for (int i = 0; i < tiles.Length; i++)
+            {
+                if (i > 0)
+                {
+                    separators[i - 1] = CreateSeparator();
+                    panel.Children.Add(separators[i - 1]);
+                }
+
+                tiles[i] = CreateTile();
+                panel.Children.Add(tiles[i]);
+            }
+
+            return panel;
+        }
+
+        private WidgetSummary CreateTile()
+        {
+            var summary = new WidgetSummary
+            {
+                Margin = new Microsoft.UI.Xaml.Thickness(2, 0, 2, 0),
+                HorizontalAlignment = Microsoft.UI.Xaml.HorizontalAlignment.Center,
+                VerticalAlignment = Microsoft.UI.Xaml.VerticalAlignment.Stretch,
+                Visibility = Microsoft.UI.Xaml.Visibility.Collapsed,
+            };
+            summary.DesiredHostWidthChanged += WidgetSummary_DesiredHostWidthChanged;
+            summary.PointerPressed += WidgetSummary_PointerPressed;
+            summary.PointerMoved += WidgetSummary_PointerMoved;
+            summary.PointerReleased += WidgetSummary_PointerReleased;
+            summary.PointerCanceled += WidgetSummary_PointerCanceled;
+            summary.Clicked += OnTileClicked;
+            return summary;
+        }
+
+        private static Microsoft.UI.Xaml.Controls.TextBlock CreateSeparator() => new()
+        {
+            Text = "|",
+            Width = TileSeparatorLogicalPx,
+            FontSize = 12,
+            Opacity = 0.35,
+            TextAlignment = Microsoft.UI.Xaml.TextAlignment.Center,
+            HorizontalAlignment = Microsoft.UI.Xaml.HorizontalAlignment.Center,
+            VerticalAlignment = Microsoft.UI.Xaml.VerticalAlignment.Center,
+            Visibility = Microsoft.UI.Xaml.Visibility.Collapsed,
+            IsHitTestVisible = false,
+        };
+
+        private void OnTileClicked() => Clicked?.Invoke();
+
+        private void WidgetSummary_DesiredHostWidthChanged(int logicalWidth) => RecomputeLayout();
+
+        /// <summary>
+        /// Binds the tile slots to <paramref name="providers"/> in order (leftmost first) and re-lays out.
+        /// Providers beyond the slot pool are ignored — <see cref="UsageCoordinator.WidgetDisplayProviders"/>
+        /// already caps the list at <see cref="UsageCoordinator.MaxWidgetTiles"/>.
+        /// </summary>
+        public void SetDisplayProviders(IReadOnlyList<ProviderId> providers, ProviderId? activeProvider)
+        {
+            if (summaryPanel is null)
+                return;
+
+            activeTileProvider = activeProvider;
+
+            bool changed = false;
+            for (int i = 0; i < tiles.Length; i++)
+            {
+                ProviderId? desired = i < providers.Count ? providers[i] : null;
+                if (tileProviders[i] == desired)
+                    continue;
+
+                tileProviders[i] = desired;
+                changed = true;
+                // Repaint the slot for its new provider straight away, so a re-order never leaves a tile
+                // showing the previous provider's rows under the new provider's turn to be fetched. The
+                // cross-fade is suppressed because the movement is carried by the slide animation instead;
+                // doing both at once is what made adding a third provider look like a flicker.
+                if (desired is { } provider && HydrateProvider?.Invoke(provider) is { } seed)
+                {
+                    tiles[i].SuppressNextTransition = true;
+                    tiles[i].Apply(seed, force: true);
+                }
+            }
+
+            // Always re-run the layout, even when the set is unchanged: the same providers in the same order
+            // can still swap which one is active (nothing focused -> Claude focused), and that alone changes
+            // how many rows each tile is allowed.
+            RecomputeLayout(forceReposition: changed);
+        }
+
+        /// <summary>Routes a fetch result to the slot that owns its provider; no-op if it isn't shown.</summary>
+        public void ApplyResult(UsageResult result, bool force = false)
+        {
+            for (int i = 0; i < tiles.Length; i++)
+            {
+                if (tileProviders[i] != result.Id)
+                    continue;
+
+                tiles[i].Apply(result, force);
+                tiles[i].SetActiveToolVisible(true);
+                return;
+            }
+        }
+
+        /// <summary>Re-runs the fit math against the currently measured taskbar gap.</summary>
+        public void RefreshLayout() => RecomputeLayout();
+
+        /// <summary>
+        /// Fits the tiles into the free taskbar space and resizes the host to the result, degrading only as
+        /// far as it has to:
+        ///
+        /// 1. every tile shows every row the user enabled — the normal case, and what runs whenever there
+        ///    is room, so a pinned tile is never trimmed just for being pinned;
+        /// 2. tiles other than the active tool's drop to <see cref="PinnedTileMaxRows"/> rows, becoming
+        ///    fixed-width summaries;
+        /// 3. tiles collapse to their provider glyph, from the right, so the active tile keeps its detail
+        ///    longest.
+        ///
+        /// A pinned tile is never dropped — pinning is a promise that the provider stays on the bar, and
+        /// even a collapsed tile keeps its numbers in its tooltip.
+        ///
+        /// Every tile is measured fresh in both variants on each pass rather than measured once and cached.
+        /// Caching was wrong twice over: the cache was keyed by slot, but a provider switch re-orders which
+        /// provider a slot holds, and a collapsed tile renders as a glyph so it cannot restate its own
+        /// expanded width — together that left a tile stuck collapsed on a width belonging to a different
+        /// provider. Measuring is cheap (RenderRows only walks columns) and the tree is not painted until
+        /// the pass returns, so the intermediate states are never visible.
+        /// </summary>
+        private void RecomputeLayout(bool forceReposition = false)
+        {
+            if (summaryPanel is null)
+                return;
+
+            // Re-entrant calls are this pass's own re-renders raising DesiredHostWidthChanged. Everything
+            // runs on the UI thread with no awaits, so nothing external can interleave — the pass already
+            // has the settled widths and re-running would just repeat itself.
+            if (isRecomputingLayout)
+            {
+                layoutRepositionPending |= forceReposition;
+                return;
+            }
+
+            isRecomputingLayout = true;
+            try
+            {
+                int iconWidth = WidgetSummary.IconOnlyWidth(WidgetSettingsService.Current);
+
+                Array.Clear(tileSuppressed);
+                var slots = new List<int>(tiles.Length);
+                for (int i = 0; i < tiles.Length; i++)
+                {
+                    if (tileProviders[i] is not null)
+                        slots.Add(i);
+                }
+
+                HoldBackTilesThatDoNotFit(slots);
+
+                // Candidate layouts are measured, never rendered — MeasureDesiredWidth is a pure
+                // calculation. Rendering to measure made the tile restart its refresh animation on every
+                // usage publish, which read as a tile flashing about once a second.
+                var rowCounts = new List<int>(slots.Count);
+                int activeIndex = -1;
+                for (int n = 0; n < slots.Count; n++)
+                {
+                    rowCounts.Add(tiles[slots[n]].RowCount);
+                    if (IsActiveTile(slots[n]))
+                        activeIndex = n;
+                }
+
+                var forms = SolveTileLayout(
+                    rowCounts,
+                    activeIndex,
+                    (position, form) => tiles[slots[position]].MeasureDesiredWidth(form),
+                    availableLogicalWidth);
+
+                var widths = new List<int>(slots.Count);
+                int total = 0;
+                for (int n = 0; n < slots.Count; n++)
+                {
+                    int i = slots[n];
+                    tileIconOnly[i] = forms[n].IsGlyph;
+                    int width = tiles[i].MeasureDesiredWidth(forms[n]);
+                    widths.Add(width);
+                    if (tileProviders[i] is { } measuredProvider)
+                        TaskbarSpace.RecordTileWidth(measuredProvider, width);
+                    total += width + TileHorizontalMarginLogicalPx + (n > 0 ? TileSeparatorLogicalPx : 0);
+                    tiles[i].SetSummaryMode(forms[n]);
+                }
+
+                for (int i = 0; i < tiles.Length; i++)
+                {
+                    // A suppressed slot still HAS a provider — it is the courtesy tile that had to give way
+                    // — so visibility has to consult the suppression too, or this loop hands it straight
+                    // back with no form or width assigned, which is what left a stray divider on the bar.
+                    bool shown = tileProviders[i] is not null && !tileSuppressed[i];
+                    tileFits[i] = shown;
+                    tiles[i].Visibility = shown ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+                    tiles[i].SetActiveToolVisible(shown);
+                }
+
+                for (int i = 0; i < separators.Length; i++)
+                {
+                    separators[i].Visibility = tileFits[i] && tileFits[i + 1]
+                        ? Microsoft.UI.Xaml.Visibility.Visible
+                        : Microsoft.UI.Xaml.Visibility.Collapsed;
+                    separators[i].Foreground = TaskbarForegroundBrush();
+                }
+
+                AnimateTileMovement(slots, widths);
+
+                // The layout is recomputed on every usage publish, so only report an actual change.
+                var signature = $"budget={availableLogicalWidth} rows=[{string.Join(",", rowCounts)}] "
+                    + $"forms=[{string.Join(",", forms)}] widths=[{string.Join(",", widths)}] total={total}";
+                if (signature != lastLayoutSignature)
+                {
+                    lastLayoutSignature = signature;
+                    Log.Debug($"[widget] layout {signature}");
+                }
+
+                bool resized = ResizeWidgetHost(slots.Count == 0 ? DefaultWidgetHostWidth : total);
+                if (resized || forceReposition)
+                    UpdatePosition();
+            }
+            finally
+            {
+                isRecomputingLayout = false;
+            }
+
+            if (!layoutRepositionPending)
+                return;
+
+            layoutRepositionPending = false;
+            UpdatePosition();
+        }
+
+        private bool IsActiveTile(int slot)
+            => tileProviders[slot] is { } provider && activeTileProvider == provider;
+
+        /// <summary>
+        /// Holds tiles back until the row fits the free taskbar span, so the widget never grows over the
+        /// shell's own buttons.
+        ///
+        /// The ACTIVE tool's tile is the one thing never given up — showing the quota of whatever you are
+        /// working in is the widget's original job, and a pinned provider you are not currently touching is
+        /// the cheaper thing to lose for a moment. Pinned tiles yield least-recently-used first and come
+        /// straight back when you switch away, so a pin still guarantees presence the rest of the time.
+        /// </summary>
+        private void HoldBackTilesThatDoNotFit(List<int> slots)
+        {
+            if (slots.Count <= 1)
+                return;
+
+            // Least recently used first, and never the active tile.
+            var recent = UsageCoordinator.Instance.RecentProviders;
+            var recency = new Dictionary<ProviderId, int>();
+            for (int i = 0; i < recent.Count; i++)
+                recency.TryAdd(recent[i], i);
+
+            var dropOrder = slots
+                .Where(slot => !IsActiveTile(slot))
+                .OrderByDescending(slot => tileProviders[slot] is { } p && recency.TryGetValue(p, out int index)
+                    ? index
+                    : int.MaxValue)
+                .ToList();
+
+            foreach (int slot in dropOrder)
+            {
+                if (MeasureRow(slots) <= availableLogicalWidth)
+                    return;
+
+                slots.Remove(slot);
+                tileSuppressed[slot] = true;
+            }
+        }
+
+        private int MeasureRow(List<int> slots)
+        {
+            int total = 0;
+            for (int n = 0; n < slots.Count; n++)
+            {
+                total += tiles[slots[n]].MeasureDesiredWidth(
+                        new WidgetSummary.SummaryForm(Math.Max(1, tiles[slots[n]].RowCount), HideReset: false))
+                    + TileHorizontalMarginLogicalPx
+                    + (n > 0 ? TileSeparatorLogicalPx : 0);
+            }
+
+            return total;
+        }
+
+        /// <summary>
+        /// Animates tiles from wherever their provider sat last time to wherever it sits now, so a set or
+        /// order change reads as movement: the tiles already on the bar travel sideways to make room and a
+        /// newly shown provider eases in rather than appearing fully formed.
+        ///
+        /// Positions are tracked per PROVIDER, not per slot, which is what makes this work at all — the
+        /// slots are a fixed pool and providers move between them, so slot identity says nothing about what
+        /// the user saw move.
+        /// </summary>
+        private void AnimateTileMovement(List<int> slots, List<int> widths)
+        {
+            var positions = new Dictionary<ProviderId, int>(slots.Count);
+            int x = TileHorizontalMarginLogicalPx / 2;
+            for (int n = 0; n < slots.Count; n++)
+            {
+                if (tileProviders[slots[n]] is { } provider)
+                    positions[provider] = x;
+                x += widths[n] + TileHorizontalMarginLogicalPx + TileSeparatorLogicalPx;
+            }
+
+            // First layout of the session: the tiles have their own reveal animation, nothing to move from.
+            bool hadPositions = lastTilePositions.Count > 0;
+            for (int n = 0; n < slots.Count; n++)
+            {
+                if (tileProviders[slots[n]] is not { } provider)
+                    continue;
+
+                int target = positions[provider];
+                if (lastTilePositions.TryGetValue(provider, out int previous))
+                {
+                    // Ignore sub-threshold drift from a value changing width; only real moves animate.
+                    if (Math.Abs(previous - target) >= TileMoveThresholdLogicalPx)
+                        tiles[slots[n]].AnimateSlide(previous - target);
+                }
+                else if (hadPositions)
+                {
+                    tiles[slots[n]].AnimateSlide(-TileEntryOffsetLogicalPx);
+                }
+            }
+
+            lastTilePositions = positions;
+        }
+
+        /// <summary>
+        /// Total logical width of the tile row when the trailing <paramref name="collapsed"/> tiles render
+        /// as glyphs only. Works off cached widths, so a layout that isn't on screen yet can be measured —
+        /// which is what lets the collapse count be solved outright instead of by trial and error.
+        /// </summary>
+        internal static int MeasureRowWidth(IReadOnlyList<int> fullWidths, int collapsed, int iconWidth)
+        {
+            var icons = new bool[fullWidths.Count];
+            for (int i = fullWidths.Count - collapsed; i < fullWidths.Count; i++)
+                icons[i] = true;
+            return MeasureRowWidth(fullWidths, icons, iconWidth);
+        }
+
+        /// <summary>Row width with an explicit set of collapsed tiles, which need not be contiguous.</summary>
+        internal static int MeasureRowWidth(IReadOnlyList<int> fullWidths, IReadOnlyList<bool> icons, int iconWidth)
+        {
+            int total = 0;
+            for (int i = 0; i < fullWidths.Count; i++)
+            {
+                total += (icons[i] ? iconWidth : fullWidths[i])
+                    + TileHorizontalMarginLogicalPx
+                    + (i > 0 ? TileSeparatorLogicalPx : 0);
+            }
+
+            return total;
+        }
+
+        /// <summary>
+        /// Picks the least-degraded layout that fits <paramref name="budget"/>.
+        ///
+        /// Every tile renders in full — all of its rows, with their reset countdowns. When the row does not
+        /// fit, tiles fall back to a bare glyph rather than being trimmed, and the search picks which ones:
+        /// giving up a NARROW tile can be the better trade when it lets a wide neighbour render, which a
+        /// positional rule cannot see. At most three tiles is a search space of eight, evaluated with pure
+        /// arithmetic.
+        ///
+        /// The active tool's tile is never the one given up unless nothing fits at all.
+        /// </summary>
+        /// <param name="rowCounts">Rows each tile wants to show, left to right.</param>
+        /// <param name="activeIndex">Position of the active tool's tile, or -1 when none is active.</param>
+        /// <param name="measure">
+        /// (position, level) =&gt; rendered width, where level is a positive row count,
+        /// <see cref="WidgetSummary.LevelCompact"/>, or <see cref="WidgetSummary.LevelGlyph"/>.
+        /// </param>
+        /// <returns>The chosen detail level per tile.</returns>
+        internal static WidgetSummary.SummaryForm[] SolveTileLayout(
+            IReadOnlyList<int> rowCounts,
+            int activeIndex,
+            Func<int, WidgetSummary.SummaryForm, int> measure,
+            int budget)
+        {
+            int count = rowCounts.Count;
+            if (count == 0)
+                return Array.Empty<WidgetSummary.SummaryForm>();
+
+            // A pinned provider shows everything the user asked it to show, countdowns included — that is
+            // the whole point of pinning it (issue #25). There is no fallback form: a tile is never trimmed
+            // and never reduced to a bare glyph, because a logo with no figures is worse than no pin at all.
+            //
+            // Keeping the row inside the taskbar is therefore the PIN BUDGET's job, not this method's —
+            // PinBudgetService refuses a pin that would not fit, so by the time a provider gets here it is
+            // known to have room.
+            var ladders = new List<WidgetSummary.SummaryForm>[count];
+            for (int i = 0; i < count; i++)
+                ladders[i] = [new WidgetSummary.SummaryForm(Math.Max(1, rowCounts[i]), HideReset: false)];
+
+            // Pass 1 keeps the active tile above the floor; pass 2 drops that guard so a bar with no room
+            // at all still renders something rather than nothing.
+            for (int pass = 0; pass < 2; pass++)
+            {
+                var best = SearchLevels(ladders, rowCounts, activeIndex, measure, budget, guardActive: pass == 0);
+                if (best is not null)
+                    return best;
+            }
+
+            // The row overflows the free span. Render it in full regardless: there is deliberately no
+            // reduced form to fall back to, and the pin budget should have refused the pin that caused
+            // this. Overflowing visibly is the honest outcome — and the signal that the budget is wrong.
+            var full = new WidgetSummary.SummaryForm[count];
+            for (int i = 0; i < count; i++)
+                full[i] = ladders[i][0];
+            return full;
+        }
+
+        private static WidgetSummary.SummaryForm[]? SearchLevels(
+            IReadOnlyList<List<WidgetSummary.SummaryForm>> ladders,
+            IReadOnlyList<int> rowCounts,
+            int activeIndex,
+            Func<int, WidgetSummary.SummaryForm, int> measure,
+            int budget,
+            bool guardActive)
+        {
+            int count = ladders.Count;
+            int combinations = 1;
+            for (int i = 0; i < count; i++)
+                combinations *= ladders[i].Count;
+
+            WidgetSummary.SummaryForm[]? bestForms = null;
+            (int Detail, int Shown, int Rightness) bestScore = (-1, -1, -1);
+
+            for (int combo = 0; combo < combinations; combo++)
+            {
+                var forms = new WidgetSummary.SummaryForm[count];
+                int rest = combo;
+                for (int i = 0; i < count; i++)
+                {
+                    forms[i] = ladders[i][rest % ladders[i].Count];
+                    rest /= ladders[i].Count;
+                }
+
+                if (guardActive && activeIndex >= 0
+                    && forms[activeIndex].Rows < Math.Min(MinActiveRows, Math.Max(1, rowCounts[activeIndex])))
+                {
+                    continue;
+                }
+
+                int total = 0;
+                for (int i = 0; i < count; i++)
+                {
+                    total += measure(i, forms[i])
+                        + TileHorizontalMarginLogicalPx
+                        + (i > 0 ? TileSeparatorLogicalPx : 0);
+                }
+
+                if (total > budget)
+                    continue;
+
+                // Rank by how much is actually readable. A row is worth four points, so a row always beats a
+                // countdown and dropping the countdown is the cheapest step down. A countdown on the ACTIVE
+                // tile is worth more than one on a pinned tile: when you are working in a tool, when its
+                // window resets is the number you care about, whereas a pinned provider you are only
+                // monitoring can lose its countdown to the tooltip. Without that weighting every countdown
+                // scored the same, ties fell to enumeration order, and the active tile — evaluated first —
+                // was always the one stripped.
+                int detail = 0, shown = 0, rightness = 0;
+                for (int i = 0; i < count; i++)
+                {
+                    if (forms[i].Rows >= 1)
+                    {
+                        detail += forms[i].Rows * 4;
+                        if (forms[i].HideReset)
+                            rightness += i;
+                        else
+                            detail += i == activeIndex ? ActiveResetWeight : PinnedResetWeight;
+                        shown++;
+                    }
+                    else if (forms[i].IsCompact)
+                    {
+                        detail += 1;
+                        shown++;
+                        rightness += i;
+                    }
+                    else
+                    {
+                        rightness += i;
+                    }
+                }
+
+                var score = (detail, shown, rightness);
+                if (score.CompareTo(bestScore) <= 0)
+                    continue;
+
+                bestScore = score;
+                bestForms = forms;
+            }
+
+            return bestForms;
+        }
+
+        /// <summary>
+        /// How many trailing tiles must collapse to their glyph for the row to fit <paramref name="budget"/>.
+        /// Collapsing from the right means the active tile (slot 0) keeps its detail longest. Can return the
+        /// full count when even a row of glyphs overflows — that's the floor, and a clipped row of glyphs
+        /// still beats a pinned provider disappearing.
+        /// </summary>
+        internal static int SolveCollapseCount(IReadOnlyList<int> fullWidths, int iconWidth, int budget)
+        {
+            int collapsed = 0;
+            while (collapsed < fullWidths.Count && MeasureRowWidth(fullWidths, collapsed, iconWidth) > budget)
+                collapsed++;
+            return collapsed;
+        }
+
+        private static Microsoft.UI.Xaml.Media.Brush TaskbarForegroundBrush()
+        {
+            bool light = SystemInfos.IsSystemLightThemeUsed() == true;
+            return new Microsoft.UI.Xaml.Media.SolidColorBrush(
+                light ? Windows.UI.Color.FromArgb(255, 28, 28, 28) : Colors.White);
+        }
+
+        // Records the widest free gap (logical px) as the budget for how many tiles may render. Called from
+        // the background position pass, so it only writes the field — the UI-thread entry points
+        // (SetDisplayProviders / a tile re-render / the manager's health tick) re-run the fit math.
+        private void UpdateAvailableWidth(List<(int start, int end)> gaps)
+        {
+            int widest = 0;
+            foreach (var (start, end) in gaps)
+                widest = Math.Max(widest, end - start);
+            if (widest <= 0)
+                return;
+
+            availableLogicalWidth = (int)Math.Floor(widest / dpiScale);
+            // Published so the pin budget can refuse a pin that would not fit this taskbar.
+            TaskbarSpace.AvailableLogicalWidth = availableLogicalWidth;
         }
 
         private bool ResizeWidgetHost(int logicalWidth)
@@ -414,6 +1005,9 @@ namespace TaskbarQuota.Taskbar
                 // Only ever rest inside a gap that FULLY fits the widget; if none does, don't move it into an
                 // overlap — keep the last valid spot (issue #17). First run with no fit hugs the tray.
                 var gaps = ComputeFreeGaps(leftBound, rightBound, obstacles);
+                // The widget is not one of its own obstacles, so the gap it sits in measures the full space
+                // it may occupy. That is the budget the tile-fit math trims against.
+                UpdateAvailableWidth(gaps);
                 int? placed = PlaceInFittingGap(preferredX, gaps, WidgetHostWidth);
                 if (placed is not { } fitX)
                 {
@@ -471,9 +1065,9 @@ namespace TaskbarQuota.Taskbar
 
         public void StartDragging()
         {
-            if (isDragging || appWindow is null || hostContent is null || widgetSummary is null) return;
+            if (isDragging || appWindow is null || hostContent is null || summaryPanel is null) return;
             SetVisible(true);
-            widgetSummary.IsHitTestVisible = false;
+            SetTilesHitTestVisible(false);
             User32.GetWindowRect(hwndShell, out var taskbarRect);
             User32.SetCursorPos(
                 taskbarRect.left + appWindow.Position.X + appWindow.Size.Width / 2,
@@ -489,14 +1083,14 @@ namespace TaskbarQuota.Taskbar
 
         public void EndDragging(bool revert)
         {
-            if (!isDragging || appWindow is null || hostContent is null || widgetSummary is null) return;
+            if (!isDragging || appWindow is null || hostContent is null || summaryPanel is null) return;
             isDragging = false;
             hostContent.ReleasePointerCaptures();
             hostContent.KeyUp -= Content_KeyUp;
             hostContent.PointerMoved -= Content_PointerMoved;
             hostContent.PointerPressed -= Content_PointerPressed;
             hostContent.PointerReleased -= Content_PointerReleased;
-            widgetSummary.IsHitTestVisible = true;
+            SetTilesHitTestVisible(true);
             if (revert)
             {
                 dragPreviewX = null;
@@ -537,11 +1131,11 @@ namespace TaskbarQuota.Taskbar
 
         private void WidgetSummary_PointerPressed(object sender, PointerRoutedEventArgs e)
         {
-            if (appWindow is null || widgetSummary is null) return;
+            if (appWindow is null || sender is not WidgetSummary summary) return;
             isPointerTracking = true;
             isDirectDrag = false;
             PrimeObstacleCacheForDrag();
-            widgetSummary.CapturePointer(e.Pointer);
+            summary.CapturePointer(e.Pointer);
             User32.GetCursorPos(out var point);
             pressCursorPositionX = point.x;
             lastCursorPositionX = point.x;
@@ -551,30 +1145,28 @@ namespace TaskbarQuota.Taskbar
 
         private void WidgetSummary_PointerMoved(object sender, PointerRoutedEventArgs e)
         {
-            if (!isPointerTracking || appWindow is null || widgetSummary is null) return;
+            if (!isPointerTracking || appWindow is null || sender is not WidgetSummary) return;
             User32.GetCursorPos(out var point);
             if (!isDirectDrag)
             {
                 if (Math.Abs(point.x - pressCursorPositionX) < Math.Ceiling(4 * dpiScale))
                     return;
                 isDirectDrag = true;
-                widgetSummary.SuppressNextClick = true;
+                SuppressTileClicks();
                 e.Handled = true;
             }
 
             MoveWidgetWithCursor(point.x);
-            widgetSummary.SuppressNextClick = true;
+            SuppressTileClicks();
         }
 
         private void WidgetSummary_PointerReleased(object sender, PointerRoutedEventArgs e)
         {
-            if (widgetSummary is not null)
-                widgetSummary.ReleasePointerCaptures();
+            (sender as WidgetSummary)?.ReleasePointerCaptures();
             if (isDirectDrag && appWindow is not null)
             {
                 _ = SnapToValidPositionAsync(dragPreviewX ?? appWindow.Position.X);
-                if (widgetSummary is not null)
-                    widgetSummary.SuppressNextClick = true;
+                SuppressTileClicks();
                 e.Handled = true;
             }
             isPointerTracking = false;
@@ -585,7 +1177,27 @@ namespace TaskbarQuota.Taskbar
         {
             isPointerTracking = false;
             isDirectDrag = false;
-            widgetSummary?.ReleasePointerCaptures();
+            (sender as WidgetSummary)?.ReleasePointerCaptures();
+        }
+
+        private void SetTilesHitTestVisible(bool visible)
+        {
+            foreach (var tile in tiles)
+            {
+                if (tile is not null)
+                    tile.IsHitTestVisible = visible;
+            }
+        }
+
+        // A drag can cross tiles, so every tile swallows the click that ends it — otherwise releasing over
+        // a neighbour opens the flyout right after a reposition.
+        private void SuppressTileClicks()
+        {
+            foreach (var tile in tiles)
+            {
+                if (tile is not null)
+                    tile.SuppressNextClick = true;
+            }
         }
 
         /// <summary>
@@ -820,8 +1432,13 @@ namespace TaskbarQuota.Taskbar
         {
             var result = new List<RECT>();
 
-            if (hwndStart != IntPtr.Zero && User32.GetWindowRect(hwndStart, out RECT startRect) && startRect.right > startRect.left)
+            if (hwndStart != IntPtr.Zero
+                && User32.IsWindowVisible(hwndStart)
+                && User32.GetWindowRect(hwndStart, out RECT startRect)
+                && startRect.right > startRect.left)
+            {
                 result.Add(ToTaskbarClientRect(startRect, taskbarScreenRect));
+            }
 
             // Classic taskbars (Win10 / third-party shells) expose Start/search as child windows here; on
             // Win11 these return little and the UIA button set below carries the app icons.
@@ -1154,6 +1771,12 @@ namespace TaskbarQuota.Taskbar
             if (className is not ("Start" or "TrayDummySearchControl" or "ReBarWindow32" or "MSTaskSwWClass" or "MSTaskListWClass"))
                 return true;
 
+            // A hidden shell element takes up no room on screen, so reserving its bounds costs the widget
+            // real width for nothing. Windows keeps the Start button and the legacy task list around as
+            // hidden windows with live rects, which was quietly stealing ~45px from the free span.
+            if (!User32.IsWindowVisible(hWnd))
+                return true;
+
             if (!User32.GetWindowRect(hWnd, out RECT bounds))
                 return true;
             int width = bounds.right - bounds.left;
@@ -1271,7 +1894,9 @@ namespace TaskbarQuota.Taskbar
 
         private bool EnumWindow(IntPtr hWnd, IntPtr lParam)
         {
-            if (hWnd != hwnd && User32.GetAncestor(hWnd, GetAncestorFlags.GA_PARENT) == hwndShell)
+            if (hWnd != hwnd
+                && User32.IsWindowVisible(hWnd)
+                && User32.GetAncestor(hWnd, GetAncestorFlags.GA_PARENT) == hwndShell)
             {
                 var builder = new StringBuilder(256);
                 User32.GetClassName(hWnd, builder, builder.Capacity);
@@ -1299,13 +1924,17 @@ namespace TaskbarQuota.Taskbar
             isVisible = false;
             positionUpdateCancellation.Cancel();
             try { appWindow?.Hide(); } catch { }
-            if (widgetSummary is not null)
+            foreach (var tile in tiles)
             {
-                widgetSummary.PointerPressed -= WidgetSummary_PointerPressed;
-                widgetSummary.DesiredHostWidthChanged -= WidgetSummary_DesiredHostWidthChanged;
-                widgetSummary.PointerMoved -= WidgetSummary_PointerMoved;
-                widgetSummary.PointerReleased -= WidgetSummary_PointerReleased;
-                widgetSummary.PointerCanceled -= WidgetSummary_PointerCanceled;
+                if (tile is null)
+                    continue;
+
+                tile.PointerPressed -= WidgetSummary_PointerPressed;
+                tile.DesiredHostWidthChanged -= WidgetSummary_DesiredHostWidthChanged;
+                tile.PointerMoved -= WidgetSummary_PointerMoved;
+                tile.PointerReleased -= WidgetSummary_PointerReleased;
+                tile.PointerCanceled -= WidgetSummary_PointerCanceled;
+                tile.Clicked -= OnTileClicked;
             }
             _ = CompleteDisposeAfterPositionUpdatesAsync();
             GC.SuppressFinalize(this);
@@ -1391,7 +2020,14 @@ namespace TaskbarQuota.Taskbar
             appWindow = null;
             host = null;
             hostContent = null;
-            widgetSummary = null;
+            summaryPanel = null;
+            Array.Clear(tiles);
+            Array.Clear(separators);
+            Array.Clear(tileProviders);
+            Array.Clear(tileFits);
+            Array.Clear(tileIconOnly);
+            Array.Clear(tileSuppressed);
+            lastTilePositions = new Dictionary<ProviderId, int>();
         }
     }
 }
