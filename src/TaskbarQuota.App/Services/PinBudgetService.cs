@@ -7,26 +7,18 @@ using TaskbarQuota.Usage;
 namespace TaskbarQuota.Services;
 
 /// <summary>
-/// Prices pinned providers against a fixed budget so the taskbar row can never be asked to show more than
-/// it can hold.
+/// Decides whether a provider can be pinned, by the only measure that matters: whether its tile fits the
+/// free space the taskbar actually has.
 ///
-/// A flat "three providers" cap is the wrong unit: a provider showing four rows is twice as wide as one
-/// showing two, because rows pack two to a column group. So providers are weighted instead — a short one
-/// (one or two rows) costs <see cref="ShortSlots"/>, a long one (three or more) costs
-/// <see cref="LongSlots"/> — and the user spends a budget of <see cref="TotalSlots"/> however they like:
-/// three short, two long, or a long plus two short.
+/// A pinned tile is never trimmed or reduced — it renders exactly the rows the user configured — so a set
+/// that does not fit has to be refused up front rather than rendered badly. There is deliberately no
+/// second, abstract allowance on top of this. An earlier weight budget (a provider costing one or two
+/// "slots" out of five) both duplicated this check and contradicted it: three three-row providers come to
+/// 1241px, which fits a left-aligned taskbar comfortably, yet cost six slots and were refused. Measured
+/// space is the rule; anything else is a guess that eventually says no to something that plainly works.
 /// </summary>
 public static class PinBudgetService
 {
-    /// <summary>Total weight a user may have pinned at once.</summary>
-    public const int TotalSlots = 5;
-    /// <summary>Cost of a provider rendering one or two rows — a single column group.</summary>
-    public const int ShortSlots = 1;
-    /// <summary>Cost of a provider rendering three or more rows — two column groups.</summary>
-    public const int LongSlots = 2;
-    /// <summary>Rows at which a provider stops being "short".</summary>
-    public const int LongRowThreshold = 3;
-
     /// <summary>Raised after the budget auto-unpins providers, so the UI can refresh and explain.</summary>
     public static event Action<IReadOnlyList<ProviderId>>? ProvidersUnpinned;
 
@@ -44,10 +36,6 @@ public static class PinBudgetService
     // provably fit — the widget was rendering three tiles at 702px of a 706px span while the pin for the
     // third was being rejected at 702 + 6 > 706. There is no model error left to absorb.
     private const int MeasuredFitMarginLogicalPx = 0;
-
-    /// <summary>What one provider costs, from the number of rows its tile would render.</summary>
-    public static int SlotCost(ProviderId provider)
-        => RowCount(provider) >= LongRowThreshold ? LongSlots : ShortSlots;
 
     /// <summary>Width a provider's tile takes, from the column groups its rows occupy.</summary>
     internal static int EstimateTileWidth(int rows)
@@ -76,15 +64,16 @@ public static class PinBudgetService
             : EstimateTileWidth(RowCount(provider));
 
     /// <summary>
-    /// Whether a set of providers fits the taskbar space actually measured. Returns true when nothing has
-    /// been measured yet, so a cold start falls back to the weight budget rather than refusing every pin.
+    /// Whether tiles of these row counts fit. Returns true when nothing has been measured yet — for the
+    /// second or two before a widget reports a span, the tile cap is the only bound, and refusing every
+    /// pin in that window would look broken.
     /// </summary>
     /// <remarks>
     /// Only the PINNED set is judged. Reserving extra room for the active tool's tile on top looks prudent
     /// but is wrong: when the provider being pinned is the one in use there is no extra tile at all, and
     /// the reserve then refuses pins that fit perfectly well. The case it was guarding — a third, unpinned
-    /// tool in the foreground — is handled where it can be measured exactly, by the widget dropping that
-    /// courtesy tile rather than overflowing.
+    /// tool in the foreground — is handled where it can be measured exactly, by the widget holding that
+    /// tile back rather than overflowing.
     /// </remarks>
     internal static bool FitsTaskbar(IReadOnlyList<int> rowCounts, int availableWidth)
         => FitsWidth(rowCounts.Select(EstimateTileWidth).ToList(), availableWidth, EstimatedFitMarginLogicalPx);
@@ -103,21 +92,9 @@ public static class PinBudgetService
             allMeasured ? MeasuredFitMarginLogicalPx : EstimatedFitMarginLogicalPx);
     }
 
-    public static bool IsLong(ProviderId provider) => SlotCost(provider) == LongSlots;
-
-    /// <summary>Budget currently spent, optionally ignoring one provider.</summary>
-    public static int UsedSlots(ProviderId? excluding = null)
-        => PinnedProviders()
-            .Where(p => excluding is not { } skip || p != skip)
-            .Sum(SlotCost);
-
-    /// <summary>Budget left over, treating <paramref name="excluding"/> as not pinned.</summary>
-    public static int RemainingSlots(ProviderId? excluding = null) => TotalSlots - UsedSlots(excluding);
-
     /// <summary>
-    /// Whether <paramref name="provider"/> can be pinned right now. Fails when the tile cap is reached or
-    /// the provider's weight does not fit the remaining budget; <paramref name="reason"/> explains which,
-    /// for the pin button's tooltip.
+    /// Whether <paramref name="provider"/> can be pinned right now: only the tile cap and the measured
+    /// taskbar space can refuse it. <paramref name="reason"/> says which, and what to change.
     /// </summary>
     public static bool CanPin(ProviderId provider, out string reason)
     {
@@ -130,26 +107,13 @@ public static class PinBudgetService
         var pinned = PinnedProviders();
         string name = ProviderName(provider);
 
-if (pinned.Count >= UsageCoordinator.MaxWidgetTiles)
+        if (pinned.Count >= UsageCoordinator.MaxWidgetTiles)
         {
             reason = $"The taskbar can show at most {UsageCoordinator.MaxWidgetTiles} providers at once, and you already "
                 + $"have {string.Join(", ", pinned.Select(ProviderName))} pinned. Unpin one of those to make room for {name}.";
             return false;
         }
 
-        int cost = SlotCost(provider);
-        int remaining = RemainingSlots();
-        if (cost > remaining)
-        {
-            reason = $"{name} shows {Describe(provider)}, which costs {cost} of the {TotalSlots} pin slots, "
-                + $"and only {remaining} {(remaining == 1 ? "is" : "are")} free. "
-                + $"Turn off a row or two for {name} to make it a short provider, or unpin one of "
-                + $"{string.Join(", ", pinned.Select(ProviderName))}.";
-            return false;
-        }
-
-        // The weight budget is a coarse rule; this is the real one — a tile is never trimmed or reduced, so
-        // a pin that would not fit the measured free span has to be refused rather than rendered badly.
         var candidate = pinned.Append(provider).ToList();
         if (!FitsTaskbar(candidate, Taskbar.TaskbarSpace.AvailableLogicalWidth))
         {
@@ -178,9 +142,9 @@ if (pinned.Count >= UsageCoordinator.MaxWidgetTiles)
     }
 
     /// <summary>
-    /// Brings the pinned set back inside the budget by unpinning the least recently used providers, and
-    /// reports which went. Called after anything that can change a provider's weight — enabling a row on a
-    /// pinned provider promotes it from short to long, and a display setting must never be refused because
+    /// Brings the pinned set back inside the taskbar by unpinning the least recently used providers, and
+    /// reports which went. Called after anything that can change a tile's width — enabling a row on a
+    /// pinned provider can add a whole column group, and a display setting must never be refused because
     /// of an unrelated pin.
     /// </summary>
     public static IReadOnlyList<ProviderId> EnforceBudget()
@@ -199,24 +163,17 @@ if (pinned.Count >= UsageCoordinator.MaxWidgetTiles)
             .OrderByDescending(p => recency.TryGetValue(p, out int index) ? index : int.MaxValue)
             .ToList();
 
-        var dropped = SelectDrops(
-                order.Select(p => (p, SlotCost(p))).ToList(),
-                TotalSlots,
-                UsageCoordinator.MaxWidgetTiles)
-            .ToList();
-
-        // Weight alone can pass while the row still overflows the bar — a provider that grew a third row
-        // both costs more slots AND takes another column group. Keep dropping until it genuinely fits,
-        // because there is no trimming or glyph left to absorb the overflow.
-        var keeping = order.Where(p => !dropped.Contains(p)).ToList();
+        var keeping = new List<ProviderId>(order);
+        var dropped = new List<ProviderId>();
         foreach (var provider in order)
         {
-            if (FitsTaskbar(keeping, Taskbar.TaskbarSpace.AvailableLogicalWidth))
+            if (keeping.Count <= UsageCoordinator.MaxWidgetTiles
+                && FitsTaskbar(keeping, Taskbar.TaskbarSpace.AvailableLogicalWidth))
+            {
                 break;
+            }
 
-            if (!keeping.Remove(provider))
-                continue;
-
+            keeping.Remove(provider);
             dropped.Add(provider);
         }
 
@@ -232,31 +189,29 @@ if (pinned.Count >= UsageCoordinator.MaxWidgetTiles)
         return dropped;
     }
 
-    /// <summary>Weight of a provider showing <paramref name="rows"/> rows.</summary>
-    internal static int SlotCostForRows(int rows) => rows >= LongRowThreshold ? LongSlots : ShortSlots;
-
     /// <summary>
-    /// Which pinned providers to drop so the set fits both the weight budget and the tile cap. Pure so the
-    /// arithmetic can be tested without a taskbar or cached usage.
+    /// Which pinned providers to drop so the rest fit <paramref name="availableWidth"/> and the tile cap.
+    /// Pure so the ordering can be tested without a taskbar or cached usage.
     /// </summary>
-    /// <param name="pinned">Pinned providers with their weights, least worth keeping FIRST.</param>
+    /// <param name="pinned">Pinned providers with their tile widths, least worth keeping FIRST.</param>
     internal static IReadOnlyList<ProviderId> SelectDrops(
-        IReadOnlyList<(ProviderId Provider, int Cost)> pinned,
-        int budget,
+        IReadOnlyList<(ProviderId Provider, int Width)> pinned,
+        int availableWidth,
         int maxCount)
     {
-        int used = pinned.Sum(p => p.Cost);
-        int count = pinned.Count;
+        var keeping = pinned.ToList();
         var dropped = new List<ProviderId>();
 
-        foreach (var (provider, cost) in pinned)
+        foreach (var entry in pinned)
         {
-            if (used <= budget && count <= maxCount)
+            if (keeping.Count <= maxCount
+                && RowWidth(keeping.Select(k => k.Width).ToList()) <= availableWidth)
+            {
                 break;
+            }
 
-            used -= cost;
-            count--;
-            dropped.Add(provider);
+            keeping.Remove(entry);
+            dropped.Add(entry.Provider);
         }
 
         return dropped;
