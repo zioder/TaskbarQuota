@@ -198,6 +198,67 @@ public class TaskBarWidgetGapTests
         Assert.Equal(600, TaskBarWidget.PlaceInFittingGap(450, gaps, 172));
     }
 
+    private static RECT Band(int left, int right, int top, int bottom)
+        => new() { left = left, top = top, right = right, bottom = bottom };
+
+    [Fact]
+    public void FilterOffBandRects_DropsFlyoutContentAboveTheBar()
+    {
+        // Taskbar band is [0,40) in client coords; the Widgets flyout sits above it and spans the left half.
+        var kept = TaskBarWidget.FilterOffBandRects(
+            new List<RECT> { Band(0, 500, -600, -40), R(400, 460) },
+            taskbarHeight: 40);
+
+        Assert.Single(kept);
+        Assert.Equal(400, kept[0].left);
+    }
+
+    [Fact]
+    public void FilterOffBandRects_KeepsBarItemsThatOverhangByAFewPixels()
+    {
+        var kept = TaskBarWidget.FilterOffBandRects(new List<RECT> { Band(100, 160, -3, 38) }, taskbarHeight: 40);
+
+        Assert.Single(kept);
+    }
+
+    [Fact]
+    public void FilterOffBandRects_KeepsEverythingWhenTaskbarHeightUnknown()
+    {
+        var rects = new List<RECT> { Band(0, 500, -600, -40) };
+
+        Assert.Same(rects, TaskBarWidget.FilterOffBandRects(rects, taskbarHeight: 0));
+    }
+
+    [Fact]
+    public void FilterOffBandRects_KeepsZeroHeightRects()
+    {
+        // Some shell elements report an empty vertical extent while still occupying the bar.
+        var kept = TaskBarWidget.FilterOffBandRects(new List<RECT> { Band(100, 160, 20, 20) }, taskbarHeight: 40);
+
+        Assert.Single(kept);
+    }
+
+    [Fact]
+    public void OffBandFlyoutRect_WouldOtherwiseEraseTheLeftDragZone()
+    {
+        // Regression for the "drags right but never left" report: a flyout rect covering [0,500) removes the
+        // whole left zone, so no gap left of the icon cluster remains for the drag to hand over to.
+        var flyout = Band(0, 500, -600, -40);
+        var iconCluster = R(560, 700);
+
+        // Unfiltered, the only free space left of the cluster is the 60px sliver the flyout doesn't cover —
+        // too narrow for the widget, so the drag has nowhere to go on the left.
+        var unfiltered = TaskBarWidget.ComputeFreeGaps(0, 1000, new List<RECT> { flyout, iconCluster });
+        Assert.Equal((500, 560), unfiltered[0]);
+        Assert.Equal(700, TaskBarWidget.PlaceInFittingGap(0, unfiltered, 172));
+
+        var filtered = TaskBarWidget.ComputeFreeGaps(
+            0, 1000, TaskBarWidget.FilterOffBandRects(new List<RECT> { flyout, iconCluster }, taskbarHeight: 40));
+        Assert.Equal(2, filtered.Count);
+        Assert.Equal((0, 560), filtered[0]);
+        Assert.Equal((700, 1000), filtered[1]);
+    }
+
     [Fact]
     public void ComputeUsableHorizontalBounds_PrimaryTaskbar_StopsBeforeTray()
     {

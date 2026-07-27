@@ -97,6 +97,11 @@ namespace TaskbarQuota.Taskbar
                     return CachedWidgetsButtonRect();
 
                 var rect = new RECT { left = r.left, top = r.top, right = r.right, bottom = r.bottom };
+                // The Widgets flyout hosts a "WidgetsButton" element of its own; that one floats above the
+                // bar and its x-span covers the whole left half, which would wipe out every left-hand gap.
+                if (!IsOnTaskbarBand(rect))
+                    return CachedWidgetsButtonRect();
+
                 _lastWidgetsButtonRect = rect;
                 _lastWidgetsButtonRectAt = DateTime.UtcNow;
                 return rect;
@@ -148,8 +153,20 @@ namespace TaskbarQuota.Taskbar
                 for (int i = 0; i < buttons.Length; i++)
                 {
                     var r = buttons.GetElement(i).CurrentBoundingRectangle;
-                    if (r.right > r.left && r.bottom > r.top)
-                        rects.Add(new RECT { left = r.left, top = r.top, right = r.right, bottom = r.bottom });
+                    if (r.right <= r.left || r.bottom <= r.top)
+                        continue;
+
+                    var rect = new RECT { left = r.left, top = r.top, right = r.right, bottom = r.bottom };
+                    // The taskbar UIA tree also carries buttons that are not ON the bar: the Widgets/weather
+                    // flyout, the hidden-icons overflow popup, jump lists and tooltips all hang off the same
+                    // root. Their bounds sit above the taskbar but span wide horizontal ranges, so treating
+                    // them as obstacles erases whole zones and the widget can no longer be dragged into them
+                    // (issue #21 follow-up: drag moved right but never left while the Widgets flyout tree was
+                    // present). Keep only elements that actually live in the taskbar band.
+                    if (!IsOnTaskbarBand(rect))
+                        continue;
+
+                    rects.Add(rect);
                 }
 
                 _lastTaskButtonRects = rects;
@@ -162,6 +179,19 @@ namespace TaskbarQuota.Taskbar
                 _automation = null;
                 return CachedTaskButtonRects();
             }
+        }
+
+        /// <summary>
+        /// True when <paramref name="rect"/> vertically belongs to the taskbar itself rather than to a popup
+        /// hosted in the same UIA tree. Requires most of the element's height to fall inside the bar, which
+        /// keeps genuine bar items (a pixel or two of rounding outside) and drops flyout content above it.
+        /// </summary>
+        private bool IsOnTaskbarBand(RECT rect)
+        {
+            if (!User32.GetWindowRect(hwndTaskbar, out var bar) || bar.bottom <= bar.top)
+                return true;
+
+            return TaskBarWidget.IsInVerticalBand(rect, bar.top, bar.bottom);
         }
 
         private List<RECT>? CachedTaskButtonRects()
