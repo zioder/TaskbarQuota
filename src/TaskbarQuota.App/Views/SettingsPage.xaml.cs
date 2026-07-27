@@ -208,11 +208,12 @@ namespace TaskbarQuota.Views
                 _suppressProviderToggleEvents = true;
                 try { toggle.IsOn = false; }
                 finally { _suppressProviderToggleEvents = false; }
-                ToolTipService.SetToolTip(toggle, reason);
+                PinBlockedBar.Message = reason;
+                PinBlockedBar.IsOpen = true;
                 return;
             }
 
-            ToolTipService.SetToolTip(toggle, null);
+            PinBlockedBar.IsOpen = false;
             ViewModel.ApplyPinned(item, toggle.IsOn);
             RefreshProviderRow(item);
         }

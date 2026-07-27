@@ -17,6 +17,9 @@ namespace TaskbarQuota.Taskbar
         private static TrayIconWithContextMenu? _trayIcon;
         private static System.Drawing.Icon? _trayIconSource;
         private static readonly Dictionary<IntPtr, TaskBarWidget> Widgets = new();
+        // Reused snapshot of Widgets.Values, so iterating it while a callback may mutate the dictionary
+        // doesn't allocate. Only valid until the next SnapshotWidgets call, and only used on the UI thread.
+        private static readonly List<TaskBarWidget> _widgetBuffer = new();
         private static FlyoutWindow? _flyout;
         private static DispatcherQueue? _dispatcher;
         private static Action? _showMainWindow;
@@ -101,10 +104,15 @@ namespace TaskbarQuota.Taskbar
                 RefreshPinnedTiles();
                 // The free span is only known once a widget has measured it, so a set pinned before that
                 // (or pinned when the bar was emptier) is reconciled here rather than rendering badly.
+                // EnforceBudget early-outs when neither the span nor the pinned set has moved, which is
+                // every tick but the few that follow a real change.
                 Services.PinBudgetService.EnforceBudget();
                 // Re-run the tile-fit math against the gap the last position pass measured, so tiles that
                 // were trimmed off a crowded taskbar come back once there is room for them again.
-                foreach (var widget in Widgets.Values.ToArray())
+                // Iterated over the reused buffer rather than Widgets.Values.ToArray(), which allocated an
+                // array every five seconds for the life of the process.
+                SnapshotWidgets();
+                foreach (var widget in _widgetBuffer)
                 {
                     if (widget.IsAlive)
                         widget.RefreshLayout();
@@ -309,7 +317,9 @@ namespace TaskbarQuota.Taskbar
             var providers = coordinator.WidgetDisplayProviders;
             bool isDisplayed = providers.Contains(result.Id);
 
-            foreach (var widget in Widgets.Values.ToArray())
+            // Reused buffer: this runs on every usage publish, so a fresh array per publish was pure waste.
+            SnapshotWidgets();
+            foreach (var widget in _widgetBuffer)
             {
                 if (!widget.IsAlive)
                     continue;
@@ -324,6 +334,19 @@ namespace TaskbarQuota.Taskbar
                 widget.ApplyResult(result);
                 LogWidgetApply(result.Id, "state");
             }
+        }
+
+        /// <summary>
+        /// Refills <see cref="_widgetBuffer"/> from the live dictionary. Callers iterate the buffer rather
+        /// than the dictionary because a widget callback can remove an entry mid-loop; the buffer replaces
+        /// the defensive copy that the hot paths used to allocate per pass. UI thread only, and the buffer
+        /// stays valid only until the next call.
+        /// </summary>
+        private static void SnapshotWidgets()
+        {
+            _widgetBuffer.Clear();
+            foreach (var widget in Widgets.Values)
+                _widgetBuffer.Add(widget);
         }
 
         private static void LogWidgetApply(ProviderId provider, string source)

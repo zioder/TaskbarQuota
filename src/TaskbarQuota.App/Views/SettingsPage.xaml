@@ -20,6 +20,15 @@
 
             <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,8"/>
 
+            <!-- Explains a refused pin, matching DashboardPage. A tooltip is no use here: the user has just
+                 flicked the switch and watched it spring back, so the reason has to appear unprompted. -->
+            <muxc:InfoBar x:Name="PinBlockedBar"
+                          Severity="Warning"
+                          Title="Can't pin this provider"
+                          IsOpen="False"
+                          IsClosable="True"
+                          Margin="0,0,0,4"/>
+
             <TextBlock Text="Appearance" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,8,0,2"/>
             <tk:SettingsCard Header="Theme" Description="Choose how TaskbarQuota looks.">
                 <tk:SettingsCard.HeaderIcon>

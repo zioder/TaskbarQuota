@@ -147,8 +147,21 @@ public static class PinBudgetService
     /// pinned provider can add a whole column group, and a display setting must never be refused because
     /// of an unrelated pin.
     /// </summary>
-    public static IReadOnlyList<ProviderId> EnforceBudget()
+    /// <param name="notify">
+    /// False when the caller raises <see cref="WidgetSettingsService.Changed"/> itself straight after, so
+    /// one user action does not rebuild the nav badges, the flyout strip and every widget tile twice.
+    /// </param>
+    public static IReadOnlyList<ProviderId> EnforceBudget(bool notify = true)
     {
+        // The 5s widget health tick calls this forever. Nothing can need unpinning unless the pinned set,
+        // one of its tile widths, or the free span has moved since the last run, and all three are already
+        // ints — so the common case costs a hash instead of a sort and three list allocations.
+        int key = BudgetKey();
+        if (key == _lastBudgetKey)
+            return Array.Empty<ProviderId>();
+
+        _lastBudgetKey = key;
+
         var pinned = PinnedProviders();
         if (pinned.Count == 0)
             return Array.Empty<ProviderId>();
@@ -182,11 +195,36 @@ public static class PinBudgetService
 
         if (dropped.Count > 0)
         {
-            WidgetSettingsService.SaveProviderPinsAndNotify();
+            // The set just changed, so the key computed above is stale. Recompute rather than clear, or the
+            // next tick redoes the whole sort to reach the same answer.
+            _lastBudgetKey = BudgetKey();
+            if (notify)
+                WidgetSettingsService.SaveProviderPinsAndNotify();
+            else
+                WidgetSettingsService.SaveProviderPins();
             ProvidersUnpinned?.Invoke(dropped);
         }
 
         return dropped;
+    }
+
+    // Guards the early-out above. Covers everything the decision reads: the free span, which providers are
+    // pinned, and each one's measured tile width (which changes when the user toggles a row).
+    private static int _lastBudgetKey = -1;
+
+    private static int BudgetKey()
+    {
+        var hash = new HashCode();
+        hash.Add(Taskbar.TaskbarSpace.AvailableLogicalWidth);
+        foreach (var provider in AllProviders)
+        {
+            if (!WidgetSettingsService.IsProviderPinned(provider))
+                continue;
+
+            hash.Add(provider);
+            hash.Add(Taskbar.TaskbarSpace.TryGetTileWidth(provider, out int width) ? width : 0);
+        }
+        return hash.ToHashCode();
     }
 
     /// <summary>
@@ -217,8 +255,19 @@ public static class PinBudgetService
         return dropped;
     }
 
+    // Enum.GetValues allocates a fresh array on every call, and this type is on the 5s tick path.
+    private static readonly ProviderId[] AllProviders = Enum.GetValues<ProviderId>();
+
     private static List<ProviderId> PinnedProviders()
-        => Enum.GetValues<ProviderId>().Where(WidgetSettingsService.IsProviderPinned).ToList();
+    {
+        var pinned = new List<ProviderId>();
+        foreach (var provider in AllProviders)
+        {
+            if (WidgetSettingsService.IsProviderPinned(provider))
+                pinned.Add(provider);
+        }
+        return pinned;
+    }
 
     /// <summary>
     /// Rows a provider's tile would render. Uses its cached usage when there is any, because the enabled

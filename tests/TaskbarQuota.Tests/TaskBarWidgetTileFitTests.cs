@@ -1,71 +1,53 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using TaskbarQuota.Controls;
 using TaskbarQuota.Taskbar;
+using TaskbarQuota.Usage;
 
 namespace TaskbarQuota.Tests;
 
-using Form = WidgetSummary.SummaryForm;
-
 /// <summary>
 /// The taskbar row renders pinned providers exactly as configured (issue #25): every row, every reset
-/// countdown, no trimming and no glyph fallback. Keeping the row inside the taskbar is the pin budget's
-/// job — see <see cref="PinBudgetServiceTests"/> — so the layout solver only has one form per tile.
+/// countdown, no trimming and no glyph fallback. That used to be enforced by a layout solver whose ladder
+/// held a single rung — a search that could only ever return one answer — so the guarantee is structural
+/// now instead: there is no reduced form for a tile to fall back to, and keeping the row inside the
+/// taskbar is the pin budget's job (see <see cref="PinBudgetServiceTests"/>).
+///
+/// What survives as testable logic is the order in which the widget holds a tile back when the row still
+/// overflows the measured gap: least recently used first, so whatever the user was last working in stays.
 /// </summary>
 public class TaskBarWidgetTileFitTests
 {
-    private const int GlyphWidth = 44;
-
-    private static int Expected(params int[] widths)
+    [Fact]
+    public void RecencyFollowsTheRecentlyActiveOrder()
     {
-        int total = 0;
-        for (int i = 0; i < widths.Length; i++)
-            total += widths[i] + 8 + (i > 0 ? 9 : 0);
-        return total;
+        var recent = new List<ProviderId> { ProviderId.Codex, ProviderId.Claude, ProviderId.Zai };
+
+        Assert.Equal(0, TaskBarWidget.RecencyOf(ProviderId.Codex, recent));
+        Assert.Equal(1, TaskBarWidget.RecencyOf(ProviderId.Claude, recent));
+        Assert.Equal(2, TaskBarWidget.RecencyOf(ProviderId.Zai, recent));
     }
 
-    private static Func<int, Form, int> Measure(params int[] fullWidths)
-        => (position, form) => form.IsGlyph ? GlyphWidth : fullWidths[position];
-
+    // A provider that has never been focused is the first thing to give up its tile, so it has to sort
+    // behind every provider that has been.
     [Fact]
-    public void EveryTileRendersInFullWhenThereIsRoom()
+    public void NeverActiveSortsLeastRecent()
     {
-        var forms = TaskBarWidget.SolveTileLayout(
-            new List<int> { 2, 1, 2 }, activeIndex: 0, Measure(227, 180, 180), Expected(227, 180, 180));
+        var recent = new List<ProviderId> { ProviderId.Codex };
 
-        Assert.Equal(new[] { 2, 1, 2 }, forms.Select(f => f.Rows));
-        Assert.All(forms, f => Assert.False(f.HideReset));
-    }
-
-    // The regression that matters: nothing is ever trimmed or hidden to make room, however tight it is.
-    // A provider that cannot fit should have been refused at pin time, not quietly degraded here.
-    [Fact]
-    public void NeverTrimsOrHidesATileHoweverTightTheSpace()
-    {
-        var forms = TaskBarWidget.SolveTileLayout(
-            new List<int> { 2, 3, 2 }, activeIndex: 0, Measure(227, 407, 242), budget: 100);
-
-        Assert.Equal(new[] { 2, 3, 2 }, forms.Select(f => f.Rows));
-        Assert.All(forms, f =>
-        {
-            Assert.False(f.IsGlyph);
-            Assert.False(f.IsCompact);
-            Assert.False(f.HideReset);
-        });
+        Assert.Equal(int.MaxValue, TaskBarWidget.RecencyOf(ProviderId.Cursor, recent));
+        Assert.True(TaskBarWidget.RecencyOf(ProviderId.Cursor, recent)
+            > TaskBarWidget.RecencyOf(ProviderId.Codex, recent));
     }
 
     [Fact]
-    public void RowCountsAreHonouredExactly()
-    {
-        var forms = TaskBarWidget.SolveTileLayout(
-            new List<int> { 4, 1 }, activeIndex: 1, Measure(405, 225), budget: 700);
-
-        Assert.Equal(new[] { 4, 1 }, forms.Select(f => f.Rows));
-    }
+    public void EmptySlotSortsLeastRecent()
+        => Assert.Equal(int.MaxValue, TaskBarWidget.RecencyOf(null, Array.Empty<ProviderId>()));
 
     [Fact]
-    public void EmptyRowSolvesToNothing()
-        => Assert.Empty(TaskBarWidget.SolveTileLayout(
-            new List<int>(), activeIndex: -1, Measure(), budget: 500));
+    public void FirstOccurrenceWinsWhenAProviderRepeats()
+    {
+        var recent = new List<ProviderId> { ProviderId.Codex, ProviderId.Claude, ProviderId.Codex };
+
+        Assert.Equal(0, TaskBarWidget.RecencyOf(ProviderId.Codex, recent));
+    }
 }

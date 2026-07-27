@@ -238,7 +238,11 @@ public static class WidgetSettingsService
         // Enabling a row can promote a pinned provider from short to long and push the pinned set over
         // budget. The row toggle always wins — it is this provider's own display setting — so the budget
         // is rebalanced by dropping the least recently used pin instead of refusing the change.
-        Services.PinBudgetService.EnforceBudget();
+        //
+        // Silent, because the single Changed below already covers both edits. Letting the rebalance raise
+        // its own notification meant one row toggle rebuilt the nav badges, the flyout strip and every
+        // widget tile twice.
+        Services.PinBudgetService.EnforceBudget(notify: false);
         Changed?.Invoke(null, EventArgs.Empty);
     }
 
@@ -541,7 +545,7 @@ public static class WidgetSettingsService
         }
     }
 
-    private static void SaveProviderPins()
+    internal static void SaveProviderPins()
     {
         try
         {

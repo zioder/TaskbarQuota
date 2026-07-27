@@ -72,6 +72,26 @@ namespace TaskbarQuota
             GetAppWindow().SetPresenter(presenter);
 
             Activated += OnActivated;
+            Closed += OnClosed;
+        }
+
+        /// <summary>
+        /// Drops every subscription the window owns. <see cref="WidgetSettingsService.Changed"/> is static
+        /// and the flyout is discarded and rebuilt (TaskBarManager nulls it on shutdown and on a failed
+        /// show), so without this each rebuilt flyout stays rooted for the life of the process and keeps
+        /// enqueuing strip refreshes onto a closed window's dispatcher.
+        /// </summary>
+        private void OnClosed(object sender, WindowEventArgs args)
+        {
+            Closed -= OnClosed;
+            Activated -= OnActivated;
+            WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
+            _dashboardViewModel.Cards.CollectionChanged -= DashboardCards_CollectionChanged;
+            _dashboardViewModel.SelectedCardChanged -= DashboardSelectedCardChanged;
+            _dashboardViewModel.DetailContentWidthChanged -= DashboardDetailContentWidthChanged;
+            _dashboardViewModel.DetailContentHeightChanged -= DashboardDetailContentHeightChanged;
+            _boundsUpdateTimer.Stop();
+            _providerStripItems.Clear();
         }
 
         private void OnWidgetSettingsChanged(object? sender, EventArgs e)

@@ -10,12 +10,13 @@ using TaskbarQuota.ViewModels;
 
 namespace TaskbarQuota
 {
-    internal sealed class DashboardNavigationBinder
+    internal sealed class DashboardNavigationBinder : IDisposable
     {
         private readonly NavigationView _nav;
         private readonly DashboardViewModel _viewModel;
         private readonly DispatcherQueueTimer _rebuildTimer;
         private bool _rebuildPending;
+        private bool _disposed;
 
         public bool IsSyncing { get; private set; }
 
@@ -35,6 +36,27 @@ namespace TaskbarQuota
             _viewModel.SelectedCardChanged += ViewModel_SelectedCardChanged;
             WidgetSettingsService.Changed += OnWidgetSettingsChanged;
             Rebuild();
+        }
+
+        /// <summary>
+        /// Detaches from the view model and from the static settings event.
+        ///
+        /// The window that owns this binder is destroyed and rebuilt every time the user closes and
+        /// reopens it from the tray. <see cref="WidgetSettingsService.Changed"/> is static, so a binder
+        /// that never unsubscribes is rooted for the life of the process — along with its NavigationView
+        /// and everything reachable from it — and each reopen adds another one that then refreshes badges
+        /// on a dead window's dispatcher.
+        /// </summary>
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+
+            _disposed = true;
+            WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
+            _viewModel.Cards.CollectionChanged -= Cards_CollectionChanged;
+            _viewModel.SelectedCardChanged -= ViewModel_SelectedCardChanged;
+            _rebuildTimer.Stop();
         }
 
         /// <summary>
@@ -63,7 +85,12 @@ namespace TaskbarQuota
 
         // Pins can change from the dashboard card, from Settings, or from the budget auto-unpinning one.
         private void OnWidgetSettingsChanged(object? sender, EventArgs e)
-            => _nav.DispatcherQueue.TryEnqueue(RefreshPinBadges);
+        {
+            if (_disposed)
+                return;
+
+            _nav.DispatcherQueue.TryEnqueue(RefreshPinBadges);
+        }
 
         private void Cards_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
         {

@@ -44,22 +44,11 @@ namespace TaskbarQuota.Taskbar
         // Space assumed available before the first position pass has measured the real taskbar gap. Wide
         // enough for three tiles; the first pass corrects it either way.
         private const int DefaultAvailableLogicalWidth = 640;
-        // Rows a pinned tile shows while it is NOT the active tool. Two is one full column group, so such a
-        // tile has a fixed width whatever the user enables, and enabling a row can never evict a neighbour.
-        private const int PinnedTileMaxRows = 2;
-        // Floor for the active tool's tile. It may give up a third row to keep another provider on the bar,
-        // but never drops to a single line — that reads as a glitch rather than as a space saving.
-        private const int MinActiveRows = 2;
         // A tile only animates when it genuinely moved; below this a value simply changed width.
         private const int TileMoveThresholdLogicalPx = 8;
         // How far a newly shown tile eases in from. Short enough to stay inside the host window, so it
         // reads as arriving rather than being clipped off the taskbar edge.
         private const int TileEntryOffsetLogicalPx = 28;
-        // Worth of a reset countdown, by whose tile it is on. Both stay below a row (4 points) so a row is
-        // never traded for a countdown, but the active tool keeps its countdowns until every pinned tile
-        // has given theirs up.
-        private const int ActiveResetWeight = 3;
-        private const int PinnedResetWeight = 1;
         private static readonly TimeSpan PositionDisposeWait = TimeSpan.FromSeconds(3);
         private const int ERROR_CLASS_ALREADY_EXISTS = 1410;
         // Approx width of the Win11 far-left Widgets/weather pill; used to reserve clearance when its exact
@@ -105,19 +94,25 @@ namespace TaskbarQuota.Taskbar
         // Slot has a provider AND fits inside the measured taskbar gap. Trimming only ever drops from the
         // right, so the leading (active) tile is the last one to go.
         private readonly bool[] tileFits = new bool[UsageCoordinator.MaxWidgetTiles];
-        // Collapsed to the provider glyph because the row didn't fit at full width.
-        private readonly bool[] tileIconOnly = new bool[UsageCoordinator.MaxWidgetTiles];
         // Has a provider, but is being held back this pass because the row would otherwise overflow. Only
         // ever the active tool's tile when that provider is not pinned.
         private readonly bool[] tileSuppressed = new bool[UsageCoordinator.MaxWidgetTiles];
+        // Scratch buffers for one layout pass, held as fields because that pass runs on every usage publish
+        // and on the 5s health tick. layoutSlots[0..count) are the occupied slot indices in render order.
+        private readonly int[] layoutSlots = new int[UsageCoordinator.MaxWidgetTiles];
+        private readonly int[] layoutWidths = new int[UsageCoordinator.MaxWidgetTiles];
         private ProviderId? activeTileProvider;
         // Where each shown provider sat in the last layout, so the next one can animate the difference.
+        // Double-buffered and swapped each pass so a layout allocates no dictionary.
         private Dictionary<ProviderId, int> lastTilePositions = new();
+        private Dictionary<ProviderId, int> tilePositions = new();
+        private Microsoft.UI.Xaml.Media.Brush? separatorBrush;
+        private bool? separatorBrushIsLight;
         private Microsoft.UI.Xaml.Controls.StackPanel? summaryPanel;
         private int availableLogicalWidth = DefaultAvailableLogicalWidth;
         private bool isRecomputingLayout;
         private bool layoutRepositionPending;
-        private string? lastLayoutSignature;
+        private int lastLayoutHash;
         private DesktopWindowXamlSource? host;
         private Microsoft.UI.Xaml.FrameworkElement? hostContent;
         private int WidgetHostWidth;
@@ -424,25 +419,18 @@ namespace TaskbarQuota.Taskbar
         public void RefreshLayout() => RecomputeLayout();
 
         /// <summary>
-        /// Fits the tiles into the free taskbar space and resizes the host to the result, degrading only as
-        /// far as it has to:
+        /// Lays the tiles out and resizes the host to the result.
         ///
-        /// 1. every tile shows every row the user enabled — the normal case, and what runs whenever there
-        ///    is room, so a pinned tile is never trimmed just for being pinned;
-        /// 2. tiles other than the active tool's drop to <see cref="PinnedTileMaxRows"/> rows, becoming
-        ///    fixed-width summaries;
-        /// 3. tiles collapse to their provider glyph, from the right, so the active tile keeps its detail
-        ///    longest.
+        /// Every tile renders exactly what the user configured — all of its rows, with their reset
+        /// countdowns. There is deliberately no reduced form: trimming a pinned provider is worse than
+        /// refusing the pin (issue #25), so keeping the row inside the bar is
+        /// <see cref="Services.PinBudgetService"/>'s job. The only concession made here is holding back the
+        /// least recently used non-active tile when the row still overflows the measured gap, which covers
+        /// the transient case of an unpinned active tool arriving beside a full pinned set.
         ///
-        /// A pinned tile is never dropped — pinning is a promise that the provider stays on the bar, and
-        /// even a collapsed tile keeps its numbers in its tooltip.
-        ///
-        /// Every tile is measured fresh in both variants on each pass rather than measured once and cached.
-        /// Caching was wrong twice over: the cache was keyed by slot, but a provider switch re-orders which
-        /// provider a slot holds, and a collapsed tile renders as a glyph so it cannot restate its own
-        /// expanded width — together that left a tile stuck collapsed on a width belonging to a different
-        /// provider. Measuring is cheap (RenderRows only walks columns) and the tree is not painted until
-        /// the pass returns, so the intermediate states are never visible.
+        /// Widths are measured, never rendered: <see cref="WidgetSummary.MeasureDesiredWidth"/> is a pure
+        /// calculation over the columns, whereas rendering to read a width restarted the tile's refresh
+        /// animation on every usage publish and read as a tile flashing once a second.
         /// </summary>
         private void RecomputeLayout(bool forceReposition = false)
         {
@@ -462,52 +450,38 @@ namespace TaskbarQuota.Taskbar
             try
             {
                 Array.Clear(tileSuppressed);
-                var slots = new List<int>(tiles.Length);
+
+                // Slot and width buffers are fields, not locals: at most three tiles, and this pass runs on
+                // every usage publish and every 5s health tick across every taskbar.
+                int count = 0;
                 for (int i = 0; i < tiles.Length; i++)
                 {
                     if (tileProviders[i] is not null)
-                        slots.Add(i);
+                        layoutSlots[count++] = i;
                 }
 
-                HoldBackTilesThatDoNotFit(slots);
+                count = HoldBackTilesThatDoNotFit(layoutSlots, count);
 
-                // Candidate layouts are measured, never rendered — MeasureDesiredWidth is a pure
-                // calculation. Rendering to measure made the tile restart its refresh animation on every
-                // usage publish, which read as a tile flashing about once a second.
-                var rowCounts = new List<int>(slots.Count);
-                int activeIndex = -1;
-                for (int n = 0; n < slots.Count; n++)
-                {
-                    rowCounts.Add(tiles[slots[n]].RowCount);
-                    if (IsActiveTile(slots[n]))
-                        activeIndex = n;
-                }
-
-                var forms = SolveTileLayout(
-                    rowCounts,
-                    activeIndex,
-                    (position, form) => tiles[slots[position]].MeasureDesiredWidth(form),
-                    availableLogicalWidth);
-
-                var widths = new List<int>(slots.Count);
+                // Widths are measured, never rendered — MeasureDesiredWidth is a pure calculation.
+                // Rendering to measure made the tile restart its refresh animation on every usage publish,
+                // which read as a tile flashing about once a second.
+                var brush = TaskbarForegroundBrush();
                 int total = 0;
-                for (int n = 0; n < slots.Count; n++)
+                for (int n = 0; n < count; n++)
                 {
-                    int i = slots[n];
-                    tileIconOnly[i] = forms[n].IsGlyph;
-                    int width = tiles[i].MeasureDesiredWidth(forms[n]);
-                    widths.Add(width);
+                    int i = layoutSlots[n];
+                    int width = tiles[i].MeasureDesiredWidth();
+                    layoutWidths[n] = width;
                     if (tileProviders[i] is { } measuredProvider)
                         TaskbarSpace.RecordTileWidth(measuredProvider, width);
                     total += width + TileHorizontalMarginLogicalPx + (n > 0 ? TileSeparatorLogicalPx : 0);
-                    tiles[i].SetSummaryMode(forms[n]);
                 }
 
                 for (int i = 0; i < tiles.Length; i++)
                 {
                     // A suppressed slot still HAS a provider — it is the courtesy tile that had to give way
                     // — so visibility has to consult the suppression too, or this loop hands it straight
-                    // back with no form or width assigned, which is what left a stray divider on the bar.
+                    // back with no width assigned, which is what left a stray divider on the bar.
                     bool shown = tileProviders[i] is not null && !tileSuppressed[i];
                     tileFits[i] = shown;
                     tiles[i].Visibility = shown ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
@@ -519,21 +493,21 @@ namespace TaskbarQuota.Taskbar
                     separators[i].Visibility = tileFits[i] && tileFits[i + 1]
                         ? Microsoft.UI.Xaml.Visibility.Visible
                         : Microsoft.UI.Xaml.Visibility.Collapsed;
-                    separators[i].Foreground = TaskbarForegroundBrush();
+                    separators[i].Foreground = brush;
                 }
 
-                AnimateTileMovement(slots, widths);
+                AnimateTileMovement(layoutSlots, count, layoutWidths);
 
-                // The layout is recomputed on every usage publish, so only report an actual change.
-                var signature = $"budget={availableLogicalWidth} rows=[{string.Join(",", rowCounts)}] "
-                    + $"forms=[{string.Join(",", forms)}] widths=[{string.Join(",", widths)}] total={total}";
-                if (signature != lastLayoutSignature)
+                // The layout is recomputed on every usage publish, so only report an actual change — and
+                // decide that from a hash, so the unchanged case (nearly all of them) formats no string.
+                int hash = LayoutHash(count, total);
+                if (hash != lastLayoutHash)
                 {
-                    lastLayoutSignature = signature;
-                    Log.Debug($"[widget] layout {signature}");
+                    lastLayoutHash = hash;
+                    Log.Debug($"[widget] layout {DescribeLayout(count, total)}");
                 }
 
-                bool resized = ResizeWidgetHost(slots.Count == 0 ? DefaultWidgetHostWidth : total);
+                bool resized = ResizeWidgetHost(count == 0 ? DefaultWidgetHostWidth : total);
                 if (resized || forceReposition)
                     UpdatePosition();
             }
@@ -552,6 +526,31 @@ namespace TaskbarQuota.Taskbar
         private bool IsActiveTile(int slot)
             => tileProviders[slot] is { } provider && activeTileProvider == provider;
 
+        private int LayoutHash(int count, int total)
+        {
+            var hash = new HashCode();
+            hash.Add(availableLogicalWidth);
+            hash.Add(total);
+            for (int n = 0; n < count; n++)
+            {
+                hash.Add(tileProviders[layoutSlots[n]]);
+                hash.Add(layoutWidths[n]);
+            }
+            return hash.ToHashCode();
+        }
+
+        private string DescribeLayout(int count, int total)
+        {
+            var text = new StringBuilder(128);
+            text.Append("budget=").Append(availableLogicalWidth).Append(" tiles=[");
+            for (int n = 0; n < count; n++)
+            {
+                if (n > 0) text.Append(',');
+                text.Append(tileProviders[layoutSlots[n]]).Append(':').Append(layoutWidths[n]);
+            }
+            return text.Append("] total=").Append(total).ToString();
+        }
+
         /// <summary>
         /// Holds tiles back until the row fits the free taskbar span, so the widget never grows over the
         /// shell's own buttons.
@@ -561,41 +560,68 @@ namespace TaskbarQuota.Taskbar
         /// the cheaper thing to lose for a moment. Pinned tiles yield least-recently-used first and come
         /// straight back when you switch away, so a pin still guarantees presence the rest of the time.
         /// </summary>
-        private void HoldBackTilesThatDoNotFit(List<int> slots)
+        /// <param name="slots">Occupied slot indices; compacted in place. Returns how many survive.</param>
+        private int HoldBackTilesThatDoNotFit(int[] slots, int count)
         {
-            if (slots.Count <= 1)
-                return;
+            if (count <= 1)
+                return count;
 
-            // Least recently used first, and never the active tile.
             var recent = UsageCoordinator.Instance.RecentProviders;
-            var recency = new Dictionary<ProviderId, int>();
-            for (int i = 0; i < recent.Count; i++)
-                recency.TryAdd(recent[i], i);
 
-            var dropOrder = slots
-                .Where(slot => !IsActiveTile(slot))
-                .OrderByDescending(slot => tileProviders[slot] is { } p && recency.TryGetValue(p, out int index)
-                    ? index
-                    : int.MaxValue)
-                .ToList();
-
-            foreach (int slot in dropOrder)
+            // Drop the least recently used non-active tile, one at a time, until the row fits. Selection is
+            // a linear scan rather than an ordered projection: at most three tiles, and this runs on every
+            // usage publish, so the LINQ pipeline it replaces was allocating a dictionary, a lambda closure
+            // and two lists per pass to sort three items.
+            while (count > 1 && MeasureRow(slots, count) > availableLogicalWidth)
             {
-                if (MeasureRow(slots) <= availableLogicalWidth)
-                    return;
+                int worstAt = -1;
+                int worstRecency = int.MinValue;
+                for (int n = 0; n < count; n++)
+                {
+                    if (IsActiveTile(slots[n]))
+                        continue;
 
-                slots.Remove(slot);
-                tileSuppressed[slot] = true;
+                    int recency = RecencyOf(tileProviders[slots[n]], recent);
+                    if (recency > worstRecency)
+                    {
+                        worstRecency = recency;
+                        worstAt = n;
+                    }
+                }
+
+                if (worstAt < 0)
+                    break;
+
+                tileSuppressed[slots[worstAt]] = true;
+                Array.Copy(slots, worstAt + 1, slots, worstAt, count - worstAt - 1);
+                count--;
             }
+
+            return count;
         }
 
-        private int MeasureRow(List<int> slots)
+        /// <summary>Position in the recently-active list; <see cref="int.MaxValue"/> when never active, so
+        /// "never used" sorts as least recent.</summary>
+        internal static int RecencyOf(ProviderId? provider, IReadOnlyList<ProviderId> recent)
+        {
+            if (provider is not { } id)
+                return int.MaxValue;
+
+            for (int i = 0; i < recent.Count; i++)
+            {
+                if (recent[i] == id)
+                    return i;
+            }
+
+            return int.MaxValue;
+        }
+
+        private int MeasureRow(int[] slots, int count)
         {
             int total = 0;
-            for (int n = 0; n < slots.Count; n++)
+            for (int n = 0; n < count; n++)
             {
-                total += tiles[slots[n]].MeasureDesiredWidth(
-                        new WidgetSummary.SummaryForm(Math.Max(1, tiles[slots[n]].RowCount), HideReset: false))
+                total += tiles[slots[n]].MeasureDesiredWidth()
                     + TileHorizontalMarginLogicalPx
                     + (n > 0 ? TileSeparatorLogicalPx : 0);
             }
@@ -612,11 +638,16 @@ namespace TaskbarQuota.Taskbar
         /// slots are a fixed pool and providers move between them, so slot identity says nothing about what
         /// the user saw move.
         /// </summary>
-        private void AnimateTileMovement(List<int> slots, List<int> widths)
+        private void AnimateTileMovement(int[] slots, int count, int[] widths)
         {
-            var positions = new Dictionary<ProviderId, int>(slots.Count);
+            // Scratch dictionary owned by this widget and cleared per pass, then swapped with the previous
+            // one below — the layout runs on every usage publish, so a fresh dictionary each time was the
+            // single largest per-pass allocation here.
+            var positions = tilePositions;
+            positions.Clear();
+
             int x = TileHorizontalMarginLogicalPx / 2;
-            for (int n = 0; n < slots.Count; n++)
+            for (int n = 0; n < count; n++)
             {
                 if (tileProviders[slots[n]] is { } provider)
                     positions[provider] = x;
@@ -625,7 +656,7 @@ namespace TaskbarQuota.Taskbar
 
             // First layout of the session: the tiles have their own reveal animation, nothing to move from.
             bool hadPositions = lastTilePositions.Count > 0;
-            for (int n = 0; n < slots.Count; n++)
+            for (int n = 0; n < count; n++)
             {
                 if (tileProviders[slots[n]] is not { } provider)
                     continue;
@@ -643,196 +674,26 @@ namespace TaskbarQuota.Taskbar
                 }
             }
 
-            lastTilePositions = positions;
+            // Swap rather than reassign: the outgoing dictionary becomes next pass's scratch buffer.
+            (lastTilePositions, tilePositions) = (positions, lastTilePositions);
         }
 
         /// <summary>
-        /// Total logical width of the tile row when the trailing <paramref name="collapsed"/> tiles render
-        /// as glyphs only. Works off cached widths, so a layout that isn't on screen yet can be measured —
-        /// which is what lets the collapse count be solved outright instead of by trial and error.
+        /// Separator colour for the current system theme. Cached: the layout pass runs on every usage
+        /// publish and on the 5s health tick, and a fresh SolidColorBrush per separator per pass was steady
+        /// garbage for a value that only changes when the user switches theme.
         /// </summary>
-        internal static int MeasureRowWidth(IReadOnlyList<int> fullWidths, int collapsed, int iconWidth)
-        {
-            var icons = new bool[fullWidths.Count];
-            for (int i = fullWidths.Count - collapsed; i < fullWidths.Count; i++)
-                icons[i] = true;
-            return MeasureRowWidth(fullWidths, icons, iconWidth);
-        }
-
-        /// <summary>Row width with an explicit set of collapsed tiles, which need not be contiguous.</summary>
-        internal static int MeasureRowWidth(IReadOnlyList<int> fullWidths, IReadOnlyList<bool> icons, int iconWidth)
-        {
-            int total = 0;
-            for (int i = 0; i < fullWidths.Count; i++)
-            {
-                total += (icons[i] ? iconWidth : fullWidths[i])
-                    + TileHorizontalMarginLogicalPx
-                    + (i > 0 ? TileSeparatorLogicalPx : 0);
-            }
-
-            return total;
-        }
-
-        /// <summary>
-        /// Picks the least-degraded layout that fits <paramref name="budget"/>.
-        ///
-        /// Every tile renders in full — all of its rows, with their reset countdowns. When the row does not
-        /// fit, tiles fall back to a bare glyph rather than being trimmed, and the search picks which ones:
-        /// giving up a NARROW tile can be the better trade when it lets a wide neighbour render, which a
-        /// positional rule cannot see. At most three tiles is a search space of eight, evaluated with pure
-        /// arithmetic.
-        ///
-        /// The active tool's tile is never the one given up unless nothing fits at all.
-        /// </summary>
-        /// <param name="rowCounts">Rows each tile wants to show, left to right.</param>
-        /// <param name="activeIndex">Position of the active tool's tile, or -1 when none is active.</param>
-        /// <param name="measure">
-        /// (position, form) => rendered width for that tile in the given form.
-        /// </param>
-        /// <returns>The chosen detail level per tile.</returns>
-        internal static WidgetSummary.SummaryForm[] SolveTileLayout(
-            IReadOnlyList<int> rowCounts,
-            int activeIndex,
-            Func<int, WidgetSummary.SummaryForm, int> measure,
-            int budget)
-        {
-            int count = rowCounts.Count;
-            if (count == 0)
-                return Array.Empty<WidgetSummary.SummaryForm>();
-
-            // A pinned provider shows everything the user asked it to show, countdowns included — that is
-            // the whole point of pinning it (issue #25). There is no fallback form: a tile is never trimmed
-            // and never reduced to a bare glyph, because a logo with no figures is worse than no pin at all.
-            //
-            // Keeping the row inside the taskbar is therefore the PIN BUDGET's job, not this method's —
-            // PinBudgetService refuses a pin that would not fit, so by the time a provider gets here it is
-            // known to have room.
-            var ladders = new List<WidgetSummary.SummaryForm>[count];
-            for (int i = 0; i < count; i++)
-                ladders[i] = [new WidgetSummary.SummaryForm(Math.Max(1, rowCounts[i]), HideReset: false)];
-
-            // Pass 1 keeps the active tile above the floor; pass 2 drops that guard so a bar with no room
-            // at all still renders something rather than nothing.
-            for (int pass = 0; pass < 2; pass++)
-            {
-                var best = SearchLevels(ladders, rowCounts, activeIndex, measure, budget, guardActive: pass == 0);
-                if (best is not null)
-                    return best;
-            }
-
-            // The row overflows the free span. Render it in full regardless: there is deliberately no
-            // reduced form to fall back to, and the pin budget should have refused the pin that caused
-            // this. Overflowing visibly is the honest outcome — and the signal that the budget is wrong.
-            var full = new WidgetSummary.SummaryForm[count];
-            for (int i = 0; i < count; i++)
-                full[i] = ladders[i][0];
-            return full;
-        }
-
-        private static WidgetSummary.SummaryForm[]? SearchLevels(
-            IReadOnlyList<List<WidgetSummary.SummaryForm>> ladders,
-            IReadOnlyList<int> rowCounts,
-            int activeIndex,
-            Func<int, WidgetSummary.SummaryForm, int> measure,
-            int budget,
-            bool guardActive)
-        {
-            int count = ladders.Count;
-            int combinations = 1;
-            for (int i = 0; i < count; i++)
-                combinations *= ladders[i].Count;
-
-            WidgetSummary.SummaryForm[]? bestForms = null;
-            (int Detail, int Shown, int Rightness) bestScore = (-1, -1, -1);
-
-            for (int combo = 0; combo < combinations; combo++)
-            {
-                var forms = new WidgetSummary.SummaryForm[count];
-                int rest = combo;
-                for (int i = 0; i < count; i++)
-                {
-                    forms[i] = ladders[i][rest % ladders[i].Count];
-                    rest /= ladders[i].Count;
-                }
-
-                if (guardActive && activeIndex >= 0
-                    && forms[activeIndex].Rows < Math.Min(MinActiveRows, Math.Max(1, rowCounts[activeIndex])))
-                {
-                    continue;
-                }
-
-                int total = 0;
-                for (int i = 0; i < count; i++)
-                {
-                    total += measure(i, forms[i])
-                        + TileHorizontalMarginLogicalPx
-                        + (i > 0 ? TileSeparatorLogicalPx : 0);
-                }
-
-                if (total > budget)
-                    continue;
-
-                // Rank by how much is actually readable. A row is worth four points, so a row always beats a
-                // countdown and dropping the countdown is the cheapest step down. A countdown on the ACTIVE
-                // tile is worth more than one on a pinned tile: when you are working in a tool, when its
-                // window resets is the number you care about, whereas a pinned provider you are only
-                // monitoring can lose its countdown to the tooltip. Without that weighting every countdown
-                // scored the same, ties fell to enumeration order, and the active tile — evaluated first —
-                // was always the one stripped.
-                int detail = 0, shown = 0, rightness = 0;
-                for (int i = 0; i < count; i++)
-                {
-                    if (forms[i].Rows >= 1)
-                    {
-                        detail += forms[i].Rows * 4;
-                        if (forms[i].HideReset)
-                            rightness += i;
-                        else
-                            detail += i == activeIndex ? ActiveResetWeight : PinnedResetWeight;
-                        shown++;
-                    }
-                    else if (forms[i].IsCompact)
-                    {
-                        detail += 1;
-                        shown++;
-                        rightness += i;
-                    }
-                    else
-                    {
-                        rightness += i;
-                    }
-                }
-
-                var score = (detail, shown, rightness);
-                if (score.CompareTo(bestScore) <= 0)
-                    continue;
-
-                bestScore = score;
-                bestForms = forms;
-            }
-
-            return bestForms;
-        }
-
-        /// <summary>
-        /// How many trailing tiles must collapse to their glyph for the row to fit <paramref name="budget"/>.
-        /// Collapsing from the right means the active tile (slot 0) keeps its detail longest. Can return the
-        /// full count when even a row of glyphs overflows — that's the floor, and a clipped row of glyphs
-        /// still beats a pinned provider disappearing.
-        /// </summary>
-        internal static int SolveCollapseCount(IReadOnlyList<int> fullWidths, int iconWidth, int budget)
-        {
-            int collapsed = 0;
-            while (collapsed < fullWidths.Count && MeasureRowWidth(fullWidths, collapsed, iconWidth) > budget)
-                collapsed++;
-            return collapsed;
-        }
-
-        private static Microsoft.UI.Xaml.Media.Brush TaskbarForegroundBrush()
+        private Microsoft.UI.Xaml.Media.Brush TaskbarForegroundBrush()
         {
             bool light = SystemInfos.IsSystemLightThemeUsed() == true;
-            return new Microsoft.UI.Xaml.Media.SolidColorBrush(
-                light ? Windows.UI.Color.FromArgb(255, 28, 28, 28) : Colors.White);
+            if (separatorBrush is null || separatorBrushIsLight != light)
+            {
+                separatorBrushIsLight = light;
+                separatorBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(
+                    light ? Windows.UI.Color.FromArgb(255, 28, 28, 28) : Colors.White);
+            }
+
+            return separatorBrush;
         }
 
         // Records the widest free gap (logical px) as the budget for how many tiles may render. Called from
@@ -2022,9 +1883,11 @@ namespace TaskbarQuota.Taskbar
             Array.Clear(separators);
             Array.Clear(tileProviders);
             Array.Clear(tileFits);
-            Array.Clear(tileIconOnly);
             Array.Clear(tileSuppressed);
-            lastTilePositions = new Dictionary<ProviderId, int>();
+            lastTilePositions.Clear();
+            tilePositions.Clear();
+            separatorBrush = null;
+            separatorBrushIsLight = null;
         }
     }
 }

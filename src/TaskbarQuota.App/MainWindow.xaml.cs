@@ -33,6 +33,13 @@ namespace TaskbarQuota
             Root.SizeChanged += (_, _) => UpdateResponsiveNavigation();
             Root.Loaded += OnRootLoaded;
             Nav.Loaded += (_, _) => _navigationBinder?.ReapplySelection();
+            // The window is discarded on close and rebuilt on the next tray open, so the binder has to let
+            // go of the static settings event or every reopen leaks one.
+            Closed += (_, _) =>
+            {
+                _navigationBinder?.Dispose();
+                _navigationBinder = null;
+            };
             UpdateResponsiveNavigation();
         }
 
