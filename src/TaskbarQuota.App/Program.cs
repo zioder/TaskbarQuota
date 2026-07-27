@@ -1,5 +1,7 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.UI.Dispatching;
 using Microsoft.Windows.AppLifecycle;
@@ -95,12 +97,14 @@ namespace TaskbarQuota
                 return false;
             }
 
+            // Read after the wait, which the SetEvent below happens-before. Reading the task's own
+            // state would race: the event is signalled before the task is marked completed. Boxed and
+            // accessed through Volatile so the write is published even without that ordering.
+            var redirectFailure = new StrongBox<Exception?>(null);
+            bool signalled = false;
+
             try
             {
-                // Read after the wait, which the SetEvent below happens-before. Reading the task's
-                // own state would race: the event is signalled before the task is marked completed.
-                Exception? redirectFailure = null;
-
                 _ = Task.Run(async () =>
                 {
                     try
@@ -109,7 +113,7 @@ namespace TaskbarQuota
                     }
                     catch (Exception ex)
                     {
-                        redirectFailure = ex;
+                        Volatile.Write(ref redirectFailure.Value, ex);
                     }
                     finally
                     {
@@ -123,15 +127,16 @@ namespace TaskbarQuota
                 var waitResult = CoWaitForMultipleObjects(
                     CWMO_DEFAULT, RedirectTimeoutMilliseconds, 1, [redirectCompleted], out _);
 
-                if (waitResult != WAIT_OBJECT_0)
+                signalled = waitResult == WAIT_OBJECT_0;
+                if (!signalled)
                 {
                     Log.Warning($"Activation redirect did not complete within {RedirectTimeoutMilliseconds}ms (result 0x{waitResult:X8})");
                     return false;
                 }
 
-                if (redirectFailure is not null)
+                if (Volatile.Read(ref redirectFailure.Value) is { } failure)
                 {
-                    Log.Warning(redirectFailure, "Activation redirect to the running instance failed");
+                    Log.Warning(failure, "Activation redirect to the running instance failed");
                     return false;
                 }
 
@@ -139,7 +144,12 @@ namespace TaskbarQuota
             }
             finally
             {
-                CloseHandle(redirectCompleted);
+                // Only close once the redirect task has signalled. On the timeout path that task is
+                // still running and about to call SetEvent, which would then signal a closed handle —
+                // or, once the value is recycled, an unrelated object. Leaking one event handle in a
+                // process that is seconds from either exiting or starting the app is the cheaper bug.
+                if (signalled)
+                    CloseHandle(redirectCompleted);
             }
         }
 
