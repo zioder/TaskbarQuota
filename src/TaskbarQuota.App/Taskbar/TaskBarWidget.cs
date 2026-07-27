@@ -94,7 +94,7 @@ namespace TaskbarQuota.Taskbar
         private (int start, int end)? activeDragGap;
         // Last drag solve written to the log, so a held drag logs on change instead of once per pointer sample.
         private (int start, int end)? loggedDragZone;
-        private int loggedDragGapCount = -1;
+        private int loggedDragGapHash;
         private int lastCursorPositionX;
         private int pressCursorPositionX;
         private bool initialized;
@@ -650,6 +650,9 @@ namespace TaskbarQuota.Taskbar
         /// itself changed). One line per change keeps the log small while still showing exactly which
         /// obstacle pinned the widget — a drag that only moves one way looks identical to the user whether the
         /// cause is a phantom obstacle, a bad grab offset, or clamped bounds.
+        ///
+        /// The gap set is compared by SHAPE, not by count: obstacles move and resize far more often than they
+        /// appear or disappear, so counting alone silently swallowed the changes most worth seeing.
         /// </summary>
         private void LogDragState(
             int cursorClientX,
@@ -661,23 +664,63 @@ namespace TaskbarQuota.Taskbar
             (int start, int end)? zone,
             int targetX)
         {
-            if (zone == loggedDragZone && gaps.Count == loggedDragGapCount)
+            int gapHash = HashSpans(gaps);
+            if (zone == loggedDragZone && gapHash == loggedDragGapHash)
                 return;
 
             loggedDragZone = zone;
-            loggedDragGapCount = gaps.Count;
-            Log.Debug(
-                $"drag solve: cursor={cursorClientX} grab={draggingInnerOffsetX} desired={desiredX} " +
-                $"width={WidgetHostWidth} bounds=[{leftBound},{rightBound}) " +
-                $"zone={(zone is { } z ? $"[{z.start},{z.end})" : "none")} target={targetX} " +
-                $"gaps={FormatSpans(gaps)} obstacles={FormatObstacles(obstacles)}");
+            loggedDragGapHash = gapHash;
+
+            // Built in one buffer rather than via ConvertAll + Join, which allocated two intermediate
+            // string lists per line on a path that runs inside a live drag.
+            var text = new StringBuilder(256);
+            text.Append("drag solve: cursor=").Append(cursorClientX)
+                .Append(" grab=").Append(draggingInnerOffsetX)
+                .Append(" desired=").Append(desiredX)
+                .Append(" width=").Append(WidgetHostWidth)
+                .Append(" bounds=[").Append(leftBound).Append(',').Append(rightBound).Append(')')
+                .Append(" zone=");
+            if (zone is { } z)
+                text.Append('[').Append(z.start).Append(',').Append(z.end).Append(')');
+            else
+                text.Append("none");
+            text.Append(" target=").Append(targetX).Append(" gaps=");
+            AppendSpans(text, gaps);
+            text.Append(" obstacles=");
+            AppendObstacles(text, obstacles);
+            Log.Debug(text.ToString());
         }
 
-        private static string FormatSpans(List<(int start, int end)> spans)
-            => spans.Count == 0 ? "-" : string.Join(",", spans.ConvertAll(s => $"[{s.start},{s.end})"));
+        private static int HashSpans(List<(int start, int end)> spans)
+        {
+            var hash = new HashCode();
+            foreach (var (start, end) in spans)
+            {
+                hash.Add(start);
+                hash.Add(end);
+            }
+            return hash.ToHashCode();
+        }
 
-        private static string FormatObstacles(List<RECT> obstacles)
-            => obstacles.Count == 0 ? "-" : string.Join(",", obstacles.ConvertAll(o => $"[{o.left},{o.right})"));
+        private static void AppendSpans(StringBuilder text, List<(int start, int end)> spans)
+        {
+            if (spans.Count == 0) { text.Append('-'); return; }
+            for (int i = 0; i < spans.Count; i++)
+            {
+                if (i > 0) text.Append(',');
+                text.Append('[').Append(spans[i].start).Append(',').Append(spans[i].end).Append(')');
+            }
+        }
+
+        private static void AppendObstacles(StringBuilder text, List<RECT> obstacles)
+        {
+            if (obstacles.Count == 0) { text.Append('-'); return; }
+            for (int i = 0; i < obstacles.Count; i++)
+            {
+                if (i > 0) text.Append(',');
+                text.Append('[').Append(obstacles[i].left).Append(',').Append(obstacles[i].right).Append(')');
+            }
+        }
 
         /// <summary>
         /// Re-anchors the grab point whenever the widget is pinned and the cursor has run past it (span end
@@ -821,7 +864,7 @@ namespace TaskbarQuota.Taskbar
         {
             activeDragGap = null;
             loggedDragZone = null;
-            loggedDragGapCount = -1;
+            loggedDragGapHash = 0;
             User32.GetWindowRect(hwndShell, out RECT taskbarScreenRect);
             _ = PrimeObstacleCacheAsync(taskbarScreenRect);
         }
