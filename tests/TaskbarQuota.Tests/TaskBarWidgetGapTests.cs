@@ -257,6 +257,11 @@ public class TaskBarWidgetGapTests
         Assert.Equal(2, filtered.Count);
         Assert.Equal((0, 560), filtered[0]);
         Assert.Equal((700, 1000), filtered[1]);
+
+        // The point of the filter: the solver now HANDS the drag the left zone instead of pushing it back
+        // past the cluster. Asserting the gap exists is not enough — the reported symptom was the placement,
+        // and a gap the solver declines to use looks identical to no gap at all.
+        Assert.Equal(0, TaskBarWidget.PlaceInFittingGap(0, filtered, 172));
     }
 
     [Fact]
