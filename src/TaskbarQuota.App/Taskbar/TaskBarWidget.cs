@@ -140,6 +140,9 @@ namespace TaskbarQuota.Taskbar
         // Where the drag currently sits, and the free gap it is tracking the cursor inside.
         private int? dragPreviewX;
         private (int start, int end)? activeDragGap;
+        // Last drag solve written to the log, so a held drag logs on change instead of once per pointer sample.
+        private (int start, int end)? loggedDragZone;
+        private int loggedDragGapHash;
         private int lastCursorPositionX;
         private int pressCursorPositionX;
         private bool initialized;
@@ -1105,6 +1108,7 @@ namespace TaskbarQuota.Taskbar
             if (gap is not { } zone)
             {
                 // No gap can hold the widget at all (very crowded bar): leave it where it is.
+                LogDragState(cursorClientX, desiredX, leftBound, rightBound, gaps, obstacles, null, currentOffsetX);
                 lastCursorPositionX = cursorX;
                 return;
             }
@@ -1112,10 +1116,88 @@ namespace TaskbarQuota.Taskbar
             activeDragGap = zone;
             int targetX = Math.Clamp(desiredX, zone.start, zone.end - WidgetHostWidth);
 
+            LogDragState(cursorClientX, desiredX, leftBound, rightBound, gaps, obstacles, zone, targetX);
             appWindow.Move(new PointInt32(targetX, currentOffsetY));
             dragPreviewX = targetX;
             ResyncGrabPoint(cursorClientX, targetX, desiredX);
             lastCursorPositionX = cursorX;
+        }
+
+        /// <summary>
+        /// Records the drag solve whenever the picture changes (a different gap is tracked, or the gap set
+        /// itself changed). One line per change keeps the log small while still showing exactly which
+        /// obstacle pinned the widget — a drag that only moves one way looks identical to the user whether the
+        /// cause is a phantom obstacle, a bad grab offset, or clamped bounds.
+        ///
+        /// The gap set is compared by SHAPE, not by count: obstacles move and resize far more often than they
+        /// appear or disappear, so counting alone silently swallowed the changes most worth seeing.
+        /// </summary>
+        private void LogDragState(
+            int cursorClientX,
+            int desiredX,
+            int leftBound,
+            int rightBound,
+            List<(int start, int end)> gaps,
+            List<RECT> obstacles,
+            (int start, int end)? zone,
+            int targetX)
+        {
+            int gapHash = HashSpans(gaps);
+            if (zone == loggedDragZone && gapHash == loggedDragGapHash)
+                return;
+
+            loggedDragZone = zone;
+            loggedDragGapHash = gapHash;
+
+            // Built in one buffer rather than via ConvertAll + Join, which allocated two intermediate
+            // string lists per line on a path that runs inside a live drag.
+            var text = new StringBuilder(256);
+            text.Append("drag solve: cursor=").Append(cursorClientX)
+                .Append(" grab=").Append(draggingInnerOffsetX)
+                .Append(" desired=").Append(desiredX)
+                .Append(" width=").Append(WidgetHostWidth)
+                .Append(" bounds=[").Append(leftBound).Append(',').Append(rightBound).Append(')')
+                .Append(" zone=");
+            if (zone is { } z)
+                text.Append('[').Append(z.start).Append(',').Append(z.end).Append(')');
+            else
+                text.Append("none");
+            text.Append(" target=").Append(targetX).Append(" gaps=");
+            AppendSpans(text, gaps);
+            text.Append(" obstacles=");
+            AppendObstacles(text, obstacles);
+            Log.Debug(text.ToString());
+        }
+
+        private static int HashSpans(List<(int start, int end)> spans)
+        {
+            var hash = new HashCode();
+            foreach (var (start, end) in spans)
+            {
+                hash.Add(start);
+                hash.Add(end);
+            }
+            return hash.ToHashCode();
+        }
+
+        private static void AppendSpans(StringBuilder text, List<(int start, int end)> spans)
+        {
+            if (spans.Count == 0) { text.Append('-'); return; }
+            for (int i = 0; i < spans.Count; i++)
+            {
+                if (i > 0) text.Append(',');
+                text.Append('[').Append(spans[i].start).Append(',').Append(spans[i].end).Append(')');
+            }
+        }
+
+        private static void AppendObstacles(StringBuilder text, List<RECT> obstacles)
+        {
+            if (obstacles.Count == 0) { text.Append('-'); return; }
+            for (int i = 0; i < obstacles.Count; i++)
+            {
+                if (i > 0) text.Append(',');
+                text.Append('[').Append(obstacles[i].left).Append(',').Append(obstacles[i].right).Append(')');
+            }
         }
 
         /// <summary>
@@ -1259,6 +1341,8 @@ namespace TaskbarQuota.Taskbar
         private void PrimeObstacleCacheForDrag()
         {
             activeDragGap = null;
+            loggedDragZone = null;
+            loggedDragGapHash = 0;
             User32.GetWindowRect(hwndShell, out RECT taskbarScreenRect);
             _ = PrimeObstacleCacheAsync(taskbarScreenRect);
         }
@@ -1320,13 +1404,54 @@ namespace TaskbarQuota.Taskbar
             {
                 foreach (var wnd in GetOtherInjectedWindows())
                 {
+                    // Hidden siblings (a widget whose provider is off, or a host left over from an earlier
+                    // taskbar rebuild) keep their last rect. Counting those as obstacles blocks a zone the
+                    // user can see is empty, so the widget refuses to be dragged into it.
+                    if (!User32.IsWindowVisible(wnd))
+                        continue;
                     if (User32.GetWindowRect(wnd, out var injectedBounds) && injectedBounds.right > injectedBounds.left)
                         result.Add(ToTaskbarClientRect(injectedBounds, taskbarScreenRect));
                 }
             }
             catch (Exception ex) { Log.Warning(ex, "overlap scan failed"); }
 
+            result = FilterOffBandRects(result, taskbarScreenRect.bottom - taskbarScreenRect.top);
             return FilterContainerRects(result, taskbarScreenRect.right - taskbarScreenRect.left);
+        }
+
+        /// <summary>
+        /// Drops obstacle rects that do not sit in the taskbar band. Everything reaching the gap solver is in
+        /// taskbar-client coords, so the band is [0, taskbarHeight); rects above it come from popups hosted in
+        /// the taskbar's window/UIA tree (Widgets flyout, icon overflow, jump lists, tooltips). They span wide
+        /// horizontal ranges, and keeping them erases the free gaps under them — the widget then drags in one
+        /// direction only, or not at all.
+        /// </summary>
+        internal static List<RECT> FilterOffBandRects(List<RECT> rects, int taskbarHeight)
+        {
+            if (taskbarHeight <= 0)
+                return rects;
+
+            var kept = new List<RECT>(rects.Count);
+            foreach (var r in rects)
+            {
+                if (IsInVerticalBand(r, 0, taskbarHeight))
+                    kept.Add(r);
+            }
+            return kept;
+        }
+
+        /// <summary>
+        /// True when most of <paramref name="rect"/>'s height falls inside [bandTop, bandBottom). Zero-height
+        /// rects are kept: some shell elements report an empty vertical extent while still occupying the bar.
+        /// </summary>
+        internal static bool IsInVerticalBand(RECT rect, int bandTop, int bandBottom)
+        {
+            int height = rect.bottom - rect.top;
+            if (height <= 0)
+                return true;
+
+            int overlap = Math.Min(rect.bottom, bandBottom) - Math.Max(rect.top, bandTop);
+            return overlap * 2 >= height;
         }
 
         /// <summary>
