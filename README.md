@@ -174,6 +174,15 @@ Each provider card on the dashboard shows plan name, reset times, rate windows, 
 - **Run at startup** — optional Windows startup registration; can launch widget-only.
 - **Settings** — light / dark / system theme, widget layout (bars, percentages, or both), consumed vs remaining percentage display.
 
+### Notifications
+
+- **Usage threshold alerts** — optional Warning and Critical notifications when a percentage-based usage window crosses its configured consumed threshold. Codex reset-credit expiry alerts retain the same setting and behavior.
+- **Quota replenishment** — a separate, off-by-default option that notifies when a live percentage-based window gains at least **10 percentage points** of available quota. It can detect partial replenishments and does not claim a complete reset when the provider only confirms an increase.
+- **Independent windows** — Primary, Secondary, Model, Monthly, and named extra windows are tracked separately. Multiple replenishments from the same provider and live update are grouped into one notification.
+- **Session-only comparison** — the first live reading after launch or re-enabling the option establishes a baseline without notifying. TaskbarQuota does not compare a persisted startup snapshot with live data, so it does not detect replenishments that happened while the app was closed.
+- **Existing refreshes only** — notifications work with the dashboard closed, the widget hidden, or TaskbarQuota running in the tray whenever the coordinator is already receiving live updates for that provider (including active/sticky and refreshed pinned providers). No extra polling or network request is added.
+- **Local Windows notification** — this is generated locally by TaskbarQuota, not delivered by a remote push service. The Consumed/Remaining display preference does not affect detection or wording.
+
 ### Privacy
 
 - **Local-only** — no TaskbarQuota backend; usage calls go directly from your PC to each provider (or localhost for Antigravity).

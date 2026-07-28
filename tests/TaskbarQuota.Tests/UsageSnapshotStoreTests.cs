@@ -95,6 +95,7 @@ public class UsageSnapshotStoreTests : IDisposable
         var restored = Result(ProviderId.Codex, 42.5, 61, DateTimeOffset.Now.AddHours(3)).AsStale();
 
         Assert.True(restored.IsStale);
+        Assert.Equal(UsageObservationOrigin.RestoredSnapshot, restored.ObservationOrigin);
         Assert.False(restored.AsFresh().IsStale);
         // FetchedAt means "when the values last changed", so confirming them must not restamp it —
         // the widget's "Last updated" line reads from here.

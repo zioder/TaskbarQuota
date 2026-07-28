@@ -9,43 +9,68 @@ public static class QuotaAlertSettingsService
     private static readonly string SettingsPath =
         Path.Combine(AppStorage.AppDataDirectory, "quota-alerts.json");
 
-    private static QuotaAlertSettings _current = Load();
+    private static readonly QuotaAlertSettingsStore Store = new(SettingsPath);
 
-    public static event EventHandler? Changed;
-
-    public static QuotaAlertSettings Current => _current;
-
-    public static void Apply(QuotaAlertSettings settings)
+    public static event EventHandler? Changed
     {
-        var normalized = settings.Normalized();
-        if (_current.Equals(normalized))
-            return;
-
-        _current = normalized;
-        Save();
-        Changed?.Invoke(null, EventArgs.Empty);
+        add => Store.Changed += value;
+        remove => Store.Changed -= value;
     }
 
+    public static QuotaAlertSettings Current => Store.Current;
+
+    public static void Apply(QuotaAlertSettings settings)
+        => Store.Apply(settings);
+
     public static void SetEnabled(bool enabled)
-        => Apply(_current with { Enabled = enabled });
+        => Apply(Current with { Enabled = enabled });
+
+    public static void SetReplenishmentEnabled(bool enabled)
+        => Apply(Current with { ReplenishmentEnabled = enabled });
 
     public static void SetWarningThreshold(double value)
-        => Apply(_current with { WarningThreshold = value });
+        => Apply(Current with { WarningThreshold = value });
 
     public static void SetCriticalThreshold(double value)
-        => Apply(_current with { CriticalThreshold = value });
+        => Apply(Current with { CriticalThreshold = value });
 
     public static void SetCooldownMinutes(double value)
-        => Apply(_current with { CooldownMinutes = value });
+        => Apply(Current with { CooldownMinutes = value });
+}
 
-    private static QuotaAlertSettings Load()
+internal sealed class QuotaAlertSettingsStore
+{
+    private readonly string _settingsPath;
+
+    public QuotaAlertSettingsStore(string settingsPath)
+    {
+        _settingsPath = settingsPath;
+        Current = Load();
+    }
+
+    public event EventHandler? Changed;
+
+    public QuotaAlertSettings Current { get; private set; }
+
+    public void Apply(QuotaAlertSettings settings)
+    {
+        var normalized = settings.Normalized();
+        if (Current.Equals(normalized))
+            return;
+
+        Current = normalized;
+        Save();
+        Changed?.Invoke(this, EventArgs.Empty);
+    }
+
+    private QuotaAlertSettings Load()
     {
         try
         {
-            if (!File.Exists(SettingsPath))
+            if (!File.Exists(_settingsPath))
                 return QuotaAlertSettings.Default;
 
-            var loaded = JsonSerializer.Deserialize<QuotaAlertSettings>(File.ReadAllText(SettingsPath));
+            var loaded = JsonSerializer.Deserialize<QuotaAlertSettings>(File.ReadAllText(_settingsPath));
             return (loaded ?? QuotaAlertSettings.Default).Normalized();
         }
         catch
@@ -54,12 +79,15 @@ public static class QuotaAlertSettingsService
         }
     }
 
-    private static void Save()
+    private void Save()
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
-            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(_current, new JsonSerializerOptions { WriteIndented = true }));
+            Directory.CreateDirectory(Path.GetDirectoryName(_settingsPath)!);
+            var json = JsonSerializer.Serialize(Current, new JsonSerializerOptions { WriteIndented = true });
+            var tempPath = _settingsPath + ".tmp";
+            File.WriteAllText(tempPath, json);
+            File.Move(tempPath, _settingsPath, overwrite: true);
         }
         catch
         {
@@ -73,12 +101,14 @@ public sealed record QuotaAlertSettings
     public static QuotaAlertSettings Default { get; } = new()
     {
         Enabled = false,
+        ReplenishmentEnabled = false,
         WarningThreshold = 75,
         CriticalThreshold = 90,
         CooldownMinutes = 30,
     };
 
     public bool Enabled { get; init; }
+    public bool ReplenishmentEnabled { get; init; }
     public double WarningThreshold { get; init; }
     public double CriticalThreshold { get; init; }
     public double CooldownMinutes { get; init; }

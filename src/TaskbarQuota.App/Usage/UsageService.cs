@@ -20,6 +20,7 @@ namespace TaskbarQuota.Usage
         private readonly Dictionary<ProviderId, UsageResult> _lastSuccessfulLiveResults = new();
         private readonly object _lock = new();
         private readonly string? _snapshotDirectory;
+        private long _nextObservationSequence;
 
         // How long a persisted snapshot may keep its original timestamp while the usage values are
         // unchanged. Well inside UsageSnapshotStore.MaxRestoreAge, so a still-live entry can never age out
@@ -74,7 +75,7 @@ namespace TaskbarQuota.Usage
             {
                 if (TryGetValidEntry(id, out var cached))
                 {
-                    result = cached.Result;
+                    result = cached.Result.AsMemoryCache();
                     return true;
                 }
             }
@@ -91,19 +92,23 @@ namespace TaskbarQuota.Usage
             lock (_lock)
             {
                 if (!force && TryGetValidEntry(id, out var cached))
-                    return cached.Result;
+                    return cached.Result.AsMemoryCache();
             }
 
+            var observationSequence = Interlocked.Increment(ref _nextObservationSequence);
             try
             {
                 var fetch = await provider.FetchUsageAsync(ct).ConfigureAwait(false);
-                var result = UsageResult.Success(id, provider, fetch);
+                var observedAt = DateTimeOffset.Now;
+                var result = UsageResult.Success(id, provider, fetch)
+                    .AsLiveObservation(observationSequence, observedAt);
                 if (TryGetLastSuccessfulLiveResult(id, out var lastSuccess) && IsSuspiciousClaudeZeroResult(result, lastSuccess))
                 {
                     Diagnostics.Log.Warning("Claude returned a sudden 0%/0% usage snapshot before the previous window reset; keeping the last good Claude usage values.");
                     // The server answered, so the kept values are confirmed current — drop any stale mark
                     // carried over from a snapshot restored at startup.
-                    lastSuccess = lastSuccess.AsFresh();
+                    lastSuccess = lastSuccess.AsFresh()
+                        .AsLiveObservation(observationSequence, observedAt);
                     Store(id, lastSuccess, FetchCachePolicy.TtlForSuccess());
                     StoreLastSuccessfulLiveResult(id, lastSuccess);
                     return lastSuccess;
@@ -111,7 +116,8 @@ namespace TaskbarQuota.Usage
 
                 if (TryGetLastSuccessfulLiveResult(id, out lastSuccess) && SameUsage(lastSuccess, result))
                 {
-                    lastSuccess = lastSuccess.AsFresh();
+                    lastSuccess = lastSuccess.AsFresh()
+                        .AsLiveObservation(observationSequence, observedAt);
                     Store(id, lastSuccess, FetchCachePolicy.TtlForSuccess());
                     StoreLastSuccessfulLiveResult(id, lastSuccess);
                     return lastSuccess;
@@ -125,8 +131,9 @@ namespace TaskbarQuota.Usage
             {
                 if (ShouldReuseLastSuccessfulResult(pe.Kind) && TryGetLastSuccessfulLiveResult(id, out var lastSuccess))
                 {
-                    Store(id, lastSuccess, FetchCachePolicy.TtlForFailure(pe.Kind));
-                    return lastSuccess;
+                    var fallback = lastSuccess.AsFailureFallback(observationSequence, DateTimeOffset.Now);
+                    Store(id, fallback, FetchCachePolicy.TtlForFailure(pe.Kind));
+                    return fallback;
                 }
 
                 var result = UsageResult.Failure(id, pe.Message, provider, pe.Kind);
@@ -174,6 +181,7 @@ namespace TaskbarQuota.Usage
                     && existing.Fetch is { } existingFetch
                     && DateTimeOffset.Now - existingFetch.FetchedAt < SnapshotRefreshInterval)
                 {
+                    _lastSuccessfulLiveResults[id] = result;
                     return;
                 }
 
@@ -215,8 +223,11 @@ namespace TaskbarQuota.Usage
         {
             lock (_lock)
             {
-                if (_lastSuccessfulLiveResults.TryGetValue(id, out result!))
+                if (_lastSuccessfulLiveResults.TryGetValue(id, out var stored))
+                {
+                    result = stored.AsMemoryCache();
                     return true;
+                }
             }
 
             result = UsageResult.Failure(id, "No successful live result.");
@@ -370,6 +381,15 @@ namespace TaskbarQuota.Usage
         };
     }
 
+    internal enum UsageObservationOrigin
+    {
+        Unknown,
+        Live,
+        MemoryCache,
+        RestoredSnapshot,
+        FailureFallback,
+    }
+
     public sealed class UsageResult
     {
         public ProviderId Id { get; private init; }
@@ -389,6 +409,9 @@ namespace TaskbarQuota.Usage
         /// no live fetch has confirmed yet. The widget renders these dimmed with an "as of" tooltip.
         /// </summary>
         public bool IsStale { get; private init; }
+        internal UsageObservationOrigin ObservationOrigin { get; private init; }
+        internal long ObservationSequence { get; private init; }
+        internal DateTimeOffset? ObservedAt { get; private init; }
         public bool Ok => Fetch != null;
         public string DisplayName => Provider?.DisplayName ?? Id.ToString();
 
@@ -411,11 +434,15 @@ namespace TaskbarQuota.Usage
                 ErrorKind = ErrorKind,
                 IsPending = IsPending,
                 IsStale = IsStale,
+                ObservationOrigin = ObservationOrigin,
+                ObservationSequence = ObservationSequence,
+                ObservedAt = ObservedAt,
                 Source = source ?? ProviderSource.Unknown,
             };
 
         /// <summary>Marks a snapshot as restored-from-disk (see <see cref="IsStale"/>).</summary>
-        public UsageResult AsStale() => WithStale(true);
+        public UsageResult AsStale()
+            => WithObservation(UsageObservationOrigin.RestoredSnapshot, ObservationSequence, ObservedAt, isStale: true);
 
         /// <summary>
         /// Clears the stale mark once a live fetch has confirmed the values. FetchedAt is deliberately
@@ -425,7 +452,32 @@ namespace TaskbarQuota.Usage
         /// </summary>
         public UsageResult AsFresh() => IsStale ? WithStale(false) : this;
 
+        internal UsageResult AsLiveObservation(long sequence, DateTimeOffset observedAt)
+            => WithObservation(UsageObservationOrigin.Live, sequence, observedAt, isStale: false);
+
+        internal UsageResult AsMemoryCache()
+            => WithObservation(
+                ObservationOrigin switch
+                {
+                    UsageObservationOrigin.FailureFallback => UsageObservationOrigin.FailureFallback,
+                    UsageObservationOrigin.RestoredSnapshot => UsageObservationOrigin.RestoredSnapshot,
+                    _ => UsageObservationOrigin.MemoryCache,
+                },
+                ObservationSequence,
+                ObservedAt,
+                IsStale);
+
+        internal UsageResult AsFailureFallback(long sequence, DateTimeOffset observedAt)
+            => WithObservation(UsageObservationOrigin.FailureFallback, sequence, observedAt, isStale: false);
+
         private UsageResult WithStale(bool isStale)
+            => WithObservation(ObservationOrigin, ObservationSequence, ObservedAt, isStale);
+
+        private UsageResult WithObservation(
+            UsageObservationOrigin origin,
+            long sequence,
+            DateTimeOffset? observedAt,
+            bool isStale)
             => new()
             {
                 Id = Id,
@@ -435,6 +487,9 @@ namespace TaskbarQuota.Usage
                 ErrorKind = ErrorKind,
                 IsPending = IsPending,
                 IsStale = isStale,
+                ObservationOrigin = origin,
+                ObservationSequence = sequence,
+                ObservedAt = observedAt,
                 Source = Source,
             };
     }
