@@ -1,4 +1,5 @@
 using TaskbarQuota.Controls;
+using TaskbarQuota.Usage;
 
 namespace TaskbarQuota.Tests;
 
@@ -23,4 +24,14 @@ public class WidgetSummaryRevealTests
     [Fact]
     public void LeavesLaterRendersAlone()
         => Assert.False(WidgetSummary.ShouldRevealWithoutTransition(isFirstReveal: false, isActiveToolVisible: true));
+
+    [Fact]
+    public void SourceBadgeChangeDoesNotInvalidateRenderedUsageContent()
+    {
+        var result = UsageResult.Failure(ProviderId.Codex, "Unavailable");
+        var foreground = result.WithSource(
+            new ProviderSource(ProviderSourceKind.DesktopApp, "Codex", "desktop"));
+
+        Assert.True(WidgetSummary.HasSameRenderedContentForTesting(result, foreground));
+    }
 }

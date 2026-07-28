@@ -74,6 +74,7 @@ namespace TaskbarQuota.Controls
         private UsageResult? _lastResult;
         private ProviderId? _lastAppliedProvider;
         private string? _lastRenderSignature;
+        private string? _lastSourceSignature;
         private bool _hasRevealed;
         private bool _isActiveToolVisible = true;
         // Storyboards and their animations are allocated on first use and re-aimed afterwards; all three
@@ -168,13 +169,27 @@ namespace TaskbarQuota.Controls
             }
 
             var signature = BuildRenderSignature(result);
+            var sourceSignature = BuildSourceSignature(result);
             if (!force && _lastRenderSignature == signature)
+            {
+                // Focus changes only alter the small source badge (desktop/browser/terminal). Rebuilding
+                // every row for that cosmetic change clears the Grid and starts the 180 ms refresh pulse,
+                // which makes the whole widget flash whenever focus enters or leaves a supported app.
+                // Keep the usage content in place and update only the badge.
+                _lastResult = result;
+                if (_lastSourceSignature != sourceSignature)
+                {
+                    _lastSourceSignature = sourceSignature;
+                    ApplySourceBadge(result);
+                }
                 return;
+            }
 
             var isFirstReveal = !_hasRevealed;
             var providerChanged = _lastAppliedProvider != result.Id;
             _lastAppliedProvider = result.Id;
             _lastRenderSignature = signature;
+            _lastSourceSignature = sourceSignature;
             _lastResult = result;
             ApplyTaskbarForeground();
             // Values restored from the previous session render dimmed until a live fetch confirms them,
@@ -1421,8 +1436,6 @@ namespace TaskbarQuota.Controls
                 result.Error ?? string.Empty,
                 result.IsPending ? "pending" : "settled",
                 result.IsStale ? "stale" : "live",
-                result.Source.Kind.ToString(),
-                result.Source.DisplayName,
             };
 
             if (result.Fetch is not { } fetch)
@@ -1462,6 +1475,16 @@ namespace TaskbarQuota.Controls
 
             return string.Join("|", parts);
         }
+
+        private static string BuildSourceSignature(UsageResult result)
+            => string.Join(
+                "|",
+                result.Source.Kind,
+                result.Source.DisplayName,
+                result.Source.IconKey);
+
+        internal static bool HasSameRenderedContentForTesting(UsageResult left, UsageResult right)
+            => BuildRenderSignature(left) == BuildRenderSignature(right);
 
         private static void AppendRateWindow(List<string> parts, RateWindow? window)
         {

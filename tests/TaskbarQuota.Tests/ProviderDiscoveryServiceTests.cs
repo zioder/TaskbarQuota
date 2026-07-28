@@ -3,7 +3,8 @@ using TaskbarQuota.Usage;
 
 namespace TaskbarQuota.Tests;
 
-public class ProviderDiscoveryServiceTests
+[Collection(ProviderInstallDetectorTestCollection.Name)]
+public class ProviderDiscoveryServiceTests : IDisposable
 {
     public ProviderDiscoveryServiceTests()
     {
@@ -12,6 +13,12 @@ public class ProviderDiscoveryServiceTests
         WidgetSettingsService.ResetDashboardProviderVisibilityForTesting();
         WidgetSettingsService.ApplyAutoHideUnavailable(true);
         ProviderInstallDetector.IsInstalledOverrideForTesting = _ => false;
+        ProviderInstallDetector.ResetCliCacheForTesting();
+    }
+
+    public void Dispose()
+    {
+        ProviderInstallDetector.IsInstalledOverrideForTesting = null;
         ProviderInstallDetector.ResetCliCacheForTesting();
     }
 

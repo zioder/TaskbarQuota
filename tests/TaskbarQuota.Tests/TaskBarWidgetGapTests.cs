@@ -9,6 +9,18 @@ public class TaskBarWidgetGapTests
     private static RECT R(int left, int right) => new() { left = left, top = 0, right = right, bottom = 40 };
 
     [Fact]
+    public void ConvertToTaskbarChildStyle_ReplacesPopupAndPreservesOtherBits()
+    {
+        const uint visibleClipSiblingsPopup = 0x94000000;
+
+        uint result = TaskBarWidget.ConvertToTaskbarChildStyle(visibleClipSiblingsPopup);
+
+        Assert.Equal(0x54000000u, result);
+        Assert.Equal(0u, result & (uint)WindowStyles.WS_POPUP);
+        Assert.NotEqual(0u, result & (uint)WindowStyles.WS_CHILD);
+    }
+
+    [Fact]
     public void ShouldReposition_BeforeFirstPlacement_IsTrueWithoutOverflowing()
     {
         // offsetX == 0 used to make `Math.Abs(int.MinValue - 0)` throw OverflowException,

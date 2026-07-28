@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using TaskbarQuota.Taskbar;
 using TaskbarQuota.Usage;
 
 namespace TaskbarQuota;
@@ -57,6 +58,7 @@ public static class WidgetSettingsService
     private static readonly string AutoHideUnavailablePath =
         Path.Combine(AppStorage.AppDataDirectory, "auto-hide-unavailable.txt");
 
+    private static readonly WidgetStateStore StateStore = new(AppStorage.AppDataDirectory);
     private static readonly Dictionary<string, bool> RowVisibility = LoadRowVisibility();
     private static readonly Dictionary<string, bool> ProviderVisibility = LoadProviderVisibility();
     private static readonly Dictionary<string, bool> DashboardProviderVisibility = LoadDashboardProviderVisibility();
@@ -65,6 +67,10 @@ public static class WidgetSettingsService
     public static WidgetDisplayMode Current { get; private set; } = LoadWidgetDisplayMode();
     public static PercentageDisplayMode CurrentPercentageMode { get; private set; } = LoadPercentageDisplayMode();
     public static bool AutoHideUnavailable { get; private set; } = LoadAutoHideUnavailable();
+    public static WidgetVisibilityMode CurrentVisibilityMode { get; private set; } = StateStore.LoadVisibilityMode();
+    public static bool KeepVisibleWhileBackgroundAgentRunning { get; private set; } =
+        StateStore.LoadKeepVisibleWhileBackgroundCliAgentRunning();
+    public static ProviderId? LastWidgetProvider { get; private set; } = StateStore.LoadLastProvider();
     public static event EventHandler? Changed;
     public static event EventHandler? DashboardCompositionChanged;
     public static event EventHandler? PercentageModeChanged;
@@ -88,6 +94,35 @@ public static class WidgetSettingsService
         Save(PercentageDisplayModePath, (int)mode);
         PercentageModeChanged?.Invoke(null, EventArgs.Empty);
         Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ApplyWidgetVisibilityMode(WidgetVisibilityMode mode)
+    {
+        if (CurrentVisibilityMode == mode)
+            return;
+
+        CurrentVisibilityMode = mode;
+        StateStore.SaveVisibilityMode(mode);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ApplyKeepVisibleWhileBackgroundAgentRunning(bool enabled)
+    {
+        if (KeepVisibleWhileBackgroundAgentRunning == enabled)
+            return;
+
+        KeepVisibleWhileBackgroundAgentRunning = enabled;
+        StateStore.SaveKeepVisibleWhileBackgroundCliAgentRunning(enabled);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void RememberLastWidgetProvider(ProviderId provider)
+    {
+        if (LastWidgetProvider == provider)
+            return;
+
+        LastWidgetProvider = provider;
+        StateStore.SaveLastProvider(provider);
     }
 
     public static double DisplayPercent(double usedPercent)

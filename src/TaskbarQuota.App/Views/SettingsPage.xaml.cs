@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using TaskbarQuota.Helpers;
 using TaskbarQuota.Services;
+using TaskbarQuota.Taskbar;
 using TaskbarQuota.Usage;
 using TaskbarQuota.ViewModels;
 
@@ -43,6 +44,9 @@ namespace TaskbarQuota.Views
                 _ => 0,
             };
             PercentageModeCombo.SelectedIndex = WidgetSettingsService.CurrentPercentageMode == PercentageDisplayMode.Remaining ? 1 : 0;
+            WidgetVisibilityCombo.SelectedIndex = (int)WidgetSettingsService.CurrentVisibilityMode;
+            BackgroundAgentVisibilityToggle.IsOn = WidgetSettingsService.KeepVisibleWhileBackgroundAgentRunning;
+            UpdateWidgetVisibilityControls();
             StartupToggle.IsOn = StartupSettingsService.IsEnabled;
             ApplyQuotaAlertSettingsToControls();
             AutoHideUnavailableToggle.IsOn = WidgetSettingsService.AutoHideUnavailable;
@@ -252,6 +256,55 @@ namespace TaskbarQuota.Views
                 return;
 
             StartupSettingsService.Apply(StartupToggle.IsOn);
+        }
+
+        private void OnWidgetVisibilityModeChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            var mode = WidgetVisibilityCombo.SelectedIndex switch
+            {
+                0 => WidgetVisibilityMode.AlwaysShow,
+                2 => WidgetVisibilityMode.ShowOnlyWhileSupportedAiToolIsInUse,
+                _ => WidgetVisibilityMode.ShowWhileAnySupportedAiToolIsOpen,
+            };
+            WidgetSettingsService.ApplyWidgetVisibilityMode(mode);
+            UpdateWidgetVisibilityControls();
+        }
+
+        private void OnBackgroundAgentVisibilityToggled(object sender, RoutedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            WidgetSettingsService.ApplyKeepVisibleWhileBackgroundAgentRunning(
+                BackgroundAgentVisibilityToggle.IsOn);
+        }
+
+        private void UpdateWidgetVisibilityControls()
+        {
+            var mode = WidgetVisibilityCombo.SelectedIndex switch
+            {
+                0 => WidgetVisibilityMode.AlwaysShow,
+                2 => WidgetVisibilityMode.ShowOnlyWhileSupportedAiToolIsInUse,
+                _ => WidgetVisibilityMode.ShowWhileAnySupportedAiToolIsOpen,
+            };
+            WidgetVisibilityDescription.Text = mode switch
+            {
+                WidgetVisibilityMode.AlwaysShow =>
+                    "Show the widget whenever an enabled provider is available.",
+                WidgetVisibilityMode.ShowOnlyWhileSupportedAiToolIsInUse =>
+                    "Show while a supported app, CLI terminal, or website tab is active. " +
+                    "A background agent counts only when the option below is on.",
+                _ =>
+                    "Show while a supported desktop app or CLI is running. " +
+                    "Websites count only while a supported site is the active browser tab.",
+            };
+            BackgroundAgentVisibilityCard.Visibility =
+                mode == WidgetVisibilityMode.ShowOnlyWhileSupportedAiToolIsInUse
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
         }
 
         private void OnPercentageModeChanged(object sender, SelectionChangedEventArgs e)

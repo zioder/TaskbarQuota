@@ -35,7 +35,7 @@ namespace TaskbarQuota.ActiveApp
 
         private IUIAutomation? _automation;
         private IntPtr _cachedHwnd;
-        private string? _cachedUrl;
+        private ProviderId? _cachedProvider;
         private DateTime _cachedAtUtc = DateTime.MinValue;
 
         internal static bool IsBrowserProcessName(string? processName)
@@ -50,30 +50,29 @@ namespace TaskbarQuota.ActiveApp
             if (!IsBrowserProcessName(processName))
                 return null;
 
-            var url = TryReadActiveTabUrl(hwnd);
-            var provider = TryResolveProviderFromUrl(url)
-                ?? TryResolveProviderFromUrl(FirefoxSessionStoreReader.TryReadSelectedTabUrl(processName))
-                ?? TryResolveProviderFromTitle(windowTitle);
+            var provider = DetectActiveProvider(hwnd);
 
             return provider is { } p
                 ? new BrowserProviderDetection(p, ResolveBrowserSource(processName))
                 : null;
         }
 
-        internal string? TryReadActiveTabUrl(IntPtr hwnd)
+        private ProviderId? DetectActiveProvider(IntPtr hwnd)
         {
             if (hwnd == IntPtr.Zero)
                 return null;
 
             var now = DateTime.UtcNow;
             if (hwnd == _cachedHwnd && now - _cachedAtUtc < CacheTtl)
-                return _cachedUrl;
+                return _cachedProvider;
 
-            var url = TryReadActiveTabUrlCore(hwnd);
+            // Cache only the provider classification. URLs may contain private paths, conversation IDs,
+            // or query text and are not needed after the active-tab decision has been made.
+            var provider = TryResolveProviderFromUrl(TryReadActiveTabUrlCore(hwnd));
             _cachedHwnd = hwnd;
-            _cachedUrl = url;
+            _cachedProvider = provider;
             _cachedAtUtc = now;
-            return url;
+            return provider;
         }
 
         internal static ProviderId? TryResolveProviderFromUrl(string? rawUrl)
@@ -96,16 +95,7 @@ namespace TaskbarQuota.ActiveApp
         }
 
         internal static ProviderId? TryResolveProviderFromTitle(string? windowTitle)
-        {
-            if (string.IsNullOrWhiteSpace(windowTitle))
-                return null;
-
-            var title = windowTitle.ToLowerInvariant();
-            if (title.Contains("claude", StringComparison.Ordinal))
-                return ProviderId.Claude;
-
-            return null;
-        }
+            => null;
 
         internal static ProviderSource ResolveBrowserSource(string? processName)
         {

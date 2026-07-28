@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Management;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using TaskbarQuota.Interop;
 using TaskbarQuota.Usage;
@@ -99,7 +100,6 @@ namespace TaskbarQuota.ActiveApp
             ["cursor-agent"] = ProviderId.Cursor,
             ["opencode"] = ProviderId.OpenCode,
             ["copilot"] = ProviderId.Copilot,
-            ["gh"] = ProviderId.Copilot,
             ["grok"] = ProviderId.Grok,
             ["devin"] = ProviderId.Devin,
             ["cline"] = ProviderId.Cline,
@@ -107,10 +107,11 @@ namespace TaskbarQuota.ActiveApp
         };
 
         // Script-runtime hosts that run a CLI as an argument (e.g. "node ... claude"); only these need
-        // their CommandLine inspected, and only when they sit inside the focused terminal session.
+        // their CommandLine inspected. Activity scans limit that work to the focused terminal session;
+        // the 5-second presence probe expands it only when no qualifying native CLI was found.
         private static readonly HashSet<string> CmdLineHostExes = new(StringComparer.OrdinalIgnoreCase)
         {
-            "node", "bun", "deno", "npm", "npx", "pnpm", "yarn", "cmd",
+            "node", "bun", "deno", "npm", "npx", "pnpm", "yarn", "cmd", "gh",
         };
 
         // Bulk scan covers native CLIs + script hosts + shells/terminals (needed to build the session
@@ -121,7 +122,9 @@ namespace TaskbarQuota.ActiveApp
 
         // Brief cache so tab switches inside one terminal stay responsive without hammering WMI.
         private static readonly TimeSpan CliCacheTtl = TimeSpan.FromMilliseconds(250);
-        private static readonly TimeSpan RunningToolCacheTtl = TimeSpan.FromSeconds(15);
+        private static readonly TimeSpan PresenceCacheTtl = TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan BackgroundAgentRetryInterval = TimeSpan.FromMilliseconds(500);
+        private static readonly TimeSpan BackgroundAgentTransitionWindow = TimeSpan.FromSeconds(2);
         private IntPtr _lastForegroundHwnd;
         private int _lastForegroundPid;
         private string? _lastForegroundProcessName;
@@ -132,8 +135,14 @@ namespace TaskbarQuota.ActiveApp
         private int? _cliCacheSessionRootPid;
         private IntPtr _cliCacheFocusHwnd;
         private readonly Dictionary<IntPtr, ProviderId> _terminalWindowCliCache = new();
-        private bool _runningToolCache;
-        private DateTime _runningToolCacheAt = DateTime.MinValue;
+        private bool _guiPresenceCache;
+        private DateTime _guiPresenceCacheAt = DateTime.MinValue;
+        private bool _cliPresenceCache;
+        private DateTime _cliPresenceCacheAt = DateTime.MinValue;
+        private bool _backgroundAgentCache;
+        private DateTime _backgroundAgentCacheAt = DateTime.MinValue;
+        private DateTime _backgroundAgentRetryUntil = DateTime.MinValue;
+        private bool _codexDesktopWasForeground;
         private volatile bool _openCodeModelStateDirty;
         private volatile bool _clineStateDirty;
         private OpenCodeModelStateWatcher? _modelStateWatcher;
@@ -143,6 +152,7 @@ namespace TaskbarQuota.ActiveApp
         private ProviderSource _activeSource = ProviderSource.Unknown;
         private readonly SynaraUiaReader _synaraUia = new();
         private readonly BrowserActiveTabDetector _browserTabs = new();
+        private readonly CodexDesktopActivityDetector _codexDesktopActivity = new();
 
         /// <summary>Raised when Synara's localStorage changes (provider switch / thread navigation).</summary>
         public event Action? SynaraStateChanged;
@@ -454,7 +464,7 @@ namespace TaskbarQuota.ActiveApp
 
             if (terminalFocused)
             {
-                Diagnostics.Log.Debug($"[detect] terminal focused: fgPid={foregroundPid} proc={procName} rootPid={sessionRootPid} rootName={sessionRootName} title='{windowTitle}'");
+                Diagnostics.Log.Debug($"[detect] terminal focused: fgPid={foregroundPid} proc={procName} rootPid={sessionRootPid} rootName={sessionRootName}");
                 bool hasPreferred = _terminalWindowCliCache.TryGetValue(hwnd, out var preferredProvider);
                 _cliCache = DetectCliFromProcesses(
                     sessionRootPid,
@@ -470,6 +480,8 @@ namespace TaskbarQuota.ActiveApp
                 {
                     _terminalWindowCliCache[hwnd] = detectedCli;
                     _activeSource = ResolveCliSource(sessionRootName ?? procName);
+                    _cliPresenceCache = true;
+                    _cliPresenceCacheAt = DateTime.UtcNow;
                 }
                 return _lastForegroundResult = _cliCache;
             }
@@ -749,7 +761,8 @@ namespace TaskbarQuota.ActiveApp
 
             try
             {
-                DetectCliFromProcesses();
+                _cliPresenceCache = DetectCliFromProcesses() != null;
+                _cliPresenceCacheAt = DateTime.UtcNow;
             }
             catch (Exception ex)
             {
@@ -757,15 +770,58 @@ namespace TaskbarQuota.ActiveApp
             }
         }
 
-        public bool HasAnyKnownToolRunning()
+        public SupportedToolPresence GetSupportedToolPresence(bool codexDesktopForeground = false)
         {
-            if (DateTime.UtcNow - _runningToolCacheAt < RunningToolCacheTtl)
-                return _runningToolCache;
+            var now = DateTime.UtcNow;
+            if (now - _guiPresenceCacheAt >= PresenceCacheTtl)
+            {
+                _guiPresenceCache = HasAnyKnownGuiProcessRunning();
+                _guiPresenceCacheAt = now;
+            }
 
-            _runningToolCache = HasAnyKnownGuiProcessRunning() || DetectCliFromProcesses() != null;
-            _runningToolCacheAt = DateTime.UtcNow;
-            return _runningToolCache;
+            if (now - _cliPresenceCacheAt >= PresenceCacheTtl)
+            {
+                _cliPresenceCache = DetectCliFromProcesses() != null;
+                _cliPresenceCacheAt = now;
+            }
+
+            bool codexDesktopLostForeground = _codexDesktopWasForeground && !codexDesktopForeground;
+            _codexDesktopWasForeground = codexDesktopForeground;
+            if (ShouldRefreshBackgroundAgentPresence(
+                now,
+                _backgroundAgentCacheAt,
+                _backgroundAgentRetryUntil,
+                codexDesktopLostForeground))
+            {
+                bool previouslyRunning = _backgroundAgentCache;
+                _backgroundAgentCache = _codexDesktopActivity.HasRunningTurn();
+                _backgroundAgentCacheAt = now;
+                if (_backgroundAgentCache)
+                {
+                    _backgroundAgentRetryUntil = DateTime.MinValue;
+                }
+                else if (codexDesktopLostForeground || previouslyRunning)
+                {
+                    // UI Automation can briefly rebuild Codex's tree while its window loses focus or
+                    // closes. Retry only during that handoff; steady idle state retains the cheap 5 s
+                    // cache instead of scanning the accessibility tree twice per second forever.
+                    _backgroundAgentRetryUntil = now + BackgroundAgentTransitionWindow;
+                }
+            }
+
+            return new(_guiPresenceCache, _cliPresenceCache, _backgroundAgentCache);
         }
+
+        internal static bool ShouldRefreshBackgroundAgentPresence(
+            DateTime now,
+            DateTime cacheAt,
+            DateTime retryUntil,
+            bool codexDesktopLostForeground)
+            => codexDesktopLostForeground
+                || (now < retryUntil && now - cacheAt >= BackgroundAgentRetryInterval)
+                || now - cacheAt >= PresenceCacheTtl;
+
+        public bool HasAnyKnownToolRunning() => GetSupportedToolPresence().Any;
 
         private static bool HasAnyKnownGuiProcessRunning()
         {
@@ -826,8 +882,8 @@ namespace TaskbarQuota.ActiveApp
             ProviderId? preferredProvider = null)
         {
             // One cheap, name-only scan builds the process tree and resolves native CLI exes. Script-host
-            // CommandLines (node/bun/npm/...) are read separately and only for the focused session, so a
-            // terminal full of unrelated node.exe children no longer stalls detection.
+            // CommandLines (node/bun/npm/...) are read separately for the focused session, or conditionally
+            // by the lower-frequency global presence probe when native evidence is insufficient.
             var candidates = new List<(ProviderId id, DateTime started, int pid, int parentPid)>();
             var processParents = new Dictionary<int, int>();
             var processNames = new Dictionary<int, string>();
@@ -902,15 +958,81 @@ namespace TaskbarQuota.ActiveApp
 
                 return null;
             }
-            else if (candidates.Count == 0)
+            else
             {
-                // Presence probe with no native CLI found: fall back to inspecting every script host.
-                ResolveHostCommandLines(hostPids, processStarts, processParents, candidates);
+                // Presence probes avoid reading runtime command lines when a qualifying native CLI already
+                // exists. Desktop executables that share a CLI name do not suppress this fallback.
+                bool hasNativeCliPresence = candidates.Any(candidate => IsCliPresenceCandidate(
+                    candidate.pid,
+                    candidate.parentPid,
+                    processParents,
+                    processNames));
+                if (!hasNativeCliPresence)
+                    ResolveHostCommandLines(hostPids, processStarts, processParents, candidates);
             }
 
-            if (candidates.Count == 0) return null;
-            return PickForegroundCli(candidates, foregroundTerminalPid ?? -1, processParents);
+            var presenceCandidates = candidates
+                .Where(candidate => IsCliPresenceCandidate(
+                    candidate.pid,
+                    candidate.parentPid,
+                    processParents,
+                    processNames))
+                .ToList();
+
+            if (presenceCandidates.Count == 0) return null;
+            return PickForegroundCli(presenceCandidates, foregroundTerminalPid ?? -1, processParents);
         }
+
+        private static bool IsCliPresenceCandidate(
+            int pid,
+            int parentPid,
+            IReadOnlyDictionary<int, int> parents,
+            IReadOnlyDictionary<int, string> names)
+        {
+            names.TryGetValue(pid, out var processName);
+
+            // Script runtimes and executable names shared by a desktop app are not enough on their own:
+            // require a shell/terminal relationship so unrelated projects and Electron helpers do not
+            // become background CLI agents.
+            if (processName is not null
+                && (CmdLineHostExes.Contains(processName) || IsKnownGuiProcessName(processName)))
+            {
+                return HasTerminalRelationship(pid, parentPid, parents, names);
+            }
+
+            return true;
+        }
+
+        internal static bool HasTerminalRelationship(
+            int pid,
+            int parentPid,
+            IReadOnlyDictionary<int, int> parents,
+            IReadOnlyDictionary<int, string> names)
+        {
+            var seen = new HashSet<int>();
+            var current = pid;
+            var nextParent = parentPid;
+
+            while (current != 0 && seen.Add(current))
+            {
+                if (names.TryGetValue(current, out var name) && IsTerminalHostProcessName(name))
+                    return true;
+
+                if (nextParent == 0)
+                    break;
+
+                current = nextParent;
+                nextParent = parents.TryGetValue(current, out var ancestorParent) ? ancestorParent : 0;
+            }
+
+            return false;
+        }
+
+        private static bool IsTerminalHostProcessName(string? processName)
+            => processName is not null
+            && (Terminals.Contains(processName)
+                || IsConsoleHostName(processName)
+                || IsShellHostName(processName));
 
         internal static ProviderId PickForegroundCli(
             IReadOnlyList<(ProviderId id, DateTime started, int pid, int parentPid)> candidates,
@@ -1318,27 +1440,154 @@ namespace TaskbarQuota.ActiveApp
 
         internal static ProviderId? TryDetectCliProvider(string? processName, string? commandLine)
         {
-            var name = (processName ?? "").ToLowerInvariant();
-            if (name is "antigravity.exe" or "agy.exe") return ProviderId.Antigravity;
-            if (name is "claude.exe") return ProviderId.Claude;
-            if (name is "codex.exe") return ProviderId.Codex;
-            if (name is "cursor.exe") return ProviderId.Cursor;
-            if (name is "cursor-agent.exe") return ProviderId.Cursor;
-            if (name is "opencode.exe") return ProviderId.OpenCode;
-            if (name is "copilot.exe" or "gh.exe") return ProviderId.Copilot;
-            if (name is "grok.exe") return ProviderId.Grok;
-            if (name is "devin.exe") return ProviderId.Devin;
-            if (name is "cline.exe") return ProviderId.Cline;
-            if (name is "kimi.exe") return ProviderId.Kimi;
+            var name = NormalizeProcessName(processName ?? "").ToLowerInvariant();
+            if (name == "gh")
+                return ContainsCommandSequence(commandLine, "gh", "copilot")
+                    ? ProviderId.Copilot
+                    : null;
 
-            var haystack = ((commandLine ?? "") + " " + name).ToLowerInvariant();
-            foreach (var (marker, id) in CliMarkers)
+            if (name is "antigravity" or "agy") return ProviderId.Antigravity;
+            if (name == "claude") return ProviderId.Claude;
+            if (name == "codex") return ProviderId.Codex;
+            if (name == "cursor") return ProviderId.Cursor;
+            if (name == "cursor-agent") return ProviderId.Cursor;
+            if (name == "opencode") return ProviderId.OpenCode;
+            if (name == "copilot") return ProviderId.Copilot;
+            if (name == "grok") return ProviderId.Grok;
+            if (name == "devin") return ProviderId.Devin;
+            if (name == "cline") return ProviderId.Cline;
+            if (name == "kimi") return ProviderId.Kimi;
+
+            if (string.IsNullOrWhiteSpace(commandLine))
+                return null;
+
+            var normalized = commandLine.Replace('\\', '/').ToLowerInvariant();
+            if (normalized.Contains("@anthropic-ai/claude-code", StringComparison.Ordinal))
+                return ProviderId.Claude;
+            if (normalized.Contains("@openai/codex", StringComparison.Ordinal))
+                return ProviderId.Codex;
+            if (normalized.Contains("/cursor/resources/app/out/cli.js", StringComparison.Ordinal))
+                return ProviderId.Cursor;
+            if (normalized.Contains("/node_modules/opencode/", StringComparison.Ordinal))
+                return ProviderId.OpenCode;
+            if (normalized.Contains("@github/copilot", StringComparison.Ordinal))
+                return ProviderId.Copilot;
+            if (normalized.Contains("/.grok/bin/grok", StringComparison.Ordinal))
+                return ProviderId.Grok;
+            if (normalized.Contains("/node_modules/devin/", StringComparison.Ordinal))
+                return ProviderId.Devin;
+            if (normalized.Contains("/node_modules/cline/", StringComparison.Ordinal))
+                return ProviderId.Cline;
+            if (normalized.Contains("@moonshot-ai/kimi", StringComparison.Ordinal)
+                || normalized.Contains("/.kimi-code/bin/kimi", StringComparison.Ordinal))
+                return ProviderId.Kimi;
+            if (normalized.Contains("/agy/bin/agy", StringComparison.Ordinal)
+                || normalized.Contains("/antigravity/bin/antigravity", StringComparison.Ordinal))
+                return ProviderId.Antigravity;
+
+            if (name == "cmd" && TryResolveShellCommand(commandLine) is { } shellProvider)
+                return shellProvider;
+
+            return null;
+        }
+
+        private static ProviderId? TryResolveShellCommand(string commandLine)
+        {
+            var tokens = CommandTokens(commandLine);
+            for (var i = 0; i < tokens.Count - 1; i++)
             {
-                if (ContainsCliMarker(haystack, marker))
-                    return id;
+                if (tokens[i] is not ("/c" or "/k"))
+                    continue;
+
+                return CommandTokenName(tokens[i + 1]) switch
+                {
+                    "antigravity" or "agy" => ProviderId.Antigravity,
+                    "claude" => ProviderId.Claude,
+                    "codex" => ProviderId.Codex,
+                    "cursor" or "cursor-agent" => ProviderId.Cursor,
+                    "opencode" => ProviderId.OpenCode,
+                    "copilot" => ProviderId.Copilot,
+                    "grok" => ProviderId.Grok,
+                    "devin" => ProviderId.Devin,
+                    "cline" => ProviderId.Cline,
+                    "kimi" => ProviderId.Kimi,
+                    _ => null,
+                };
             }
 
             return null;
+        }
+
+        private static bool ContainsCommandSequence(string? commandLine, string command, string subcommand)
+        {
+            if (string.IsNullOrWhiteSpace(commandLine))
+                return false;
+
+            var tokens = CommandTokens(commandLine);
+            for (var i = 0; i < tokens.Count - 1; i++)
+            {
+                if (CommandTokenName(tokens[i]) == command
+                    && CommandTokenName(tokens[i + 1]) == subcommand)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static List<string> CommandTokens(string commandLine)
+        {
+            var tokens = new List<string>();
+            var current = new StringBuilder();
+            char quote = '\0';
+
+            foreach (char character in commandLine)
+            {
+                if (character is '"' or '\'')
+                {
+                    if (quote == '\0')
+                    {
+                        quote = character;
+                        continue;
+                    }
+                    if (quote == character)
+                    {
+                        quote = '\0';
+                        continue;
+                    }
+                }
+
+                if (char.IsWhiteSpace(character) && quote == '\0')
+                {
+                    if (current.Length > 0)
+                    {
+                        tokens.Add(current.ToString().ToLowerInvariant());
+                        current.Clear();
+                    }
+                    continue;
+                }
+
+                current.Append(character);
+            }
+
+            if (current.Length > 0)
+                tokens.Add(current.ToString().ToLowerInvariant());
+            return tokens;
+        }
+
+        private static string CommandTokenName(string token)
+        {
+            var normalized = token.Replace('\\', '/').TrimEnd('/');
+            var slash = normalized.LastIndexOf('/');
+            var name = slash >= 0 ? normalized[(slash + 1)..] : normalized;
+            foreach (var extension in new[] { ".exe", ".cmd", ".bat" })
+            {
+                if (name.EndsWith(extension, StringComparison.Ordinal))
+                    return name[..^extension.Length];
+            }
+
+            return name;
         }
 
         private static bool ContainsCliMarker(string haystack, string marker)
@@ -1655,5 +1904,13 @@ namespace TaskbarQuota.ActiveApp
             }
             catch { return false; }
         }
+    }
+
+    public readonly record struct SupportedToolPresence(
+        bool DesktopAppPresent,
+        bool CliAgentPresent,
+        bool BackgroundAgentRunning = false)
+    {
+        public bool Any => DesktopAppPresent || CliAgentPresent;
     }
 }

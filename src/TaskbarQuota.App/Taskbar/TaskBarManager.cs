@@ -24,14 +24,27 @@ namespace TaskbarQuota.Taskbar
         private static DispatcherQueue? _dispatcher;
         private static Action? _showMainWindow;
         private static DispatcherTimer? _widgetHealthTimer;
+        private static DispatcherTimer? _visibilityTimer;
         private static bool _initialized;
         private static bool _isReconcilingWidgets;
         private static ProviderId? _lastLoggedWidgetApplyProvider;
+        private static PopupMenuItem? _showWidgetMenuItem;
+        private static PopupMenuItem? _hideWidgetMenuItem;
+        private static PopupMenuItem? _automaticWidgetMenuItem;
+        private static PopupMenuItem? _moveWidgetMenuItem;
+        private static WidgetVisibilityOverride _visibilityOverride = WidgetVisibilityOverride.Automatic;
+        private static readonly WidgetVisibilityStabilizer VisibilityStabilizer = new();
+        private static WidgetVisibilityDecision? _lastVisibilityDecision;
+        private static bool _lastWidgetVisible;
+        private static WidgetVisibilityMode? _lastObservedVisibilityMode;
+        private static bool? _lastObservedBackgroundAgent;
 
         public static void Initialize(DispatcherQueue dispatcher, Action showMainWindow)
         {
             _dispatcher = dispatcher;
             _showMainWindow = showMainWindow;
+            _lastObservedVisibilityMode = WidgetSettingsService.CurrentVisibilityMode;
+            _lastObservedBackgroundAgent = WidgetSettingsService.KeepVisibleWhileBackgroundAgentRunning;
 
             CreateTrayIcon();
             EnsureWidgets();
@@ -41,19 +54,30 @@ namespace TaskbarQuota.Taskbar
                 UsageCoordinator.Instance.StateChanged += OnStateChanged;
                 UsageCoordinator.Instance.ActiveProviderChanged += OnActiveProviderChanged;
                 UsageCoordinator.Instance.ActiveToolPresenceChanged += OnActiveToolPresenceChanged;
+                UsageCoordinator.Instance.SupportedSurfacesChanged += OnSupportedSurfacesChanged;
                 WidgetSettingsService.Changed += OnWidgetSettingsChanged;
                 App.Quitting += OnQuitting;
                 _initialized = true;
             }
 
             StartWidgetHealthTimer();
-            OnActiveToolPresenceChanged(UsageCoordinator.Instance.IsActiveToolPresent);
+            SyncWidgetState();
         }
 
         private static void CreateTrayIcon()
         {
             var open = new PopupMenuItem("Open TaskbarQuota", (_, _) => _dispatcher?.TryEnqueue(() => _showMainWindow?.Invoke()));
-            var move = new PopupMenuItem("Move primary taskbar widget", (_, _) => _dispatcher?.TryEnqueue(
+            _showWidgetMenuItem = new PopupMenuItem("Show widget", (_, _) => _dispatcher?.TryEnqueue(
+                () => ApplyVisibilityOverride(WidgetVisibilityOverride.ForceShow)));
+            _hideWidgetMenuItem = new PopupMenuItem("Hide widget", (_, _) => _dispatcher?.TryEnqueue(
+                () => ApplyVisibilityOverride(WidgetVisibilityOverride.ForceHide)));
+            _automaticWidgetMenuItem = new PopupMenuItem("Use automatic visibility", (_, _) => _dispatcher?.TryEnqueue(
+                () => ApplyVisibilityOverride(WidgetVisibilityOverride.Automatic)));
+            var visibility = new PopupSubMenu("Widget visibility")
+            {
+                Items = { _showWidgetMenuItem, _hideWidgetMenuItem, _automaticWidgetMenuItem },
+            };
+            _moveWidgetMenuItem = new PopupMenuItem("Move primary taskbar widget", (_, _) => _dispatcher?.TryEnqueue(
                 () => PrimaryWidget()?.StartDragging()));
             var reset = new PopupMenuItem("Reset widget positions", (_, _) => _dispatcher?.TryEnqueue(
                 () =>
@@ -76,7 +100,19 @@ namespace TaskbarQuota.Taskbar
 
             _trayIcon = new TrayIconWithContextMenu
             {
-                ContextMenu = new PopupMenu { Items = { open, new PopupMenuSeparator(), move, reset, new PopupMenuSeparator(), quit } },
+                ContextMenu = new PopupMenu
+                {
+                    Items =
+                    {
+                        open,
+                        new PopupMenuSeparator(),
+                        visibility,
+                        _moveWidgetMenuItem,
+                        reset,
+                        new PopupMenuSeparator(),
+                        quit,
+                    },
+                },
                 ToolTip = "TaskbarQuota",
             };
             _trayIcon.Create();
@@ -119,6 +155,10 @@ namespace TaskbarQuota.Taskbar
                 }
             };
             _widgetHealthTimer.Start();
+
+            _visibilityTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+            _visibilityTimer.Tick -= OnVisibilityTimerTick;
+            _visibilityTimer.Tick += OnVisibilityTimerTick;
         }
 
         private static void EnsureWidgets()
@@ -206,10 +246,55 @@ namespace TaskbarQuota.Taskbar
             => Widgets.Values.FirstOrDefault(widget => widget.IsAlive && widget.IsPrimaryTaskbar)
                 ?? Widgets.Values.FirstOrDefault(widget => widget.IsAlive);
 
-        private static void SyncWidgetState()
+        private static void SyncWidgetState(bool hideImmediately = false, bool hydrate = true)
         {
+            var coordinator = UsageCoordinator.Instance;
+            var providers = coordinator.WidgetDisplayProviders;
+            var decision = EvaluateVisibilityDecision(providers, hideImmediately);
+            bool visible = decision.ShouldShowWidget && providers.Count > 0;
+            bool needsFetch = false;
+
             foreach (var widget in Widgets.Values.ToArray())
-                SyncWidgetState(widget);
+            {
+                if (!widget.IsAlive)
+                    continue;
+
+                if (visible)
+                {
+                    // Bind before exposing the native host so a show never paints one frame of stale or
+                    // collapsed content.
+                    widget.SetDisplayProviders(providers, coordinator.ActiveWidgetProvider);
+                    widget.SetVisible(true);
+                }
+                else
+                {
+                    // Leave the current tiles bound during the short host fade. Collapsing them first makes
+                    // the animation look like a blank flash.
+                    widget.SetVisible(false);
+                }
+
+                if (!visible || !hydrate)
+                    continue;
+
+                foreach (var provider in providers)
+                {
+                    var toApply = HydrateResult(coordinator, provider);
+                    if (toApply is { } result)
+                    {
+                        widget.ApplyResult(result, force: true);
+                        LogWidgetApply(result.Id, "sync");
+                    }
+
+                    // Hydrating from a placeholder/failed snapshot leaves the tile showing a non-value while
+                    // the flyout fetches its own data. Kick a fetch so the widget resolves on its own (#21).
+                    if (toApply is null or { Ok: false })
+                        needsFetch = true;
+                }
+            }
+
+            FinalizeVisibilityDecision(decision, visible);
+            if (needsFetch)
+                _ = coordinator.TickAsync(force: true);
         }
 
         private static void SyncWidgetState(TaskBarWidget widget)
@@ -219,32 +304,138 @@ namespace TaskbarQuota.Taskbar
 
             var coordinator = UsageCoordinator.Instance;
             var providers = coordinator.WidgetDisplayProviders;
-
-            // No provider to show -> hide the native host instead of leaving a transparent taskbar child
-            // window over the notification area (#10).
-            widget.SetVisible(providers.Count > 0);
-            widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
-            if (providers.Count == 0)
-                return;
-
-            bool needsFetch = false;
-            foreach (var provider in providers)
+            var decision = EvaluateVisibilityDecision(providers);
+            bool visible = decision.ShouldShowWidget && providers.Count > 0;
+            if (visible)
             {
-                var toApply = HydrateResult(coordinator, provider);
-                if (toApply is { } result)
-                {
-                    widget.ApplyResult(result, force: true);
-                    LogWidgetApply(result.Id, "sync");
-                }
-
-                // Hydrating from a placeholder/failed snapshot leaves the tile showing a non-value while
-                // the flyout fetches its own data. Kick a fetch so the widget resolves on its own (#21).
-                if (toApply is null or { Ok: false })
-                    needsFetch = true;
+                widget.SetDisplayProviders(providers, coordinator.ActiveWidgetProvider);
+                widget.SetVisible(true);
+            }
+            else
+            {
+                widget.SetVisible(false);
             }
 
+            bool needsFetch = false;
+            if (visible)
+            {
+                foreach (var provider in providers)
+                {
+                    var toApply = HydrateResult(coordinator, provider);
+                    if (toApply is { } result)
+                    {
+                        widget.ApplyResult(result, force: true);
+                        LogWidgetApply(result.Id, "sync");
+                    }
+
+                    if (toApply is null or { Ok: false })
+                        needsFetch = true;
+                }
+            }
+
+            FinalizeVisibilityDecision(decision, visible);
             if (needsFetch)
                 _ = coordinator.TickAsync(force: true);
+        }
+
+        /// <summary>
+        /// Applies only the native host visibility decision. Focus/presence transitions do not change the
+        /// usage snapshot, so routing them through <see cref="SyncWidgetState(bool, bool)"/> needlessly
+        /// re-runs tile layout and render animations throughout the hide debounce.
+        /// </summary>
+        private static void SyncWidgetVisibility()
+        {
+            var coordinator = UsageCoordinator.Instance;
+            var providers = coordinator.WidgetDisplayProviders;
+            var decision = EvaluateVisibilityDecision(providers);
+            bool visible = decision.ShouldShowWidget && providers.Count > 0;
+
+            // A newly visible host may have missed provider updates while hidden. Perform one full bind
+            // before showing it; transitions that keep it visible do no content work at all.
+            if (visible && !_lastWidgetVisible)
+            {
+                SyncWidgetState();
+                return;
+            }
+
+            foreach (var widget in Widgets.Values.ToArray())
+            {
+                if (widget.IsAlive)
+                    widget.SetVisible(visible);
+            }
+
+            FinalizeVisibilityDecision(decision, visible);
+        }
+
+        private static WidgetVisibilityDecision EvaluateVisibilityDecision(
+            IReadOnlyList<ProviderId> providers,
+            bool hideImmediately = false)
+        {
+            var input = new WidgetVisibilityInput(
+                WidgetSettingsService.CurrentVisibilityMode,
+                _visibilityOverride,
+                providers.Count > 0,
+                WidgetSettingsService.KeepVisibleWhileBackgroundAgentRunning,
+                UsageCoordinator.Instance.SupportedSurfaces);
+            var raw = WidgetVisibilityPolicy.Evaluate(input);
+            bool bypassDelay = hideImmediately
+                || raw.Reason is WidgetVisibilityReason.ManualForceHide
+                    or WidgetVisibilityReason.NoValidProvider;
+            return VisibilityStabilizer.Apply(raw, DateTimeOffset.UtcNow, bypassDelay);
+        }
+
+        private static void FinalizeVisibilityDecision(WidgetVisibilityDecision decision, bool visible)
+        {
+            if (_lastWidgetVisible && !visible)
+                CloseFlyout();
+
+            _lastWidgetVisible = visible;
+            UpdateTrayMenuState();
+
+            if (decision.Reason == WidgetVisibilityReason.HideDebounce)
+                _visibilityTimer?.Start();
+            else
+                _visibilityTimer?.Stop();
+
+            if (_lastVisibilityDecision != decision)
+            {
+                _lastVisibilityDecision = decision;
+                var provider = UsageCoordinator.Instance.WidgetDisplayProvider?.ToString() ?? "none";
+                Log.Information(
+                    $"[visibility] visible={visible} reason={decision.Reason} " +
+                    $"policy={WidgetSettingsService.CurrentVisibilityMode} provider={provider}");
+            }
+        }
+
+        private static void OnVisibilityTimerTick(object? sender, object e)
+            => SyncWidgetVisibility();
+
+        private static void ApplyVisibilityOverride(WidgetVisibilityOverride visibilityOverride)
+        {
+            if (_visibilityOverride == visibilityOverride)
+                return;
+
+            _visibilityOverride = visibilityOverride;
+            Log.Information($"[visibility] override={visibilityOverride}");
+            SyncWidgetState(hideImmediately: true);
+        }
+
+        private static void UpdateTrayMenuState()
+        {
+            if (_showWidgetMenuItem is not null)
+                _showWidgetMenuItem.Checked = _visibilityOverride == WidgetVisibilityOverride.ForceShow;
+            if (_hideWidgetMenuItem is not null)
+                _hideWidgetMenuItem.Checked = _visibilityOverride == WidgetVisibilityOverride.ForceHide;
+            if (_automaticWidgetMenuItem is not null)
+                _automaticWidgetMenuItem.Checked = _visibilityOverride == WidgetVisibilityOverride.Automatic;
+            if (_moveWidgetMenuItem is not null)
+                _moveWidgetMenuItem.Enabled = _lastWidgetVisible;
+        }
+
+        private static void CloseFlyout()
+        {
+            try { _flyout?.Close(); } catch { }
+            _flyout = null;
         }
 
         /// <summary>
@@ -319,6 +510,8 @@ namespace TaskbarQuota.Taskbar
             var coordinator = UsageCoordinator.Instance;
             var providers = coordinator.WidgetDisplayProviders;
             bool isDisplayed = providers.Contains(result.Id);
+            var decision = EvaluateVisibilityDecision(providers);
+            bool visible = decision.ShouldShowWidget && providers.Count > 0;
 
             // Reused buffer: this runs on every usage publish, so a fresh array per publish was pure waste.
             SnapshotWidgets();
@@ -329,14 +522,22 @@ namespace TaskbarQuota.Taskbar
 
                 // Reconcile the tile set first, so a provider that just became active already owns a slot
                 // before its result is routed. SetDisplayProviders is a cheap no-op when nothing changed.
-                widget.SetVisible(providers.Count > 0);
-                widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
+                if (!visible)
+                {
+                    widget.SetVisible(false);
+                    continue;
+                }
+
+                widget.SetDisplayProviders(providers, coordinator.ActiveWidgetProvider);
+                widget.SetVisible(true);
                 if (!isDisplayed)
                     continue;
 
                 widget.ApplyResult(result);
                 LogWidgetApply(result.Id, "state");
             }
+
+            FinalizeVisibilityDecision(decision, visible);
         }
 
         /// <summary>
@@ -368,20 +569,29 @@ namespace TaskbarQuota.Taskbar
         private static void OnActiveToolPresenceChanged(bool isPresent)
             => _dispatcher?.TryEnqueue(() => ApplyActiveToolPresenceChanged(isPresent));
 
-        private static void ApplyActiveToolPresenceChanged(bool isPresent)
-        {
-            // Pinned tiles stay on the taskbar even when no AI tool is in the foreground; only the active
-            // tile follows presence. SyncWidgetState recomputes the whole set and hydrates it.
-            foreach (var widget in Widgets.Values.ToArray())
-            {
-                if (widget.IsAlive)
-                    SyncWidgetState(widget);
-            }
-        }
+        private static void ApplyActiveToolPresenceChanged(bool _)
+            // Like SupportedSurfacesChanged, this is a visibility transition rather than new usage data.
+            // SyncWidgetVisibility performs a full bind when the host becomes visible, but avoids forcing a
+            // tile re-render while it remains visible during the hide debounce.
+            => SyncWidgetVisibility();
+
+        private static void OnSupportedSurfacesChanged(SupportedSurfaceState _)
+            => _dispatcher?.TryEnqueue(SyncWidgetVisibility);
 
         private static void OnWidgetSettingsChanged(object? sender, EventArgs e)
         {
-            _dispatcher?.TryEnqueue(SyncWidgetState);
+            _dispatcher?.TryEnqueue(() =>
+            {
+                var mode = WidgetSettingsService.CurrentVisibilityMode;
+                var backgroundAgent = WidgetSettingsService.KeepVisibleWhileBackgroundAgentRunning;
+                bool visibilitySettingChanged = _lastObservedVisibilityMode != mode
+                    || _lastObservedBackgroundAgent != backgroundAgent;
+                _lastObservedVisibilityMode = mode;
+                _lastObservedBackgroundAgent = backgroundAgent;
+                if (visibilitySettingChanged)
+                    Log.Information($"[visibility] policy={mode} backgroundAgent={backgroundAgent}");
+                SyncWidgetState(hideImmediately: visibilitySettingChanged);
+            });
         }
 
         private static void OnQuitting()
@@ -389,18 +599,30 @@ namespace TaskbarQuota.Taskbar
             UsageCoordinator.Instance.StateChanged -= OnStateChanged;
             UsageCoordinator.Instance.ActiveProviderChanged -= OnActiveProviderChanged;
             UsageCoordinator.Instance.ActiveToolPresenceChanged -= OnActiveToolPresenceChanged;
+            UsageCoordinator.Instance.SupportedSurfacesChanged -= OnSupportedSurfacesChanged;
             WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
             _initialized = false;
             _widgetHealthTimer?.Stop();
             _widgetHealthTimer = null;
+            _visibilityTimer?.Stop();
+            _visibilityTimer = null;
             if (_trayIcon != null) { _trayIcon.TryRemove(); _trayIcon.Dispose(); _trayIcon = null; }
-            try { _flyout?.Close(); } catch { }
-            _flyout = null;
+            CloseFlyout();
             foreach (var widget in Widgets.Values.ToArray())
             {
                 try { widget.Dispose(); } catch { }
             }
             Widgets.Clear();
+            _showWidgetMenuItem = null;
+            _hideWidgetMenuItem = null;
+            _automaticWidgetMenuItem = null;
+            _moveWidgetMenuItem = null;
+            _visibilityOverride = WidgetVisibilityOverride.Automatic;
+            _lastVisibilityDecision = null;
+            _lastWidgetVisible = false;
+            _lastObservedVisibilityMode = null;
+            _lastObservedBackgroundAgent = null;
+            VisibilityStabilizer.Reset(isVisible: false);
         }
     }
 }
