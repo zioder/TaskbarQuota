@@ -19,9 +19,11 @@ public sealed class QuotaAlertService
     private readonly Func<DateTimeOffset> _clock;
     private readonly Func<QuotaAlertSettings> _settingsProvider;
     private readonly QuotaReplenishmentTracker _replenishmentTracker;
+    private readonly QuotaReplenishmentCrossSessionTracker _crossSessionTracker;
     private readonly object _lock = new();
     private QuotaAlertState _state;
     private bool _lastReplenishmentEnabled;
+    private bool _lastCrossSessionReplenishmentEnabled;
     private bool _started;
 
     internal QuotaAlertService(
@@ -29,14 +31,19 @@ public sealed class QuotaAlertService
         Func<DateTimeOffset>? clock = null,
         Func<QuotaAlertSettings>? settingsProvider = null,
         QuotaReplenishmentTracker? replenishmentTracker = null,
+        QuotaReplenishmentCrossSessionTracker? crossSessionTracker = null,
         QuotaAlertState? state = null)
     {
         _notifier = notifier;
         _clock = clock ?? (() => DateTimeOffset.Now);
         _settingsProvider = settingsProvider ?? (() => QuotaAlertSettingsService.Current);
         _replenishmentTracker = replenishmentTracker ?? new QuotaReplenishmentTracker();
+        _crossSessionTracker = crossSessionTracker ?? new QuotaReplenishmentCrossSessionTracker(
+            new QuotaReplenishmentStateStore(QuotaReplenishmentStateStore.DefaultPath));
         _state = state ?? QuotaAlertState.Load();
-        _lastReplenishmentEnabled = _settingsProvider().ReplenishmentEnabled;
+        var settings = _settingsProvider();
+        _lastReplenishmentEnabled = settings.ReplenishmentEnabled;
+        _lastCrossSessionReplenishmentEnabled = settings.CrossSessionReplenishmentEnabled;
     }
 
     public void Start()
@@ -80,9 +87,20 @@ public sealed class QuotaAlertService
         var now = _clock();
         lock (_lock)
         {
-            replenishments = settings.ReplenishmentEnabled
-                ? _replenishmentTracker.Observe(result, now)
-                : Array.Empty<QuotaReplenishmentEvent>();
+            if (settings.ReplenishmentEnabled)
+            {
+                var currentSession = _replenishmentTracker.Observe(result, now);
+                var crossSession = settings.CrossSessionReplenishmentEnabled
+                    ? _crossSessionTracker.Observe(result, now)
+                    : Array.Empty<QuotaReplenishmentEvent>();
+                replenishments = crossSession.Count == 0
+                    ? currentSession
+                    : crossSession.Concat(currentSession).ToArray();
+            }
+            else
+            {
+                replenishments = Array.Empty<QuotaReplenishmentEvent>();
+            }
 
             var replenishedWindowIds = replenishments
                 .Select(replenishment => replenishment.Current.Key.WindowId)
@@ -109,7 +127,8 @@ public sealed class QuotaAlertService
                     $"->{LogPercent(item.Current.AvailablePercent)}"));
                 Log.Information(
                     $"[quota-replenishment] notification shown provider={result.Id} " +
-                    $"transitions={transitions} reason=delivered");
+                    $"transitions={transitions} reason=" +
+                    $"{(replenishments.Any(item => item.IsCrossSession) ? "delivered-since-last-session" : "delivered")}");
             }
         }
 
@@ -119,14 +138,22 @@ public sealed class QuotaAlertService
 
     internal void OnSettingsChanged(object? sender, EventArgs args)
     {
-        var enabled = _settingsProvider().ReplenishmentEnabled;
+        var settings = _settingsProvider();
+        var replenishmentEnabled = settings.ReplenishmentEnabled;
+        var crossSessionEnabled = settings.CrossSessionReplenishmentEnabled;
         lock (_lock)
         {
-            if (enabled == _lastReplenishmentEnabled)
-                return;
+            var replenishmentChanged = replenishmentEnabled != _lastReplenishmentEnabled;
+            var crossSessionChanged = crossSessionEnabled != _lastCrossSessionReplenishmentEnabled;
 
-            _lastReplenishmentEnabled = enabled;
-            _replenishmentTracker.Reset("setting-changed");
+            _lastReplenishmentEnabled = replenishmentEnabled;
+            _lastCrossSessionReplenishmentEnabled = crossSessionEnabled;
+
+            if (replenishmentChanged)
+                _replenishmentTracker.Reset("setting-changed");
+
+            if (replenishmentChanged || crossSessionChanged)
+                _crossSessionTracker.Reset(clearPersisted: true);
         }
     }
 

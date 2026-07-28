@@ -279,6 +279,15 @@ namespace TaskbarQuota.Views
                 return;
 
             QuotaAlertSettingsService.SetReplenishmentEnabled(QuotaReplenishmentToggle.IsOn);
+            ApplyQuotaAlertSettingsToControls();
+        }
+
+        private void OnCrossSessionReplenishmentToggled(object sender, RoutedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            QuotaAlertSettingsService.SetCrossSessionReplenishmentEnabled(CrossSessionReplenishmentToggle.IsOn);
         }
 
         private void OnWarningThresholdChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
@@ -317,6 +326,8 @@ namespace TaskbarQuota.Views
             {
                 QuotaAlertsToggle.IsOn = settings.Enabled;
                 QuotaReplenishmentToggle.IsOn = settings.ReplenishmentEnabled;
+                CrossSessionReplenishmentToggle.IsOn = settings.CrossSessionReplenishmentEnabled;
+                CrossSessionReplenishmentToggle.IsEnabled = settings.ReplenishmentEnabled;
                 WarningThresholdBox.Value = settings.WarningThreshold;
                 CriticalThresholdBox.Value = settings.CriticalThreshold;
                 AlertCooldownBox.Value = settings.CooldownMinutes;

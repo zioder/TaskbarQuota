@@ -30,7 +30,8 @@ internal sealed record QuotaWindowObservation(
 internal sealed record QuotaReplenishmentEvent(
     QuotaWindowObservation Previous,
     QuotaWindowObservation Current,
-    QuotaReplenishmentKind Kind)
+    QuotaReplenishmentKind Kind,
+    bool IsCrossSession = false)
 {
     public double Increase => Current.AvailablePercent - Previous.AvailablePercent;
 }
@@ -77,6 +78,13 @@ internal static class QuotaReplenishmentEvaluator
 
     public static bool IsValid(double usedPercent)
         => double.IsFinite(usedPercent) && usedPercent is >= 0 and <= 100;
+
+    public static string Reason(QuotaReplenishmentKind kind) => kind switch
+    {
+        QuotaReplenishmentKind.ConfirmedCycleRenewal => "cycle-renewal",
+        QuotaReplenishmentKind.FullReplenishment => "full-replenishment",
+        _ => "availability-increase",
+    };
 
     private static bool IsConfirmedCycleRenewal(
         QuotaWindowObservation previous,
@@ -198,7 +206,7 @@ internal sealed class QuotaReplenishmentTracker
                         $"[quota-replenishment] detected provider={result.Id} window={window.Id} " +
                         $"from={FormatPercent(replenishment.Previous.AvailablePercent)} " +
                         $"to={FormatPercent(current.AvailablePercent)} " +
-                        $"reason={Reason(replenishment.Kind)}");
+                        $"reason={QuotaReplenishmentEvaluator.Reason(replenishment.Kind)}");
                     continue;
                 }
             }
@@ -265,13 +273,6 @@ internal sealed class QuotaReplenishmentTracker
             $"[quota-replenishment] baseline provider={observation.Key.Provider} " +
             $"window={observation.Key.WindowId} available={FormatPercent(observation.AvailablePercent)} " +
             $"reason={reason}");
-
-    private static string Reason(QuotaReplenishmentKind kind) => kind switch
-    {
-        QuotaReplenishmentKind.ConfirmedCycleRenewal => "cycle-renewal",
-        QuotaReplenishmentKind.FullReplenishment => "full-replenishment",
-        _ => "availability-increase",
-    };
 
     private static string FormatPercent(double value)
         => value.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);

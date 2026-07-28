@@ -28,6 +28,9 @@ public static class QuotaAlertSettingsService
     public static void SetReplenishmentEnabled(bool enabled)
         => Apply(Current with { ReplenishmentEnabled = enabled });
 
+    public static void SetCrossSessionReplenishmentEnabled(bool enabled)
+        => Apply(Current with { CrossSessionReplenishmentEnabled = enabled });
+
     public static void SetWarningThreshold(double value)
         => Apply(Current with { WarningThreshold = value });
 
@@ -102,6 +105,7 @@ public sealed record QuotaAlertSettings
     {
         Enabled = false,
         ReplenishmentEnabled = false,
+        CrossSessionReplenishmentEnabled = false,
         WarningThreshold = 75,
         CriticalThreshold = 90,
         CooldownMinutes = 30,
@@ -109,6 +113,7 @@ public sealed record QuotaAlertSettings
 
     public bool Enabled { get; init; }
     public bool ReplenishmentEnabled { get; init; }
+    public bool CrossSessionReplenishmentEnabled { get; init; }
     public double WarningThreshold { get; init; }
     public double CriticalThreshold { get; init; }
     public double CooldownMinutes { get; init; }

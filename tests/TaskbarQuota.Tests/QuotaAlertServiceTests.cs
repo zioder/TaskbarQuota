@@ -63,21 +63,86 @@ public class QuotaAlertServiceTests
         Assert.Empty(notifier.Notifications);
     }
 
-    private static QuotaAlertSettings Settings(bool replenishmentEnabled) => new()
+    [Fact]
+    public void CrossSessionIncreaseIsDeliveredOnFirstLiveReading()
+    {
+        using var stateDirectory = new TemporaryDirectory();
+        var statePath = Path.Combine(stateDirectory.Path, QuotaReplenishmentStateStore.FileName);
+        var previousSession = new QuotaReplenishmentCrossSessionTracker(
+            new QuotaReplenishmentStateStore(statePath));
+        _ = previousSession.Observe(
+            Result(1, usedPercent: 88, email: "same@example.test", observedAt: Now().AddHours(-1)),
+            Now().AddHours(-1));
+
+        var notifier = new FakeNotifier();
+        var settings = Settings(replenishmentEnabled: true, crossSessionEnabled: true);
+        var service = new QuotaAlertService(
+            notifier,
+            clock: Now,
+            settingsProvider: () => settings,
+            crossSessionTracker: new QuotaReplenishmentCrossSessionTracker(
+                new QuotaReplenishmentStateStore(statePath)),
+            state: new QuotaAlertState());
+
+        service.OnStateChanged(Result(1, usedPercent: 0, email: "same@example.test"));
+
+        var notification = Assert.Single(notifier.Notifications);
+        Assert.Equal("Codex session quota replenished", notification.Title);
+        Assert.Equal("Available quota is now 100%.", notification.Body);
+    }
+
+    [Fact]
+    public void DisablingCrossSessionComparisonClearsItsPersistedState()
+    {
+        using var stateDirectory = new TemporaryDirectory();
+        var statePath = Path.Combine(stateDirectory.Path, QuotaReplenishmentStateStore.FileName);
+        var crossSessionTracker = new QuotaReplenishmentCrossSessionTracker(
+            new QuotaReplenishmentStateStore(statePath));
+        _ = crossSessionTracker.Observe(
+            Result(1, usedPercent: 88, email: "same@example.test"),
+            Now());
+        Assert.True(File.Exists(statePath));
+
+        var notifier = new FakeNotifier();
+        var settings = Settings(replenishmentEnabled: true, crossSessionEnabled: true);
+        var service = new QuotaAlertService(
+            notifier,
+            clock: Now,
+            settingsProvider: () => settings,
+            crossSessionTracker: crossSessionTracker,
+            state: new QuotaAlertState());
+
+        settings = Settings(replenishmentEnabled: true, crossSessionEnabled: false);
+        service.OnSettingsChanged(null, EventArgs.Empty);
+
+        Assert.False(File.Exists(statePath));
+    }
+
+    private static QuotaAlertSettings Settings(
+        bool replenishmentEnabled,
+        bool crossSessionEnabled = false) => new()
     {
         Enabled = false,
         ReplenishmentEnabled = replenishmentEnabled,
+        CrossSessionReplenishmentEnabled = crossSessionEnabled,
         WarningThreshold = 75,
         CriticalThreshold = 90,
         CooldownMinutes = 30,
     };
 
-    private static UsageResult Result(long sequence, double usedPercent)
+    private static UsageResult Result(
+        long sequence,
+        double usedPercent,
+        string? email = null,
+        DateTimeOffset? observedAt = null)
     {
         var provider = new TestProvider();
-        var usage = new UsageSnapshot(new RateWindow(usedPercent, windowMinutes: 300));
+        var usage = new UsageSnapshot(new RateWindow(usedPercent, windowMinutes: 300))
+        {
+            Email = email,
+        };
         return UsageResult.Success(provider.Id, provider, new ProviderFetchResult(usage, "test"))
-            .AsLiveObservation(sequence, Now());
+            .AsLiveObservation(sequence, observedAt ?? Now());
     }
 
     private static DateTimeOffset Now()
@@ -108,5 +173,23 @@ public class QuotaAlertServiceTests
 
         public Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
             => throw new NotSupportedException();
+    }
+
+    private sealed class TemporaryDirectory : IDisposable
+    {
+        public TemporaryDirectory()
+        {
+            Path = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                $"taskbarquota-alert-service-{Guid.NewGuid():N}");
+        }
+
+        public string Path { get; }
+
+        public void Dispose()
+        {
+            if (Directory.Exists(Path))
+                Directory.Delete(Path, recursive: true);
+        }
     }
 }
