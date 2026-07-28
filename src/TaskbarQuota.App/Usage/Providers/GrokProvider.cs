@@ -24,7 +24,11 @@ namespace TaskbarQuota.Usage.Providers
     {
         private const string OidcScopePrefix = "https://auth.x.ai::";
         private const string LegacySessionScope = "https://accounts.x.ai/sign-in";
-        private const string BillingUrl = "https://cli-chat-proxy.grok.com/v1/billing";
+        // The credits format is the response used by current Grok CLI versions.  The
+        // unqualified endpoint still returns the legacy monthly shape for some accounts,
+        // but free/OIDC accounts can otherwise return a different config (or no usable
+        // monthlyLimit at all).
+        private const string BillingUrl = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
         private const string SettingsUrl = "https://cli-chat-proxy.grok.com/v1/settings";
         private const string TokenAuthHeader = "xai-grok-cli";
         // The billing proxy frequently returns a transient "Timeout expired" on a cold call and
@@ -52,7 +56,8 @@ namespace TaskbarQuota.Usage.Providers
                 billing.UsedPercent,
                 windowMinutes: null,
                 resetAt: billing.ResetAt,
-                resetDescription: CodexProvider.FormatResetCountdown(billing.ResetAt));
+                resetDescription: CodexProvider.FormatResetCountdown(billing.ResetAt),
+                label: billing.IsWeekly ? "Weekly" : null);
 
             var usage = new UsageSnapshot(primary)
             {
@@ -93,7 +98,7 @@ namespace TaskbarQuota.Usage.Providers
 
         // --- Credits (/v1/billing JSON) ----------------------------------------------------------
 
-        internal sealed record BillingSnapshot(double UsedPercent, double UsedUnits, double LimitUnits, double OnDemandCapUnits, DateTimeOffset? ResetAt);
+        internal sealed record BillingSnapshot(double UsedPercent, double UsedUnits, double LimitUnits, double OnDemandCapUnits, DateTimeOffset? ResetAt, bool IsWeekly = false);
 
         private static async Task<BillingSnapshot> FetchBillingAsync(string accessToken, CancellationToken ct)
         {
@@ -166,7 +171,26 @@ namespace TaskbarQuota.Usage.Providers
             double? used = UnitsValue(config, "used");
             double? limit = UnitsValue(config, "monthlyLimit");
             if (used is null || limit is null || limit <= 0)
-                throw new ProviderException(ProviderErrorKind.Parse, "Grok billing response changed.");
+            {
+                // New/free accounts expose the included subscription window instead of
+                // monthly credit totals.  An unused window legitimately omits usage, so
+                // missing usage means zero here; prepaidBalance is API credit balance and
+                // must never be used as the subscription quota.
+                if (!config.TryGetProperty("currentPeriod", out var period)
+                    || (period.ValueKind != JsonValueKind.Object && period.ValueKind != JsonValueKind.String))
+                    throw new ProviderException(ProviderErrorKind.Parse, "Grok billing response changed.");
+
+                double periodPercent = CurrentPeriodPercent(period);
+                DateTimeOffset? periodReset = CurrentPeriodDate(config, period,
+                    "billingPeriodEnd", "periodEnd", "resetAt", "resetsAt", "end");
+                return new BillingSnapshot(
+                    periodPercent,
+                    UsedUnits: periodPercent,
+                    LimitUnits: 0,
+                    OnDemandCapUnits: UnitsValue(config, "onDemandCap") ?? 0,
+                    ResetAt: periodReset,
+                    IsWeekly: IsWeeklyPeriod(period));
+            }
 
             double percent = Math.Clamp(used.Value / limit.Value * 100.0, 0, 100);
 
@@ -179,7 +203,65 @@ namespace TaskbarQuota.Usage.Providers
             }
 
             double onDemandCap = UnitsValue(config, "onDemandCap") ?? 0;
-            return new BillingSnapshot(percent, used.Value, limit.Value, onDemandCap, reset);
+            return new BillingSnapshot(percent, used.Value, limit.Value, onDemandCap, reset, IsWeekly: false);
+        }
+
+        private static double CurrentPeriodPercent(JsonElement period)
+        {
+            foreach (var name in new[] { "usedPercent", "percentUsed", "usagePercent", "utilization", "percent" })
+            {
+                if (NumberValue(period, name) is double value)
+                    return Math.Clamp(value <= 1 ? value * 100 : value, 0, 100);
+            }
+
+            double? used = UnitsValue(period, "used") ?? NumberValue(period, "used");
+            double? limit = UnitsValue(period, "limit") ?? UnitsValue(period, "monthlyLimit")
+                ?? NumberValue(period, "limit") ?? NumberValue(period, "monthlyLimit");
+            if (used is double u && limit is > 0)
+                return Math.Clamp(u / limit.Value * 100, 0, 100);
+
+            // Grok's proto3 response omits the float for a valid, unused period.
+            return 0;
+        }
+
+        private static bool IsWeeklyPeriod(JsonElement period)
+            => period.ValueKind == JsonValueKind.String
+                ? string.Equals(period.GetString(), "weekly", StringComparison.OrdinalIgnoreCase)
+                : (StringValue(period, "type") ?? StringValue(period, "kind") ?? StringValue(period, "period"))
+                    is string value && value.Contains("week", StringComparison.OrdinalIgnoreCase);
+
+        private static DateTimeOffset? CurrentPeriodDate(JsonElement config, JsonElement period, params string[] names)
+        {
+            foreach (var name in names)
+            {
+                if (TryDate(period, name, out var periodDate)) return periodDate;
+                if (TryDate(config, name, out var configDate)) return configDate;
+            }
+            return null;
+        }
+
+        private static bool TryDate(JsonElement parent, string name, out DateTimeOffset value)
+        {
+            value = default;
+            return parent.TryGetProperty(name, out var raw) && raw.ValueKind == JsonValueKind.String
+                && DateTimeOffset.TryParse(raw.GetString(), CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out value);
+        }
+
+        private static string? StringValue(JsonElement parent, string name)
+            => parent.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+                ? value.GetString()?.Trim()
+                : null;
+
+        private static double? NumberValue(JsonElement parent, string name)
+        {
+            if (!parent.TryGetProperty(name, out var value)) return null;
+            return value.ValueKind switch
+            {
+                JsonValueKind.Number => value.GetDouble(),
+                JsonValueKind.String when double.TryParse(value.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed) => parsed,
+                _ => null,
+            };
         }
 
         private static double? UnitsValue(JsonElement parent, string name)
@@ -243,6 +325,8 @@ namespace TaskbarQuota.Usage.Providers
             var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
             request.Headers.TryAddWithoutValidation("X-XAI-Token-Auth", TokenAuthHeader);
+            request.Headers.TryAddWithoutValidation("x-grok-client-version", "0.2.93");
+            request.Headers.TryAddWithoutValidation("x-grok-client-identifier", "grok-shell");
             request.Headers.Accept.ParseAdd("application/json");
             request.Headers.UserAgent.ParseAdd("TaskbarQuota");
             return request;
