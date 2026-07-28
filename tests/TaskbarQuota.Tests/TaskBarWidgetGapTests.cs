@@ -9,6 +9,30 @@ public class TaskBarWidgetGapTests
     private static RECT R(int left, int right) => new() { left = left, top = 0, right = right, bottom = 40 };
 
     [Fact]
+    public void ShouldReposition_BeforeFirstPlacement_IsTrueWithoutOverflowing()
+    {
+        // offsetX == 0 used to make `Math.Abs(int.MinValue - 0)` throw OverflowException,
+        // which the caller swallowed and left the widget unplaced forever.
+        Assert.True(TaskBarWidget.ShouldReposition(int.MinValue, 0, 2));
+        Assert.True(TaskBarWidget.ShouldReposition(int.MinValue, 1200, 2));
+        Assert.True(TaskBarWidget.ShouldReposition(int.MinValue, -1200, 2));
+    }
+
+    [Fact]
+    public void ShouldReposition_WithinDeadband_IsFalse()
+    {
+        Assert.False(TaskBarWidget.ShouldReposition(1200, 1200, 2));
+        Assert.False(TaskBarWidget.ShouldReposition(1200, 1201, 2));
+    }
+
+    [Fact]
+    public void ShouldReposition_AtOrBeyondDeadband_IsTrue()
+    {
+        Assert.True(TaskBarWidget.ShouldReposition(1200, 1202, 2));
+        Assert.True(TaskBarWidget.ShouldReposition(1200, 1198, 2));
+    }
+
+    [Fact]
     public void ComputeFreeGaps_NoObstacles_ReturnsWholeSpan()
     {
         var gaps = TaskBarWidget.ComputeFreeGaps(0, 1000, new List<RECT>());
