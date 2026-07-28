@@ -140,6 +140,9 @@ namespace TaskbarQuota.Taskbar
                 {
                     if (targetsByHandle.TryGetValue(pair.Key, out var target)
                         && pair.Value.IsAlive
+                        // A window whose host content was never built renders nothing and cannot recover on
+                        // its own — it is dead in every way that matters to the user, so recreate it.
+                        && pair.Value.IsHostContentReady
                         && pair.Value.IsDpiCurrent
                         && pair.Value.MatchesTarget(target))
                     {

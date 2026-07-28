@@ -59,6 +59,10 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 
 ## Features
 
+### What's new in 1.1.1
+
+- **The widget appears again** — 1.1.0 could leave the taskbar tile fully transparent: the window was injected and placed, the tile measured and laid out, and nothing painted. A render that skipped the cross-fade consumed the tile's one reveal, so a tile seeded from the boot snapshot never faded in. Hotfix on top of 1.1.0.
+
 ### What's new in 1.1.0
 
 - **Pinned providers** — providers can be pinned so their quota stays on the taskbar no matter which tool is in the foreground. The active provider takes the leftmost slot and pinned ones trail it, up to 3 tiles and only while they fit the measured taskbar space. (#32)
