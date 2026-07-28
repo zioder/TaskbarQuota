@@ -857,15 +857,40 @@ namespace TaskbarQuota.Controls
             _slideStoryboard.Begin();
         }
 
+        /// <summary>
+        /// Whether a render that skips the cross-fade still has to put the tile on screen outright.
+        ///
+        /// True exactly when this is the tile's first render and it is meant to be showing: the root ships
+        /// at Opacity 0, and the reveal is the only thing that raises it. A suppressed transition that
+        /// returned early here left the tile permanently invisible even though it measured, laid out and
+        /// reported itself Visible.
+        /// </summary>
+        internal static bool ShouldRevealWithoutTransition(bool isFirstReveal, bool isActiveToolVisible)
+            => isFirstReveal && isActiveToolVisible;
+
         private void AnimateRender(bool isFirstReveal, bool providerSwitch = false)
         {
-            _hasRevealed = true;
             if (SuppressNextTransition)
             {
                 SuppressNextTransition = false;
                 Panel.Opacity = RestingPanelOpacity;
+
+                // Suppressing the cross-fade must not swallow the first reveal. Root ships at Opacity 0 and
+                // only the reveal raises it, so a tile seeded from the boot snapshot (which suppresses the
+                // transition) used to stay fully transparent for the life of the process: measured, laid
+                // out, Visible, and painting nothing. Show it outright instead — skipping the fade is the
+                // whole point of the suppression, showing it is not.
+                if (ShouldRevealWithoutTransition(isFirstReveal, _isActiveToolVisible))
+                {
+                    Root.Opacity = 1;
+                    RootTranslate.Y = 0;
+                }
+
+                _hasRevealed = true;
                 return;
             }
+
+            _hasRevealed = true;
 
             if (isFirstReveal)
                 AnimateFirstReveal();

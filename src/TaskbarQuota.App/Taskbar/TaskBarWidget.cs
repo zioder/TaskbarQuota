@@ -110,9 +110,15 @@ namespace TaskbarQuota.Taskbar
         private bool? separatorBrushIsLight;
         private Microsoft.UI.Xaml.Controls.StackPanel? summaryPanel;
         private int availableLogicalWidth = DefaultAvailableLogicalWidth;
+        // Display set handed over before Initialize() built the panel, replayed once it has.
+        private IReadOnlyList<ProviderId>? pendingProviders;
+        private ProviderId? pendingActiveProvider;
         private bool isRecomputingLayout;
         private bool layoutRepositionPending;
-        private int lastLayoutHash;
+        // Null until the first pass, so that pass always logs. A plain int seeded at 0 could match the first
+        // real hash and swallow the only line that says whether the widget ever laid its tiles out.
+        private int? lastLayoutHash;
+        private bool loggedMissingPanel;
         private DesktopWindowXamlSource? host;
         private Microsoft.UI.Xaml.FrameworkElement? hostContent;
         private int WidgetHostWidth;
@@ -158,6 +164,9 @@ namespace TaskbarQuota.Taskbar
 
         public IntPtr Handle => hwnd != IntPtr.Zero ? hwnd : throw new InvalidOperationException("Widget not initialized.");
         public bool IsAlive => hwnd != IntPtr.Zero && User32.IsWindow(hwnd);
+        /// <summary>True once <see cref="Initialize"/> has built the tile panel. A live window without it can
+        /// render nothing at all, so the manager treats that pairing as a dead widget and recreates it.</summary>
+        public bool IsHostContentReady => summaryPanel is not null;
         public bool IsDpiCurrent
         {
             get
@@ -243,6 +252,23 @@ namespace TaskbarQuota.Taskbar
 
             initialized = true;
             Log.Information("Widget host initialization done");
+
+            // A provider set that arrived before the host content existed was dropped, and nothing re-sent
+            // it: the manager only calls SetDisplayProviders when the set changes, and RefreshLayout hit the
+            // same "no panel yet" early-out on every health tick. That left the host injected with every
+            // tile still collapsed — an invisible widget for the life of the process.
+            ApplyPendingDisplayProviders();
+        }
+
+        /// <summary>Replays the provider set that arrived before <see cref="Initialize"/> built the panel.</summary>
+        private void ApplyPendingDisplayProviders()
+        {
+            if (pendingProviders is not { } providers)
+                return;
+
+            pendingProviders = null;
+            Log.Debug($"[widget] replaying {providers.Count} display provider(s) queued before the host was built");
+            SetDisplayProviders(providers, pendingActiveProvider);
         }
 
         private void InjectIntoTaskbar()
@@ -373,8 +399,15 @@ namespace TaskbarQuota.Taskbar
         /// </summary>
         public void SetDisplayProviders(IReadOnlyList<ProviderId> providers, ProviderId? activeProvider)
         {
+            // Before Initialize() there are no tiles to bind. Hold the set instead of dropping it — the
+            // manager re-sends only on a change, so a dropped first set never came back and the widget
+            // stayed empty forever.
             if (summaryPanel is null)
+            {
+                pendingProviders = providers;
+                pendingActiveProvider = activeProvider;
                 return;
+            }
 
             activeTileProvider = activeProvider;
 
@@ -438,7 +471,18 @@ namespace TaskbarQuota.Taskbar
         private void RecomputeLayout(bool forceReposition = false)
         {
             if (summaryPanel is null)
+            {
+                // Silent before Initialize(); a live window with no panel is the invisible-widget state and
+                // has to be visible in the log, but only once — this runs on every health tick.
+                if (IsAlive && !loggedMissingPanel)
+                {
+                    loggedMissingPanel = true;
+                    Log.Warning("[widget] layout skipped: the window is up but the host content is not built");
+                }
                 return;
+            }
+
+            loggedMissingPanel = false;
 
             // Re-entrant calls are this pass's own re-renders raising DesiredHostWidthChanged. Everything
             // runs on the UI thread with no awaits, so nothing external can interleave — the pass already
@@ -513,6 +557,13 @@ namespace TaskbarQuota.Taskbar
                 bool resized = ResizeWidgetHost(count == 0 ? DefaultWidgetHostWidth : total);
                 if (resized || forceReposition)
                     UpdatePosition();
+            }
+            catch (Exception ex)
+            {
+                // A pass that throws before the visibility loop leaves every tile collapsed, which reads as
+                // "the widget never appeared". Swallowing it here keeps the failure to one pass — the health
+                // tick runs the next one five seconds later — and puts it in the log either way.
+                Log.Warning(ex, "[widget] layout pass failed; tiles keep their previous visibility");
             }
             finally
             {
@@ -2012,6 +2063,8 @@ namespace TaskbarQuota.Taskbar
             host = null;
             hostContent = null;
             summaryPanel = null;
+            pendingProviders = null;
+            pendingActiveProvider = null;
             Array.Clear(tiles);
             Array.Clear(separators);
             Array.Clear(tileProviders);
