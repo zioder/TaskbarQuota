@@ -5,6 +5,7 @@ using TaskbarQuota.Usage;
 
 namespace TaskbarQuota.Tests;
 
+[Collection(WidgetRowSettingsCollection.Name)]
 public class CodexProviderTests
 {
     [Theory]

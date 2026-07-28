@@ -27,6 +27,9 @@ namespace TaskbarQuota.Taskbar
         private static bool _initialized;
         private static bool _isReconcilingWidgets;
         private static ProviderId? _lastLoggedWidgetApplyProvider;
+        // Foreground hook: fires the instant Windows switches windows so the focus-follows-provider
+        // widget reacts on the switch itself instead of waiting for the next 500 ms detect tick.
+        private static ActiveApp.ForegroundWatcher? _foregroundWatcher;
 
         public static void Initialize(DispatcherQueue dispatcher, Action showMainWindow)
         {
@@ -41,8 +44,17 @@ namespace TaskbarQuota.Taskbar
                 UsageCoordinator.Instance.StateChanged += OnStateChanged;
                 UsageCoordinator.Instance.ActiveProviderChanged += OnActiveProviderChanged;
                 UsageCoordinator.Instance.ActiveToolPresenceChanged += OnActiveToolPresenceChanged;
+                UsageCoordinator.Instance.ProviderForegroundChanged += OnProviderForegroundChanged;
+                // Lets the coordinator's focus tracker treat "our flyout is open" as neutral instead of as
+                // the user having left the provider app.
+                UsageCoordinator.Instance.IsOwnUiEngaged = () => _flyout?.IsShown == true;
                 WidgetSettingsService.Changed += OnWidgetSettingsChanged;
                 App.Quitting += OnQuitting;
+                // Installed from the UI thread on purpose: WINEVENT_OUTOFCONTEXT callbacks arrive through
+                // that thread's message pump, which this one has and background threads do not.
+                _foregroundWatcher = new ActiveApp.ForegroundWatcher();
+                _foregroundWatcher.ForegroundChanged += OnForegroundChanged;
+                _foregroundWatcher.Start();
                 _initialized = true;
             }
 
@@ -221,11 +233,18 @@ namespace TaskbarQuota.Taskbar
             var providers = coordinator.WidgetDisplayProviders;
 
             // No provider to show -> hide the native host instead of leaving a transparent taskbar child
-            // window over the notification area (#10).
-            widget.SetVisible(providers.Count > 0);
-            widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
+            // window over the notification area (#10). The tiles are deliberately left bound while it
+            // hides: unbinding collapses them in the same frame, which wiped out the fade and made the
+            // widget look like it had blinked out of existence. SetVisible re-binds nothing on the way
+            // back in either — the set below runs first on show.
             if (providers.Count == 0)
+            {
+                widget.SetVisible(false);
                 return;
+            }
+
+            widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
+            widget.SetVisible(true);
 
             bool needsFetch = false;
             foreach (var provider in providers)
@@ -329,8 +348,16 @@ namespace TaskbarQuota.Taskbar
 
                 // Reconcile the tile set first, so a provider that just became active already owns a slot
                 // before its result is routed. SetDisplayProviders is a cheap no-op when nothing changed.
-                widget.SetVisible(providers.Count > 0);
+                // As in SyncWidgetState, an empty set only hides — rebinding the slots here would collapse
+                // the tiles mid-fade.
+                if (providers.Count == 0)
+                {
+                    widget.SetVisible(false);
+                    continue;
+                }
+
                 widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
+                widget.SetVisible(true);
                 if (!isDisplayed)
                     continue;
 
@@ -365,8 +392,21 @@ namespace TaskbarQuota.Taskbar
         // so updating the widget here would only duplicate dispatcher work and add latency.
         private static void OnActiveProviderChanged(ProviderId? _) { }
 
+        /// <summary>
+        /// Fired from the WinEvent hook the instant the foreground window changes. Relays to the
+        /// coordinator so it can re-detect whether a provider is in front without waiting for the
+        /// next 500 ms tick — this is what makes "switch away" hide the widget right away.
+        /// </summary>
+        private static void OnForegroundChanged()
+            => UsageCoordinator.Instance.NotifyForegroundChanged();
+
         private static void OnActiveToolPresenceChanged(bool isPresent)
             => _dispatcher?.TryEnqueue(() => ApplyActiveToolPresenceChanged(isPresent));
+
+        // Focus-follows-provider flip (opt-in setting): the tile set changes even though presence and the
+        // active provider did not, so the widget has to be re-synced from the recomputed set.
+        private static void OnProviderForegroundChanged(bool _)
+            => _dispatcher?.TryEnqueue(SyncWidgetState);
 
         private static void ApplyActiveToolPresenceChanged(bool isPresent)
         {
@@ -389,10 +429,18 @@ namespace TaskbarQuota.Taskbar
             UsageCoordinator.Instance.StateChanged -= OnStateChanged;
             UsageCoordinator.Instance.ActiveProviderChanged -= OnActiveProviderChanged;
             UsageCoordinator.Instance.ActiveToolPresenceChanged -= OnActiveToolPresenceChanged;
+            UsageCoordinator.Instance.ProviderForegroundChanged -= OnProviderForegroundChanged;
+            UsageCoordinator.Instance.IsOwnUiEngaged = null;
             WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
             _initialized = false;
             _widgetHealthTimer?.Stop();
             _widgetHealthTimer = null;
+            if (_foregroundWatcher is { } watcher)
+            {
+                watcher.ForegroundChanged -= OnForegroundChanged;
+                watcher.Dispose();
+                _foregroundWatcher = null;
+            }
             if (_trayIcon != null) { _trayIcon.TryRemove(); _trayIcon.Dispose(); _trayIcon = null; }
             try { _flyout?.Close(); } catch { }
             _flyout = null;
