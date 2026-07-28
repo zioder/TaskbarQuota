@@ -23,6 +23,19 @@ public class AppStartupTests
     }
 
     [Fact]
+    public void ShouldSurfaceWindowOnActivation_ForStoreOpen_ReturnsTrue()
+    {
+        Assert.True(App.ShouldSurfaceWindowOnActivation(null));
+        Assert.True(App.ShouldSurfaceWindowOnActivation(string.Empty));
+    }
+
+    [Fact]
+    public void ShouldSurfaceWindowOnActivation_ForStartupWidgetLaunch_ReturnsFalse()
+    {
+        Assert.False(App.ShouldSurfaceWindowOnActivation("--startup-widget"));
+    }
+
+    [Fact]
     public void ShouldRetryTaskbarInitialization_AllowsStartupWidgetRetries()
     {
         Assert.True(App.ShouldRetryTaskbarInitialization(1));
