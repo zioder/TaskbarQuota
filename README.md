@@ -59,6 +59,13 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 
 ## Features
 
+### What's new in 1.1.0
+
+- **Pinned providers** — providers can be pinned so their quota stays on the taskbar no matter which tool is in the foreground. The active provider takes the leftmost slot and pinned ones trail it, up to 3 tiles and only while they fit the measured taskbar space. (#32)
+- **Single instance** — launching TaskbarQuota again activates the running app instead of spawning a second widget, with a fallback to a normal launch if the activation redirect fails. (#30)
+- **Drag fixed in both directions** — off-band obstacles (the Widgets flyout, overflow popups, hidden sibling windows) no longer erase the free gap left of the icon cluster, so the widget drags left as well as right. (#33)
+- **Reposition deadband fix** — the deadband no longer overflows before the widget's first placement. (#31)
+
 ### What's new in 1.0.19
 
 - **Widgets on every taskbar** — multi-monitor setups get a widget on each taskbar instead of only the primary one, each confined to its own monitor. (#23)
