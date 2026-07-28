@@ -26,6 +26,10 @@ namespace TaskbarQuota
         private readonly SemaphoreSlim _detectGate = new(1, 1);
         private readonly object _recentLock = new();
         private readonly List<ProviderId> _recentProviders = new();
+        // Providers with a pinned-tile refresh in flight, so the 5s health timer never stacks a second
+        // fetch for one that is still running — a slow or offline endpoint would otherwise accumulate
+        // concurrent requests and could publish an older snapshot out of order.
+        private readonly HashSet<ProviderId> _widgetRefreshInFlight = new();
         private Timer? _timer;
         // Synara persists provider switches through a 300 ms-debounced localStorage writer, and Chromium
         // then flushes that to its on-disk LevelDB on its own (variable, sometimes >1 s) cadence. The
@@ -89,6 +93,71 @@ namespace TaskbarQuota
                         return p;
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Hard cap on taskbar tiles. Three is the most that fits beside the tray on a normal bar even in
+        /// the narrow display modes; <see cref="Taskbar.TaskBarWidget"/> trims further when the measured
+        /// widths don't fit the free gap it actually has.
+        /// </summary>
+        public const int MaxWidgetTiles = 3;
+
+        /// <summary>
+        /// Every provider the taskbar widget should render as its own tile, left to right: the ACTIVE
+        /// provider always first, then the pinned providers (most recently active first, then enum order).
+        /// So with Claude pinned + Z.AI pinned and Codex active you get "Codex | Claude | Z.AI", and
+        /// focusing Claude re-orders to "Claude | Z.AI" + whatever else is pinned — the active provider
+        /// keeps the leading slot while the pinned tiles stay put behind it (issue #25).
+        /// With nothing pinned this returns exactly <see cref="WidgetDisplayProvider"/>, so the existing
+        /// single-tile behavior is unchanged.
+        /// </summary>
+        public IReadOnlyList<ProviderId> WidgetDisplayProviders
+            => ComputeWidgetDisplayProviders(
+                _lastActive,
+                IsActiveToolPresent,
+                RecentProviders,
+                Enum.GetValues<ProviderId>(),
+                WidgetSettingsService.IsProviderPinned,
+                WidgetSettingsService.IsProviderVisible,
+                IsProviderAvailable,
+                WidgetDisplayProvider);
+
+        /// <summary>Pure, testable core of <see cref="WidgetDisplayProviders"/>.</summary>
+        internal static IReadOnlyList<ProviderId> ComputeWidgetDisplayProviders(
+            ProviderId? active,
+            bool present,
+            IReadOnlyList<ProviderId> recent,
+            IReadOnlyList<ProviderId> ordered,
+            Func<ProviderId, bool> isPinned,
+            Func<ProviderId, bool> isVisible,
+            Func<ProviderId, bool> isAvailable,
+            ProviderId? fallback)
+        {
+            var result = new List<ProviderId>();
+
+            // The active provider leads even when it is itself pinned — it is the one the user is looking
+            // at right now, so it gets the stable leftmost slot and the pinned tiles trail it.
+            if (present && active is { } a && isVisible(a))
+                result.Add(a);
+
+            var recentIndex = new Dictionary<ProviderId, int>();
+            for (int i = 0; i < recent.Count; i++)
+                recentIndex.TryAdd(recent[i], i);
+
+            var pinned = ordered
+                .Where(p => isPinned(p) && isVisible(p) && isAvailable(p) && !result.Contains(p))
+                .OrderBy(p => recentIndex.TryGetValue(p, out int index) ? index : int.MaxValue)
+                .ToList();
+            result.AddRange(pinned);
+
+            // Nothing active and nothing pinned: keep today's single-tile fallback so users with no pins
+            // still see the last-used / first-enabled provider.
+            if (result.Count == 0 && present && fallback is { } fb)
+                result.Add(fb);
+
+            if (result.Count > MaxWidgetTiles)
+                result.RemoveRange(MaxWidgetTiles, result.Count - MaxWidgetTiles);
+            return result;
         }
 
         // A provider can back the widget only if it is actually installed or has been configured — so we
@@ -597,6 +666,37 @@ namespace TaskbarQuota
 
             LastState = snapshot;
             StateChanged?.Invoke(snapshot);
+        }
+
+        /// <summary>
+        /// Refreshes one pinned tile's provider and publishes it through <see cref="StateChanged"/> so the
+        /// widget routes it to that tile. The tick only ever fetches the ACTIVE provider, so without this a
+        /// pinned tile would freeze on its boot snapshot. Cheap: <see cref="UsageService.FetchAsync"/> is
+        /// cache-TTL gated, so most calls return the cached snapshot without touching the network. Leaves
+        /// <see cref="LastState"/> and the active provider alone.
+        /// </summary>
+        public async Task RefreshWidgetProviderAsync(ProviderId id)
+        {
+            lock (_widgetRefreshInFlight)
+            {
+                if (!_widgetRefreshInFlight.Add(id))
+                    return;
+            }
+
+            try
+            {
+                var result = (await _service.FetchAsync(id).ConfigureAwait(false)).WithSource(SourceFor(id));
+                StateChanged?.Invoke(result);
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Log.Warning(ex, $"Widget provider refresh for {id} failed");
+            }
+            finally
+            {
+                lock (_widgetRefreshInFlight)
+                    _widgetRefreshInFlight.Remove(id);
+            }
         }
 
         /// <summary>Fetch all providers (cached) for the multi-provider view.</summary>

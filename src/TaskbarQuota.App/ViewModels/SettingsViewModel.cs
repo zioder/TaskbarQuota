@@ -13,15 +13,23 @@ namespace TaskbarQuota.ViewModels
 
         [ObservableProperty] public partial bool IsDashboardVisible { get; set; }
         [ObservableProperty] public partial bool IsWidgetVisible { get; set; }
+        [ObservableProperty] public partial bool IsPinned { get; set; }
 
         public string StatusText { get; private set; }
 
-        public ProviderSettingItemViewModel(ProviderId id, string displayName, bool dashboardVisible, bool widgetVisible, string statusText)
+        public ProviderSettingItemViewModel(
+            ProviderId id,
+            string displayName,
+            bool dashboardVisible,
+            bool widgetVisible,
+            bool pinned,
+            string statusText)
         {
             Id = id;
             DisplayName = displayName;
             IsDashboardVisible = dashboardVisible;
             IsWidgetVisible = widgetVisible;
+            IsPinned = pinned;
             StatusText = statusText;
         }
 
@@ -102,6 +110,7 @@ namespace TaskbarQuota.ViewModels
                     provider.DisplayName,
                     WidgetSettingsService.IsProviderDashboardVisible(provider.Id),
                     WidgetSettingsService.IsProviderVisible(provider.Id),
+                    WidgetSettingsService.IsProviderPinned(provider.Id),
                     status));
             }
         }
@@ -113,12 +122,26 @@ namespace TaskbarQuota.ViewModels
             else
                 ProviderDiscoveryService.DisableProvider(item.Id);
 
+            // Enable/DisableProvider also flips widget visibility (and a pin rides on that), so refresh
+            // all three so the toggles reflect reality.
             item.IsDashboardVisible = WidgetSettingsService.IsProviderDashboardVisible(item.Id);
+            item.IsWidgetVisible = WidgetSettingsService.IsProviderVisible(item.Id);
+            item.IsPinned = WidgetSettingsService.IsProviderPinned(item.Id);
         }
 
         public void ApplyWidgetVisibility(ProviderSettingItemViewModel item, bool visible)
         {
             WidgetSettingsService.SetProviderVisible(item.Id, visible);
+            item.IsWidgetVisible = WidgetSettingsService.IsProviderVisible(item.Id);
+            // Hiding a provider from the widget drops its pin.
+            item.IsPinned = WidgetSettingsService.IsProviderPinned(item.Id);
+        }
+
+        public void ApplyPinned(ProviderSettingItemViewModel item, bool pinned)
+        {
+            WidgetSettingsService.SetProviderPinned(item.Id, pinned);
+            item.IsPinned = WidgetSettingsService.IsProviderPinned(item.Id);
+            // Pinning implies widget-visible, so reflect the possibly-flipped widget toggle.
             item.IsWidgetVisible = WidgetSettingsService.IsProviderVisible(item.Id);
         }
     }

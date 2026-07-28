@@ -25,7 +25,6 @@ namespace TaskbarQuota.Controls
         private const int MinLabelColumnWidth = 0;
         private const int MinResetColumnWidth = 0;
         private const int ValueColumnWidth = 34;
-        private const string MaxCreditValueSample = "10,000/10,000";
         private const int WidgetFontSize = 11;
         private const int BarHeight = 6;
         private const int SingleRowBarHeight = 8;
@@ -40,12 +39,34 @@ namespace TaskbarQuota.Controls
         private const double GlyphViewportSize = 100;
         private const double NormalizedGlyphExtent = 88;
         private const double StaleOpacity = 0.55;
+        private const int PanelColumnSpacing = 5;
+        private const int SlideMilliseconds = 300;
+        // Slack the width math reserves on top of the measured columns, so a rounding difference between
+        // the analytic total and what the Grid actually arranges can never clip the last column.
+        private const int WidthSlack = 2;
+
+        /// <summary>Placeholder shown before any usage has been applied. Shared and never mutated, so a
+        /// tile that renders on every usage publish does not allocate a list per pass.</summary>
+        private static readonly List<WidgetUsageRow> PlaceholderRows = [new("Usage", 0, "--")];
 
         public event Action? Clicked;
         public event Action<DisplayMode>? DisplayModeChanged;
         public event Action<int>? DesiredHostWidthChanged;
 
         public bool SuppressNextClick { get; set; }
+
+        /// <summary>
+        /// Skips the cross-fade on the next render. Set when a tile is taking over another provider as part
+        /// of a re-order: the movement is being conveyed by <see cref="AnimateSlide"/>, and fading the
+        /// content at the same time turns a clean shift into a flicker.
+        /// </summary>
+        public bool SuppressNextTransition { get; set; }
+
+        /// <summary>
+        /// The width (logical px) this tile last asked its host for. The taskbar host sums this across the
+        /// tiles it shows to size the multi-provider widget and to decide how many tiles actually fit.
+        /// </summary>
+        public int DesiredLogicalWidth { get; private set; }
 
         private readonly List<RenderedRow> _renderedRows = new();
         private List<WidgetUsageRow> _rows = new();
@@ -55,8 +76,15 @@ namespace TaskbarQuota.Controls
         private string? _lastRenderSignature;
         private bool _hasRevealed;
         private bool _isActiveToolVisible = true;
+        // Storyboards and their animations are allocated on first use and re-aimed afterwards; all three
+        // run on ordinary usage publishes, so rebuilding them per pass was continuous garbage.
         private Storyboard? _visibilityStoryboard;
+        private DoubleAnimation? _visibilityOpacity;
+        private DoubleAnimation? _visibilityOffset;
         private Storyboard? _softRefreshStoryboard;
+        private DoubleAnimation? _softRefreshAnimation;
+        private Storyboard? _slideStoryboard;
+        private DoubleAnimation? _slideAnimation;
 
         /// <summary>
         /// Returns the display name for the constrained taskbar widget.
@@ -71,6 +99,24 @@ namespace TaskbarQuota.Controls
                 "GitHub Copilot" => "Copilot",
                 _ => fullName,
             };
+
+        /// <summary>Rows this tile shows. A pinned provider always renders exactly what the user configured
+        /// (issue #25); keeping the row inside the bar is <see cref="PinBudgetService"/>'s job, not this
+        /// control's, so there is no reduced form to fall back to.</summary>
+        public int RowCount => Math.Max(1, _rows.Count);
+
+        /// <summary>
+        /// The width this tile WOULD take, without rendering it.
+        ///
+        /// The host sums this across its tiles to size the widget host window. Rendering to read the width
+        /// made the tile visibly flash — every re-render restarts the refresh animation, and the host
+        /// re-runs this on every usage publish — so the column widths, which are a pure function of the
+        /// rows and the display mode, are computed directly instead.
+        /// </summary>
+        public int MeasureDesiredWidth()
+            => CalculateDesiredWidth(
+                CurrentRows(),
+                _forcePercentagesOnly ? WidgetDisplayMode.PercentagesOnly : WidgetSettingsService.Current);
 
         public HorizontalAlignment ElementsAlignment
         {
@@ -407,6 +453,49 @@ namespace TaskbarQuota.Controls
         internal static IReadOnlyList<string> BuildRowLabelsForTesting(UsageResult result, UsageSnapshot usage)
             => BuildRows(result, usage).Select(row => row.Label).ToList();
 
+        /// <summary>Rows assumed for a provider whose usage has not been fetched yet.</summary>
+        public const int AssumedRowCount = 2;
+
+        /// <summary>
+        /// How many rows this provider's tile would render. Used to price a provider against the pin
+        /// budget before its tile exists, so the dashboard can tell a "short" provider from a "long" one.
+        ///
+        /// Mirrors the provider dispatch in <see cref="Apply"/> — the specialised displays build their own
+        /// row sets rather than going through <see cref="BuildRows"/>, so both have to be consulted. Keep
+        /// the two in step when a provider grows a new display path.
+        /// </summary>
+        public static int CountRenderedRows(UsageResult result)
+        {
+            if (!result.Ok || result.Fetch is not { } fetch)
+                return AssumedRowCount;
+
+            var usage = fetch.Usage;
+            int count = result.Id switch
+            {
+                ProviderId.OpenCode =>
+                    (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowUsage) ? 1 : 0)
+                    + (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowBalance) ? 1 : 0),
+                ProviderId.Cline => 1,
+                ProviderId.Antigravity => CountAntigravityRows(usage),
+                ProviderId.Copilot or ProviderId.Grok when usage.Cost is { Label: "Credits" } =>
+                    CountCreditRows(result.Id, usage),
+                _ => BuildRows(result, usage).Count,
+            };
+
+            return Math.Max(1, count);
+        }
+
+        private static int CountAntigravityRows(UsageSnapshot usage)
+            => (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowPrimary) ? 1 : 0)
+            + (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowModelSpecific) ? 1 : 0)
+            + (usage.Secondary != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowSecondary) ? 1 : 0)
+            + (usage.Monthly != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowMonthly) ? 1 : 0);
+
+        private static int CountCreditRows(ProviderId id, UsageSnapshot usage)
+            => (WidgetSettingsService.IsRowVisible(id, WidgetSettingsService.RowCredits) ? 1 : 0)
+            + (usage.AdditionalUsage is { Enabled: true }
+                && WidgetSettingsService.IsRowVisible(id, WidgetSettingsService.RowAdditionalUsage) ? 1 : 0);
+
         private static bool ShouldShowCodexCredits(UsageSnapshot usage, CostSnapshot credits)
         {
             if (WidgetSettingsService.TryGetRowVisibilityOverride(ProviderId.Codex, WidgetSettingsService.RowCredits, out bool userVisible))
@@ -604,6 +693,23 @@ namespace TaskbarQuota.Controls
             ToolTipService.SetToolTip(this, tooltip);
         }
 
+        /// <summary>
+        /// Width reserve for a "used/limit" credits value, so the column doesn't twitch as the used side
+        /// grows. Sized from the tile's OWN limit — the used side can never be wider than the limit — rather
+        /// than from a fixed worst case: reserving room for "10,000/10,000" on a plan whose limit is 300
+        /// padded the tile by tens of pixels of permanent dead space, which on a crowded taskbar was enough
+        /// to cost the provider its tile entirely.
+        /// </summary>
+        internal static string CreditValueSample(string value)
+        {
+            int slash = value.IndexOf('/');
+            if (slash <= 0 || slash == value.Length - 1)
+                return value;
+
+            var limit = value[(slash + 1)..];
+            return new string('0', limit.Length) + "/" + limit;
+        }
+
         private static string FormatCreditCount(double value)
             => value.ToString(value % 1 == 0 ? "N0" : "N1", CultureInfo.InvariantCulture);
 
@@ -719,9 +825,48 @@ namespace TaskbarQuota.Controls
                 RenderRows();
         }
 
+        /// <summary>
+        /// Slides this tile into its new position from <paramref name="fromOffsetX"/> logical px away.
+        ///
+        /// The tiles occupy fixed slots and providers are re-assigned between them, so a re-order is really
+        /// a content swap. Starting each tile at the offset where its provider used to sit and easing that
+        /// back to zero turns the swap into what the eye expects: the existing tiles travel sideways and
+        /// the newcomer arrives from the edge.
+        /// </summary>
+        public void AnimateSlide(double fromOffsetX)
+        {
+            _slideStoryboard?.Stop();
+
+            // The RESTING value is written before starting, and the animation supplies the offset through
+            // its From. Storyboard.Stop reverts a property to its local value, so a slide interrupted by the
+            // next layout pass — which happens constantly, the layout is recomputed on every usage publish —
+            // lands at zero instead of stranding the tile at the offset it started from.
+            RootTranslate.X = 0;
+
+            // Storyboard and animation are built once and re-aimed, not rebuilt. These run on every layout
+            // pass across every tile, and a fresh Storyboard + DoubleAnimation + CubicEase per pass was
+            // steady garbage for the life of the process.
+            if (_slideStoryboard is null)
+            {
+                _slideAnimation = CreateDoubleAnimation(RootTranslate, "X", fromOffsetX, 0, SlideMilliseconds);
+                _slideStoryboard = new Storyboard();
+                _slideStoryboard.Children.Add(_slideAnimation);
+            }
+
+            _slideAnimation!.From = fromOffsetX;
+            _slideStoryboard.Begin();
+        }
+
         private void AnimateRender(bool isFirstReveal, bool providerSwitch = false)
         {
             _hasRevealed = true;
+            if (SuppressNextTransition)
+            {
+                SuppressNextTransition = false;
+                Panel.Opacity = RestingPanelOpacity;
+                return;
+            }
+
             if (isFirstReveal)
                 AnimateFirstReveal();
             else if (providerSwitch)
@@ -735,13 +880,8 @@ namespace TaskbarQuota.Controls
         // soft-refresh's partial dim) so the switch feels like a transition rather than a redraw.
         private void AnimateProviderSwitch()
         {
-            double targetOpacity = RestingPanelOpacity;
             Panel.Opacity = 0;
-
-            _softRefreshStoryboard?.Stop();
-            _softRefreshStoryboard = new Storyboard();
-            _softRefreshStoryboard.Children.Add(CreateDoubleAnimation(Panel, "Opacity", 0, targetOpacity, 200));
-            _softRefreshStoryboard.Begin();
+            AnimatePanelOpacity(from: 0, to: RestingPanelOpacity, milliseconds: 200);
         }
 
         private void AnimateFirstReveal()
@@ -760,9 +900,26 @@ namespace TaskbarQuota.Controls
             double startOpacity = Math.Min(0.72, targetOpacity);
             Panel.Opacity = startOpacity;
 
+            AnimatePanelOpacity(startOpacity, targetOpacity, 180);
+        }
+
+        /// <summary>
+        /// Runs the shared Panel.Opacity storyboard. Both callers fire on ordinary usage publishes, so the
+        /// storyboard is built once and re-aimed rather than reallocated per refresh.
+        /// </summary>
+        private void AnimatePanelOpacity(double from, double to, int milliseconds)
+        {
             _softRefreshStoryboard?.Stop();
-            _softRefreshStoryboard = new Storyboard();
-            _softRefreshStoryboard.Children.Add(CreateDoubleAnimation(Panel, "Opacity", startOpacity, targetOpacity, 180));
+            if (_softRefreshStoryboard is null)
+            {
+                _softRefreshAnimation = CreateDoubleAnimation(Panel, "Opacity", from, to, milliseconds);
+                _softRefreshStoryboard = new Storyboard();
+                _softRefreshStoryboard.Children.Add(_softRefreshAnimation);
+            }
+
+            _softRefreshAnimation!.From = from;
+            _softRefreshAnimation.To = to;
+            _softRefreshAnimation.Duration = new Duration(TimeSpan.FromMilliseconds(milliseconds));
             _softRefreshStoryboard.Begin();
         }
 
@@ -775,10 +932,32 @@ namespace TaskbarQuota.Controls
 
         private void AnimateVisibility(double toOpacity, double toOffset, int milliseconds)
         {
+            double fromOpacity = Root.Opacity;
+            double fromOffset = RootTranslate.Y;
+
             _visibilityStoryboard?.Stop();
-            _visibilityStoryboard = new Storyboard();
-            _visibilityStoryboard.Children.Add(CreateDoubleAnimation(Root, "Opacity", Root.Opacity, toOpacity, milliseconds));
-            _visibilityStoryboard.Children.Add(CreateDoubleAnimation(RootTranslate, "Y", RootTranslate.Y, toOffset, milliseconds));
+            // Same rule as AnimateSlide: park the local values at the destination and let the animation
+            // supply the start through From, so an interrupted transition can never leave a tile stuck
+            // invisible or offset.
+            Root.Opacity = toOpacity;
+            RootTranslate.Y = toOffset;
+
+            if (_visibilityStoryboard is null)
+            {
+                _visibilityOpacity = CreateDoubleAnimation(Root, "Opacity", fromOpacity, toOpacity, milliseconds);
+                _visibilityOffset = CreateDoubleAnimation(RootTranslate, "Y", fromOffset, toOffset, milliseconds);
+                _visibilityStoryboard = new Storyboard();
+                _visibilityStoryboard.Children.Add(_visibilityOpacity);
+                _visibilityStoryboard.Children.Add(_visibilityOffset);
+            }
+
+            var duration = new Duration(TimeSpan.FromMilliseconds(milliseconds));
+            _visibilityOpacity!.From = fromOpacity;
+            _visibilityOpacity.To = toOpacity;
+            _visibilityOpacity.Duration = duration;
+            _visibilityOffset!.From = fromOffset;
+            _visibilityOffset.To = toOffset;
+            _visibilityOffset.Duration = duration;
             _visibilityStoryboard.Begin();
         }
 
@@ -805,10 +984,11 @@ namespace TaskbarQuota.Controls
         private void RenderRows()
         {
             var mode = _forcePercentagesOnly ? WidgetDisplayMode.PercentagesOnly : WidgetSettingsService.Current;
-            var rows = _rows.Count > 0 ? _rows : new List<WidgetUsageRow> { new("Usage", 0, "--") };
 
             ClearDynamicContent();
             ConfigureStaticColumns(mode);
+
+            var rows = CurrentRows();
 
             bool showBars = mode is WidgetDisplayMode.BarsOnly or WidgetDisplayMode.BarsAndPercentages;
             bool showPercentages = mode is WidgetDisplayMode.PercentagesOnly or WidgetDisplayMode.BarsAndPercentages;
@@ -822,6 +1002,9 @@ namespace TaskbarQuota.Controls
                 int row = i % MaxRowsPerGroup;
                 int groupStart = group * MaxRowsPerGroup;
                 int groupCount = Math.Min(MaxRowsPerGroup, rows.Count - groupStart);
+                // Only a tile that holds ONE row overall gets the full-height treatment (the Grok/Copilot
+                // credits meter). A trailing lone row in a multi-group tile stays on the top line, level
+                // with the first row of the group beside it — centring it there just reads as misaligned.
                 bool isSingleRowGroup = rows.Count == 1 && groupCount == 1;
                 var layout = CalculateLayoutMetrics(rows, mode, group);
                 int firstColumn = EnsureGroupColumns(mode, group, layout);
@@ -830,7 +1013,8 @@ namespace TaskbarQuota.Controls
 
             ApplyTaskbarForeground();
             SetBars();
-            DesiredHostWidthChanged?.Invoke(CalculateDesiredWidth());
+            DesiredLogicalWidth = CalculateDesiredWidth(rows, mode);
+            DesiredHostWidthChanged?.Invoke(DesiredLogicalWidth);
         }
 
         private void ClearDynamicContent()
@@ -848,7 +1032,7 @@ namespace TaskbarQuota.Controls
 
         private void ConfigureStaticColumns(WidgetDisplayMode mode)
         {
-            Panel.ColumnSpacing = 5;
+            Panel.ColumnSpacing = PanelColumnSpacing;
             int iconSize = mode == WidgetDisplayMode.PercentagesOnly ? IconHostSizePercentagesOnly : IconHostSizeBars;
             IconColumn.Width = new GridLength(iconSize);
             BadgeHost.Width = iconSize;
@@ -891,6 +1075,51 @@ namespace TaskbarQuota.Controls
             return 1 + (group * columnsPerGroup);
         }
 
+        /// <summary>The rows this tile draws — everything the user enabled, or the placeholder until the
+        /// first result lands. Never copies: the measure and render paths both run on every usage publish.
+        /// </summary>
+        private List<WidgetUsageRow> CurrentRows() => _rows.Count > 0 ? _rows : PlaceholderRows;
+
+        /// <summary>
+        /// Total width of the tile for a given row set: the icon column, then per two-row group a label,
+        /// reset and bar/value column, plus inter-column spacing and the root padding. Mirrors exactly what
+        /// <see cref="ConfigureStaticColumns"/> and <see cref="EnsureGroupColumns"/> build, so a measured
+        /// candidate and the rendered result can never disagree.
+        ///
+        /// Root.Padding is read from the live element rather than mirrored as a constant: the analytic
+        /// width and the XAML have to agree exactly or a column is clipped, and a constant only agrees
+        /// until someone edits the XAML.
+        /// </summary>
+        private int CalculateDesiredWidth(IReadOnlyList<WidgetUsageRow> rows, WidgetDisplayMode mode)
+        {
+            int columnsPerGroup = mode switch
+            {
+                WidgetDisplayMode.PercentagesOnly => 3,
+                WidgetDisplayMode.BarsAndPercentages => 4,
+                _ => 3,
+            };
+
+            double total = mode == WidgetDisplayMode.PercentagesOnly ? IconHostSizePercentagesOnly : IconHostSizeBars;
+            int columnCount = 1;
+            int groups = (rows.Count + MaxRowsPerGroup - 1) / MaxRowsPerGroup;
+
+            for (int group = 0; group < groups; group++)
+            {
+                var layout = CalculateLayoutMetrics(rows, mode, group);
+                total += layout.LabelWidth + layout.ResetWidth;
+                total += mode switch
+                {
+                    WidgetDisplayMode.PercentagesOnly => layout.ValueWidth,
+                    WidgetDisplayMode.BarsAndPercentages => BarColumnWidthBarsAndPercentages + layout.ValueWidth,
+                    _ => BarColumnWidthBarsOnly,
+                };
+                columnCount += columnsPerGroup;
+            }
+
+            double padding = Root.Padding.Left + Root.Padding.Right + WidthSlack;
+            return (int)Math.Ceiling(total + (Math.Max(0, columnCount - 1) * PanelColumnSpacing) + padding);
+        }
+
         private static WidgetLayoutMetrics CalculateLayoutMetrics(
             IReadOnlyList<WidgetUsageRow> rows,
             WidgetDisplayMode mode,
@@ -919,7 +1148,7 @@ namespace TaskbarQuota.Controls
                 var row = rows[start + i];
                 widestValue = Math.Max(widestValue, MeasureTextWidth(row.Value, labelFont));
                 if (row.Label == "Credits")
-                    widestValue = Math.Max(widestValue, MeasureTextWidth(MaxCreditValueSample, labelFont));
+                    widestValue = Math.Max(widestValue, MeasureTextWidth(CreditValueSample(row.Value), labelFont));
                 // Reserve room for a large dollar balance so amounts like "$1,000.00" aren't clipped.
                 if (row.Label == "Balance")
                     widestValue = Math.Max(widestValue, MeasureTextWidth("$1,000.00", labelFont));
@@ -1128,13 +1357,6 @@ namespace TaskbarQuota.Controls
             Panel.Children.Add(element);
         }
 
-        private int CalculateDesiredWidth()
-        {
-            double columns = Panel.ColumnDefinitions.Sum(c => c.Width.Value);
-            double spacing = Math.Max(0, Panel.ColumnDefinitions.Count - 1) * Panel.ColumnSpacing;
-            double padding = Root.Padding.Left + Root.Padding.Right + 2;
-            return (int)Math.Ceiling(columns + spacing + padding);
-        }
 
         private void SetBars()
         {

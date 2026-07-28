@@ -175,6 +175,12 @@ namespace TaskbarQuota.ViewModels
         public string ProviderWidgetToggleName { get; }
         public string ProviderWidgetToggleText => IsProviderWidgetVisible ? "Widget" : "Ignored";
         public Visibility ProviderWidgetToggleVisibility => IsSetupRequired ? Visibility.Collapsed : Visibility.Visible;
+        public bool IsProviderPinned { get; internal set; }
+        public string ProviderPinToggleName { get; }
+        public string ProviderPinToggleText => IsProviderPinned ? "Pinned" : "Pin";
+        /// <summary>Pinning only makes sense for a provider the widget is allowed to draw at all.</summary>
+        public bool IsProviderPinToggleEnabled => IsProviderWidgetVisible;
+        public Visibility ProviderPinToggleVisibility => ProviderWidgetToggleVisibility;
         public Visibility WidgetOptionsVisibility => IsSetupRequired ? Visibility.Collapsed : ContentVisibility;
 
         public IReadOnlyList<BarViewModel> Bars { get; }
@@ -227,6 +233,8 @@ namespace TaskbarQuota.ViewModels
             ProviderId = r.Id;
             IsProviderWidgetVisible = WidgetSettingsService.IsProviderVisible(r.Id);
             ProviderWidgetToggleName = $"Show {DisplayName} in taskbar widget";
+            IsProviderPinned = WidgetSettingsService.IsProviderPinned(r.Id);
+            ProviderPinToggleName = $"Pin {DisplayName} to the taskbar widget";
 
             var bars = new List<BarViewModel>();
             var textMetrics = new List<TextMetricViewModel>();
@@ -401,6 +409,7 @@ namespace TaskbarQuota.ViewModels
         internal void RefreshVisibility()
         {
             IsProviderWidgetVisible = WidgetSettingsService.IsProviderVisible(ProviderId);
+            IsProviderPinned = WidgetSettingsService.IsProviderPinned(ProviderId);
             foreach (var bar in Bars) bar.RefreshVisibility();
             foreach (var metric in TextMetrics) metric.RefreshVisibility();
             CreditWidgetToggle.RefreshVisibility();

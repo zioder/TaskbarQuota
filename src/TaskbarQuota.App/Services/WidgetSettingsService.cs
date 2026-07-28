@@ -48,6 +48,9 @@ public static class WidgetSettingsService
     private static readonly string WidgetProvidersPath =
         Path.Combine(AppStorage.AppDataDirectory, "widget-providers.json");
 
+    private static readonly string WidgetPinsPath =
+        Path.Combine(AppStorage.AppDataDirectory, "widget-pins.json");
+
     private static readonly string DashboardProvidersPath =
         Path.Combine(AppStorage.AppDataDirectory, "dashboard-providers.json");
 
@@ -57,6 +60,7 @@ public static class WidgetSettingsService
     private static readonly Dictionary<string, bool> RowVisibility = LoadRowVisibility();
     private static readonly Dictionary<string, bool> ProviderVisibility = LoadProviderVisibility();
     private static readonly Dictionary<string, bool> DashboardProviderVisibility = LoadDashboardProviderVisibility();
+    private static readonly Dictionary<string, bool> ProviderPins = LoadProviderPins();
 
     public static WidgetDisplayMode Current { get; private set; } = LoadWidgetDisplayMode();
     public static PercentageDisplayMode CurrentPercentageMode { get; private set; } = LoadPercentageDisplayMode();
@@ -120,11 +124,49 @@ public static class WidgetSettingsService
 
     public static void SetProviderVisible(ProviderId provider, bool visible)
     {
-        if (!SetProviderVisibleSilent(provider, visible))
+        bool visibilityChanged = SetProviderVisibleSilent(provider, visible);
+        // Hiding a provider from the widget drops its pin too: a pin that can never render is a state the
+        // user can't see, and it would silently resurrect the tile when they re-enable the provider.
+        bool pinChanged = !visible && SetProviderPinnedSilent(provider, false);
+        if (!visibilityChanged && !pinChanged)
             return;
 
-        SaveProviderVisibility();
+        if (visibilityChanged)
+            SaveProviderVisibility();
+        if (pinChanged)
+            SaveProviderPins();
         Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static bool IsProviderPinned(ProviderId provider)
+        => ProviderPins.TryGetValue(provider.ToString(), out bool pinned) && pinned;
+
+    /// <summary>
+    /// Pins a provider so the taskbar widget keeps a tile for it regardless of which tool is active.
+    /// Pinning implies widget-visible — a provider hidden from the widget can't hold a permanent tile —
+    /// so turning a pin on also turns the provider's widget visibility on. Unpinning leaves it alone.
+    /// </summary>
+    public static void SetProviderPinned(ProviderId provider, bool pinned)
+    {
+        bool pinChanged = SetProviderPinnedSilent(provider, pinned);
+        bool visibilityChanged = pinned && SetProviderVisibleSilent(provider, true);
+        if (!pinChanged && !visibilityChanged)
+            return;
+
+        if (pinChanged)
+            SaveProviderPins();
+        if (visibilityChanged)
+            SaveProviderVisibility();
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    internal static bool SetProviderPinnedSilent(ProviderId provider, bool pinned)
+    {
+        if (IsProviderPinned(provider) == pinned)
+            return false;
+
+        ProviderPins[provider.ToString()] = pinned;
+        return true;
     }
 
     public static void SetProviderDashboardVisible(ProviderId provider, bool visible)
@@ -153,6 +195,12 @@ public static class WidgetSettingsService
 
         DashboardProviderVisibility[provider.ToString()] = visible;
         return true;
+    }
+
+    internal static void SaveProviderPinsAndNotify()
+    {
+        SaveProviderPins();
+        Changed?.Invoke(null, EventArgs.Empty);
     }
 
     internal static void SaveProviderVisibilityAndNotify()
@@ -187,6 +235,14 @@ public static class WidgetSettingsService
 
         RowVisibility[key] = visible;
         SaveRowVisibility();
+        // Enabling a row can promote a pinned provider from short to long and push the pinned set over
+        // budget. The row toggle always wins — it is this provider's own display setting — so the budget
+        // is rebalanced by dropping the least recently used pin instead of refusing the change.
+        //
+        // Silent, because the single Changed below already covers both edits. Letting the rebalance raise
+        // its own notification meant one row toggle rebuilt the nav badges, the flyout strip and every
+        // widget tile twice.
+        Services.PinBudgetService.EnforceBudget(notify: false);
         Changed?.Invoke(null, EventArgs.Empty);
     }
 
@@ -235,7 +291,7 @@ public static class WidgetSettingsService
         var parts = Enum.GetValues<ProviderId>()
             .OrderBy(provider => provider.ToString())
             .Select(provider =>
-                $"{provider}:{(IsProviderVisible(provider) ? 1 : 0)}:{(IsProviderDashboardVisible(provider) ? 1 : 0)}");
+                $"{provider}:{(IsProviderVisible(provider) ? 1 : 0)}:{(IsProviderDashboardVisible(provider) ? 1 : 0)}:{(IsProviderPinned(provider) ? 1 : 0)}");
         return string.Join(",", parts);
     }
 
@@ -256,6 +312,12 @@ public static class WidgetSettingsService
 
     internal static void ResetDashboardProviderVisibilityForTesting()
         => DashboardProviderVisibility.Clear();
+
+    internal static void SetProviderPinnedForTesting(ProviderId provider, bool pinned)
+        => ProviderPins[provider.ToString()] = pinned;
+
+    internal static void ResetProviderPinsForTesting()
+        => ProviderPins.Clear();
 
     public static IReadOnlyList<WidgetRowOption> RowOptions(ProviderId provider)
         => provider switch
@@ -460,6 +522,35 @@ public static class WidgetSettingsService
         {
             Directory.CreateDirectory(Path.GetDirectoryName(WidgetProvidersPath)!);
             File.WriteAllText(WidgetProvidersPath, JsonSerializer.Serialize(ProviderVisibility, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch
+        {
+            // Best effort. The widget can still use the in-memory value for this run.
+        }
+    }
+
+    private static Dictionary<string, bool> LoadProviderPins()
+    {
+        try
+        {
+            if (!File.Exists(WidgetPinsPath))
+                return new Dictionary<string, bool>();
+
+            var loaded = JsonSerializer.Deserialize<Dictionary<string, bool>>(File.ReadAllText(WidgetPinsPath));
+            return loaded ?? new Dictionary<string, bool>();
+        }
+        catch
+        {
+            return new Dictionary<string, bool>();
+        }
+    }
+
+    internal static void SaveProviderPins()
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(WidgetPinsPath)!);
+            File.WriteAllText(WidgetPinsPath, JsonSerializer.Serialize(ProviderPins, new JsonSerializerOptions { WriteIndented = true }));
         }
         catch
         {

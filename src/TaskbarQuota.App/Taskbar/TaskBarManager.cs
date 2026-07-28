@@ -17,6 +17,9 @@ namespace TaskbarQuota.Taskbar
         private static TrayIconWithContextMenu? _trayIcon;
         private static System.Drawing.Icon? _trayIconSource;
         private static readonly Dictionary<IntPtr, TaskBarWidget> Widgets = new();
+        // Reused snapshot of Widgets.Values, so iterating it while a callback may mutate the dictionary
+        // doesn't allocate. Only valid until the next SnapshotWidgets call, and only used on the UI thread.
+        private static readonly List<TaskBarWidget> _widgetBuffer = new();
         private static FlyoutWindow? _flyout;
         private static DispatcherQueue? _dispatcher;
         private static Action? _showMainWindow;
@@ -95,7 +98,26 @@ namespace TaskbarQuota.Taskbar
                 return;
 
             _widgetHealthTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
-            _widgetHealthTimer.Tick += (_, _) => EnsureWidgets();
+            _widgetHealthTimer.Tick += (_, _) =>
+            {
+                EnsureWidgets();
+                RefreshPinnedTiles();
+                // The free span is only known once a widget has measured it, so a set pinned before that
+                // (or pinned when the bar was emptier) is reconciled here rather than rendering badly.
+                // EnforceBudget early-outs when neither the span nor the pinned set has moved, which is
+                // every tick but the few that follow a real change.
+                Services.PinBudgetService.EnforceBudget();
+                // Re-run the tile-fit math against the gap the last position pass measured, so tiles that
+                // were trimmed off a crowded taskbar come back once there is room for them again.
+                // Iterated over the reused buffer rather than Widgets.Values.ToArray(), which allocated an
+                // array every five seconds for the life of the process.
+                SnapshotWidgets();
+                foreach (var widget in _widgetBuffer)
+                {
+                    if (widget.IsAlive)
+                        widget.RefreshLayout();
+                }
+            };
             _widgetHealthTimer.Start();
         }
 
@@ -154,8 +176,8 @@ namespace TaskbarQuota.Taskbar
                     if (sender is TaskBarWidget destroyedWidget)
                         _dispatcher?.TryEnqueue(DispatcherQueuePriority.High, () => OnWidgetDestroying(destroyedWidget));
                 };
-                if (widget.Summary is { } summary)
-                    summary.Clicked += () => _dispatcher?.TryEnqueue(() => ToggleFlyout(widget));
+                widget.HydrateProvider = provider => HydrateResult(UsageCoordinator.Instance, provider);
+                widget.Clicked += () => _dispatcher?.TryEnqueue(() => ToggleFlyout(widget));
                 Widgets[target.Handle] = widget;
                 SyncWidgetState(widget);
                 PrewarmFlyout();
@@ -189,44 +211,69 @@ namespace TaskbarQuota.Taskbar
 
         private static void SyncWidgetState(TaskBarWidget widget)
         {
-            if (!widget.IsAlive || widget.Summary is not { } summary)
+            if (!widget.IsAlive)
                 return;
 
             var coordinator = UsageCoordinator.Instance;
-            var target = coordinator.WidgetDisplayProvider;
-            bool shouldShowWidget = coordinator.IsActiveToolPresent && target is not null;
-            widget.SetVisible(shouldShowWidget);
+            var providers = coordinator.WidgetDisplayProviders;
 
-            // No enabled+available provider -> hide the native host instead of leaving a transparent
-            // taskbar child window over the notification area (#10).
-            if (target is not { } targetProvider)
-            {
-                summary.SetActiveToolVisible(false);
+            // No provider to show -> hide the native host instead of leaving a transparent taskbar child
+            // window over the notification area (#10).
+            widget.SetVisible(providers.Count > 0);
+            widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
+            if (providers.Count == 0)
                 return;
-            }
 
-            UsageResult? toApply = coordinator.LastState is { } last && last.Id == targetProvider
-                ? last
-                : coordinator.Service.TryGetCached(targetProvider, out var cached)
-                    ? cached
-                    : coordinator.Service.TryGetLastSuccessfulLiveResult(targetProvider, out var lastSuccess)
-                        ? lastSuccess
-                        : coordinator.Service.Get(targetProvider) is { } usageProvider
-                            ? UsageResult.Pending(targetProvider, usageProvider, "Loading...")
-                            : null;
-
-            if (toApply is { } result)
+            bool needsFetch = false;
+            foreach (var provider in providers)
             {
-                summary.Apply(result, force: true);
-                LogWidgetApply(result.Id, "sync");
+                var toApply = HydrateResult(coordinator, provider);
+                if (toApply is { } result)
+                {
+                    widget.ApplyResult(result, force: true);
+                    LogWidgetApply(result.Id, "sync");
+                }
+
+                // Hydrating from a placeholder/failed snapshot leaves the tile showing a non-value while
+                // the flyout fetches its own data. Kick a fetch so the widget resolves on its own (#21).
+                if (toApply is null or { Ok: false })
+                    needsFetch = true;
             }
 
-            summary.SetActiveToolVisible(shouldShowWidget);
-
-            // Hydrating from a placeholder/failed snapshot leaves the widget showing a non-value while
-            // the flyout fetches its own data. Kick a fetch so the widget resolves on its own (#21).
-            if (toApply is null or { Ok: false })
+            if (needsFetch)
                 _ = coordinator.TickAsync(force: true);
+        }
+
+        /// <summary>
+        /// Best snapshot available to seed a tile: the last active publish, then either cache tier, then a
+        /// Pending placeholder. Null only when the provider is unknown to the usage service.
+        /// </summary>
+        private static UsageResult? HydrateResult(UsageCoordinator coordinator, ProviderId provider)
+        {
+            if (coordinator.LastState is { } last && last.Id == provider)
+                return last;
+            if (coordinator.Service.TryGetCached(provider, out var cached))
+                return cached;
+            if (coordinator.Service.TryGetLastSuccessfulLiveResult(provider, out var lastSuccess))
+                return lastSuccess;
+            if (coordinator.Service.Get(provider) is { } usageProvider)
+                return UsageResult.Pending(provider, usageProvider, "Loading...");
+            return null;
+        }
+
+        /// <summary>
+        /// Keeps pinned (non-active) tiles fresh. The coordinator's tick only fetches the active provider,
+        /// so a pinned tile would otherwise freeze on its boot snapshot. The fetch is cache-TTL gated, so
+        /// on most ticks this is a cache hit.
+        /// </summary>
+        private static void RefreshPinnedTiles()
+        {
+            var coordinator = UsageCoordinator.Instance;
+            foreach (var provider in coordinator.WidgetDisplayProviders)
+            {
+                if (provider != coordinator.ActiveProvider)
+                    _ = coordinator.RefreshWidgetProviderAsync(provider);
+            }
         }
 
         private static void ToggleFlyout(TaskBarWidget widget)
@@ -266,22 +313,40 @@ namespace TaskbarQuota.Taskbar
 
         private static void ApplyStateChanged(UsageResult result)
         {
-            var active = UsageCoordinator.Instance.WidgetDisplayProvider;
-            if (active is null || result.Id != active)
-                return;
+            var coordinator = UsageCoordinator.Instance;
+            var providers = coordinator.WidgetDisplayProviders;
+            bool isDisplayed = providers.Contains(result.Id);
 
-            foreach (var widget in Widgets.Values.ToArray())
+            // Reused buffer: this runs on every usage publish, so a fresh array per publish was pure waste.
+            SnapshotWidgets();
+            foreach (var widget in _widgetBuffer)
             {
-                if (!widget.IsAlive || widget.Summary is not { } summary)
+                if (!widget.IsAlive)
                     continue;
 
-                summary.Apply(result);
+                // Reconcile the tile set first, so a provider that just became active already owns a slot
+                // before its result is routed. SetDisplayProviders is a cheap no-op when nothing changed.
+                widget.SetVisible(providers.Count > 0);
+                widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
+                if (!isDisplayed)
+                    continue;
+
+                widget.ApplyResult(result);
                 LogWidgetApply(result.Id, "state");
-                bool isVisible = UsageCoordinator.Instance.IsActiveToolPresent
-                    && UsageCoordinator.Instance.WidgetDisplayProvider is not null;
-                widget.SetVisible(isVisible);
-                summary.SetActiveToolVisible(isVisible);
             }
+        }
+
+        /// <summary>
+        /// Refills <see cref="_widgetBuffer"/> from the live dictionary. Callers iterate the buffer rather
+        /// than the dictionary because a widget callback can remove an entry mid-loop; the buffer replaces
+        /// the defensive copy that the hot paths used to allocate per pass. UI thread only, and the buffer
+        /// stays valid only until the next call.
+        /// </summary>
+        private static void SnapshotWidgets()
+        {
+            _widgetBuffer.Clear();
+            foreach (var widget in Widgets.Values)
+                _widgetBuffer.Add(widget);
         }
 
         private static void LogWidgetApply(ProviderId provider, string source)
@@ -302,14 +367,12 @@ namespace TaskbarQuota.Taskbar
 
         private static void ApplyActiveToolPresenceChanged(bool isPresent)
         {
-            bool isVisible = isPresent && UsageCoordinator.Instance.WidgetDisplayProvider is not null;
+            // Pinned tiles stay on the taskbar even when no AI tool is in the foreground; only the active
+            // tile follows presence. SyncWidgetState recomputes the whole set and hydrates it.
             foreach (var widget in Widgets.Values.ToArray())
             {
-                if (!widget.IsAlive || widget.Summary is not { } summary)
-                    continue;
-
-                widget.SetVisible(isVisible);
-                summary.SetActiveToolVisible(isVisible);
+                if (widget.IsAlive)
+                    SyncWidgetState(widget);
             }
         }
 
