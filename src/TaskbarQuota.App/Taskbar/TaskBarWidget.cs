@@ -305,7 +305,13 @@ namespace TaskbarQuota.Taskbar
 
         public void SetVisible(bool visible)
         {
-            if (appWindow is null || isVisible == visible)
+            if (appWindow is null)
+                return;
+
+            // The cached flag is only our requested state. During Explorer/XAML-island startup the native
+            // window can remain hidden even after an earlier Show request, so an equal cached value must not
+            // suppress recovery when AppWindow reports a different actual state.
+            if (isVisible == visible && appWindow.IsVisible == visible)
                 return;
 
             isVisible = visible;
