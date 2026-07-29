@@ -142,17 +142,10 @@ public class ActiveAppDetectorTests : IDisposable
     [InlineData("https://grok.com/chat/123", null)]
     [InlineData("https://aistudio.google.com/usage", null)]
     [InlineData("https://gemini.google.com/app", null)]
+    [InlineData("https://example.com/projects/codex-private-prompt", null)]
     [InlineData("https://example.com/", null)]
     public void BrowserActiveTabDetector_TryResolveProviderFromUrl_MapsChatSurfaces(string url, ProviderId? expected)
         => Assert.Equal(expected, BrowserActiveTabDetector.TryResolveProviderFromUrl(url));
-
-    [Theory]
-    [InlineData("ChatGPT — Zen Browser", null)]
-    [InlineData("Claude — Zen Browser", null)]
-    [InlineData("Grok — Zen Browser", null)]
-    [InlineData("Git clone checkout error — Zen Browser", null)]
-    public void BrowserActiveTabDetector_TryResolveProviderFromTitle_DoesNotInferFromPrivateTitleText(string title, ProviderId? expected)
-        => Assert.Equal(expected, BrowserActiveTabDetector.TryResolveProviderFromTitle(title));
 
     [Theory]
     [InlineData("chrome", "Chrome")]
@@ -239,17 +232,41 @@ public class ActiveAppDetectorTests : IDisposable
     }
 
     [Theory]
-    [InlineData("gh.exe", "gh copilot suggest")]
-    [InlineData("gh.exe", @"C:\Tools\gh.exe copilot explain")]
-    [InlineData("gh.exe", "\"C:\\Program Files\\GitHub CLI\\gh.exe\" copilot suggest")]
-    [InlineData("cmd.exe", @"cmd.exe /c C:\Tools\codex.cmd")]
-    public void TryDetectCliProvider_ExplicitCommandSignatures_ReturnProvider(string processName, string commandLine)
+    [InlineData("gh.exe", "gh copilot suggest", ProviderId.Copilot)]
+    [InlineData("gh.exe", @"C:\Tools\gh.exe copilot explain", ProviderId.Copilot)]
+    [InlineData("gh.exe", "\"C:\\Program Files\\GitHub CLI\\gh.exe\" copilot suggest", ProviderId.Copilot)]
+    [InlineData("cmd.exe", @"cmd.exe /c C:\Tools\codex.cmd", ProviderId.Codex)]
+    public void TryDetectCliProvider_ExplicitCommandSignatures_ReturnProvider(
+        string processName,
+        string commandLine,
+        ProviderId expected)
     {
-        var expected = processName.StartsWith("gh", StringComparison.OrdinalIgnoreCase)
-            ? ProviderId.Copilot
-            : ProviderId.Codex;
-
         Assert.Equal(expected, ActiveAppDetector.TryDetectCliProvider(processName, commandLine));
+    }
+
+    [Theory]
+    [InlineData(4L, 4L, true)]
+    [InlineData(5L, 4L, false)]
+    public void IsCurrentCliPresenceProbeResult_RejectsStaleSnapshots(
+        long currentVersion,
+        long completedVersion,
+        bool expected)
+        => Assert.Equal(
+            expected,
+            ActiveAppDetector.IsCurrentCliPresenceProbeResult(
+                currentVersion,
+                completedVersion));
+
+    [Fact]
+    public void TryBeginSingleProbe_AllowsOnlyOneProbeUntilReleased()
+    {
+        int inFlight = 0;
+
+        Assert.True(ActiveAppDetector.TryBeginSingleProbe(ref inFlight));
+        Assert.False(ActiveAppDetector.TryBeginSingleProbe(ref inFlight));
+
+        System.Threading.Interlocked.Exchange(ref inFlight, 0);
+        Assert.True(ActiveAppDetector.TryBeginSingleProbe(ref inFlight));
     }
 
     [Fact]

@@ -101,8 +101,14 @@ public static class WidgetSettingsService
         if (CurrentVisibilityMode == mode)
             return;
 
-        CurrentVisibilityMode = mode;
-        StateStore.SaveVisibilityMode(mode);
+        if (!TryPersistAndApply(
+            () => StateStore.SaveVisibilityMode(mode),
+            () => CurrentVisibilityMode = mode))
+        {
+            Diagnostics.Log.Warning($"Could not save widget visibility mode '{mode}'.");
+            return;
+        }
+
         Changed?.Invoke(null, EventArgs.Empty);
     }
 
@@ -111,8 +117,14 @@ public static class WidgetSettingsService
         if (KeepVisibleWhileBackgroundAgentRunning == enabled)
             return;
 
-        KeepVisibleWhileBackgroundAgentRunning = enabled;
-        StateStore.SaveKeepVisibleWhileBackgroundCliAgentRunning(enabled);
+        if (!TryPersistAndApply(
+            () => StateStore.SaveKeepVisibleWhileBackgroundCliAgentRunning(enabled),
+            () => KeepVisibleWhileBackgroundAgentRunning = enabled))
+        {
+            Diagnostics.Log.Warning("Could not save the background-agent widget visibility setting.");
+            return;
+        }
+
         Changed?.Invoke(null, EventArgs.Empty);
     }
 
@@ -121,8 +133,21 @@ public static class WidgetSettingsService
         if (LastWidgetProvider == provider)
             return;
 
-        LastWidgetProvider = provider;
-        StateStore.SaveLastProvider(provider);
+        if (!TryPersistAndApply(
+            () => StateStore.SaveLastProvider(provider),
+            () => LastWidgetProvider = provider))
+        {
+            Diagnostics.Log.Warning($"Could not save the last widget provider '{provider}'.");
+        }
+    }
+
+    internal static bool TryPersistAndApply(Func<bool> persist, Action apply)
+    {
+        if (!persist())
+            return false;
+
+        apply();
+        return true;
     }
 
     public static double DisplayPercent(double usedPercent)

@@ -310,7 +310,12 @@ namespace TaskbarQuota.Taskbar
 
         private void ApplyTaskbarChildStyle()
         {
+            Marshal.SetLastPInvokeError(0);
             uint current = User32.GetWindowLong(hwnd, User32.GWL_STYLE);
+            int readError = Marshal.GetLastPInvokeError();
+            if (IsGetWindowLongFailure(current, readError))
+                throw new Win32Exception(readError, "Could not read the taskbar widget host style.");
+
             uint childStyle = ConvertToTaskbarChildStyle(current);
             if (childStyle == current)
                 return;
@@ -324,6 +329,9 @@ namespace TaskbarQuota.Taskbar
 
         internal static uint ConvertToTaskbarChildStyle(uint style)
             => (style & ~(uint)WindowStyles.WS_POPUP) | (uint)WindowStyles.WS_CHILD;
+
+        internal static bool IsGetWindowLongFailure(uint style, int error)
+            => style == 0 && error != 0;
 
         private bool IsParentedToTaskbar()
             => User32.GetAncestor(hwnd, GetAncestorFlags.GA_PARENT) == hwndShell;
@@ -350,11 +358,15 @@ namespace TaskbarQuota.Taskbar
             if (visible)
             {
                 QueuePositionUpdate(TaskbarChangeReason.None);
-                if (!appWindow.IsVisible)
+                if (!User32.IsWindowVisible(hwnd))
                 {
                     if (hostContent is { } hiddenContent)
                         hiddenContent.Opacity = 0;
-                    appWindow.Show(false);
+                    if (!TrySetNativeVisibility(true))
+                    {
+                        isVisible = User32.IsWindowVisible(hwnd);
+                        return;
+                    }
                 }
 
                 AnimateHostOpacity(1);
@@ -366,7 +378,8 @@ namespace TaskbarQuota.Taskbar
 
             if (hostContent is null)
             {
-                appWindow.Hide();
+                if (!TrySetNativeVisibility(false))
+                    isVisible = User32.IsWindowVisible(hwnd);
                 return;
             }
 
@@ -376,9 +389,42 @@ namespace TaskbarQuota.Taskbar
                 if (generation != hostFadeGeneration || destroyed || appWindow is null)
                     return;
 
-                appWindow.Hide();
+                if (!TrySetNativeVisibility(false))
+                    isVisible = User32.IsWindowVisible(hwnd);
             });
         }
+
+        private bool TrySetNativeVisibility(bool visible)
+        {
+            // AppWindow represents a top-level HWND, but this host becomes a WS_CHILD before visibility
+            // starts changing. Keep show/hide on USER32 once reparented so WinAppSDK does not queue a
+            // top-level AppWindow operation for the taskbar child.
+            Marshal.SetLastPInvokeError(0);
+            bool succeeded = User32.SetWindowPos(
+                hwnd,
+                IntPtr.Zero,
+                0,
+                0,
+                0,
+                0,
+                NativeVisibilityFlags(visible));
+            if (!succeeded)
+            {
+                int error = Marshal.GetLastPInvokeError();
+                Log.Warning(
+                    $"Failed to {(visible ? "show" : "hide")} taskbar child window " +
+                    $"taskbar=0x{hwndShell.ToInt64():X}, win32Error={error}");
+            }
+
+            return succeeded;
+        }
+
+        internal static uint NativeVisibilityFlags(bool visible)
+            => User32.SWP_NOMOVE
+                | User32.SWP_NOSIZE
+                | User32.SWP_NOZORDER
+                | User32.SWP_NOACTIVATE
+                | (visible ? User32.SWP_SHOWWINDOW : User32.SWP_HIDEWINDOW);
 
         private void AnimateHostOpacity(double to, Action? completed = null)
         {
@@ -2069,7 +2115,7 @@ namespace TaskbarQuota.Taskbar
             try { hostFadeStoryboard?.Stop(); } catch { }
             hostFadeStoryboard = null;
             positionUpdateCancellation.Cancel();
-            try { appWindow?.Hide(); } catch { }
+            try { TrySetNativeVisibility(false); } catch { }
             foreach (var tile in tiles)
             {
                 if (tile is null)

@@ -30,6 +30,10 @@ public sealed class CodexDesktopActivityDetectorTests
     [InlineData("Stop generating", "size-token-button-composer", true)]
     [InlineData("Detener", "size-token-button-composer bg-token-foreground", true)]
     [InlineData("Detener generación", "size-token-button-composer", true)]
+    [InlineData("Interrupt", "size-token-button-composer", true)]
+    [InlineData("Interrumpir", "size-token-button-composer", true)]
+    [InlineData("Detener la tarea", "size-token-button-composer", true)]
+    [InlineData("Stopped", "size-token-button-composer", false)]
     [InlineData("Stop", "sidebar-item", false)]
     [InlineData("Send", "size-token-button-composer", false)]
     [InlineData(null, "size-token-button-composer", false)]
@@ -40,4 +44,18 @@ public sealed class CodexDesktopActivityDetectorTests
         => Assert.Equal(
             expected,
             CodexDesktopActivityDetector.IsRunningComposerButton(name, className));
+
+    [Fact]
+    public void ShouldLogProbeFailure_RateLimitsRepeatedErrors()
+    {
+        var first = new DateTime(2026, 7, 29, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.True(CodexDesktopActivityDetector.ShouldLogProbeFailure(first, DateTime.MinValue));
+        Assert.False(CodexDesktopActivityDetector.ShouldLogProbeFailure(
+            first.AddSeconds(30),
+            first));
+        Assert.True(CodexDesktopActivityDetector.ShouldLogProbeFailure(
+            first.AddMinutes(1),
+            first));
+    }
 }

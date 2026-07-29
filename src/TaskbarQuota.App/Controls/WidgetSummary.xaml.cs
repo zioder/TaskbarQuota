@@ -75,6 +75,7 @@ namespace TaskbarQuota.Controls
         private ProviderId? _lastAppliedProvider;
         private string? _lastRenderSignature;
         private string? _lastSourceSignature;
+        private Func<ProviderSource, string>? _tooltipBuilder;
         private bool _hasRevealed;
         private bool _isActiveToolVisible = true;
         // Storyboards and their animations are allocated on first use and re-aimed afterwards; all three
@@ -181,6 +182,7 @@ namespace TaskbarQuota.Controls
                 {
                     _lastSourceSignature = sourceSignature;
                     ApplySourceBadge(result);
+                    RefreshTileTooltip(result.Source);
                 }
                 return;
             }
@@ -226,7 +228,9 @@ namespace TaskbarQuota.Controls
                 };
                 RenderRows();
                 AnimateRender(isFirstReveal, providerSwitch: providerChanged);
-                ToolTipService.SetToolTip(this, $"{widgetName}: {result.Error ?? "Loading..."}");
+                SetTileTooltip(
+                    result.Source,
+                    source => $"{WidgetTooltipTitle(widgetName, source)}: {result.Error ?? "Loading..."}");
                 return;
             }
 
@@ -238,8 +242,9 @@ namespace TaskbarQuota.Controls
                     _rows = new() { new WidgetUsageRow("Login", 0, "required", HasBar: false) };
                     RenderRows();
                     AnimateRender(isFirstReveal, providerSwitch: providerChanged);
-                    var loginSourceText = result.Source.IsKnown ? $" {result.Source.ShortViaText}" : "";
-                    ToolTipService.SetToolTip(this, $"{widgetName}{loginSourceText}: Login required — open the app to connect.");
+                    SetTileTooltip(
+                        result.Source,
+                        source => $"{WidgetTooltipTitle(widgetName, source)}: Login required — open the app to connect.");
                     return;
                 }
 
@@ -250,8 +255,9 @@ namespace TaskbarQuota.Controls
                 };
                 RenderRows();
                 AnimateRender(isFirstReveal, providerSwitch: providerChanged);
-                var sourceText = result.Source.IsKnown ? $" {result.Source.ShortViaText}" : "";
-                ToolTipService.SetToolTip(this, $"{widgetName}{sourceText}: {result.Error ?? "Unavailable"}");
+                SetTileTooltip(
+                    result.Source,
+                    source => $"{WidgetTooltipTitle(widgetName, source)}: {result.Error ?? "Unavailable"}");
                 return;
             }
 
@@ -292,10 +298,12 @@ namespace TaskbarQuota.Controls
             var costTooltip = WidgetCostTooltipLine(result.Id, usage.Cost);
             var resetCreditsTooltip = WidgetResetCreditsTooltipLine(usage.ResetCredits);
             var staleTooltip = StaleTooltipLine(result);
-            ToolTipService.SetToolTip(this,
-                string.IsNullOrEmpty(plan)
-                    ? $"{WidgetTooltipTitle(widgetName, result.Source)}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}"
-                    : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}");
+            var tooltipBody = string.Join("\n", tooltipLines);
+            SetTileTooltip(
+                result.Source,
+                source => string.IsNullOrEmpty(plan)
+                    ? $"{WidgetTooltipTitle(widgetName, source)}\n{tooltipBody}{costTooltip}{resetCreditsTooltip}{staleTooltip}"
+                    : $"{WidgetTooltipTitle(widgetName, source)} · {plan}\n{tooltipBody}{costTooltip}{resetCreditsTooltip}{staleTooltip}");
         }
 
         /// <summary>
@@ -361,6 +369,25 @@ namespace TaskbarQuota.Controls
 
         private static string WidgetTooltipTitle(string widgetName, ProviderSource source)
             => source.IsKnown ? $"{widgetName} {source.ShortViaText}" : widgetName;
+
+        private void SetTileTooltip(
+            ProviderSource source,
+            Func<ProviderSource, string> builder)
+        {
+            _tooltipBuilder = builder;
+            RefreshTileTooltip(source);
+        }
+
+        private void RefreshTileTooltip(ProviderSource source)
+        {
+            if (_tooltipBuilder is { } builder)
+                ToolTipService.SetToolTip(this, BuildTooltipForSource(builder, source));
+        }
+
+        internal static string BuildTooltipForSource(
+            Func<ProviderSource, string> builder,
+            ProviderSource source)
+            => builder(source);
 
         public void SetActiveToolVisible(bool isVisible)
         {
@@ -625,11 +652,13 @@ namespace TaskbarQuota.Controls
             RenderRows();
             AnimateRender(!_hasRevealed, providerSwitch: providerChanged);
 
-            ToolTipService.SetToolTip(this,
-                $"{WidgetTooltipTitle(result.DisplayName, result.Source)} · {usage.LoginMethod}\n" +
-                $"Usage: {usage.Cost?.Display ?? "--"}\n" +
-                $"Balance: {(balanceText != null ? "$" + balanceText.Split(' ')[0] : "--")}" +
-                StaleTooltipLine(result));
+            SetTileTooltip(
+                result.Source,
+                source =>
+                    $"{WidgetTooltipTitle(result.DisplayName, source)} · {usage.LoginMethod}\n" +
+                    $"Usage: {usage.Cost?.Display ?? "--"}\n" +
+                    $"Balance: {(balanceText != null ? "$" + balanceText.Split(' ')[0] : "--")}" +
+                    StaleTooltipLine(result));
         }
 
         /// <summary>
@@ -648,10 +677,12 @@ namespace TaskbarQuota.Controls
             RenderRows();
             AnimateRender(!_hasRevealed, providerSwitch: providerChanged);
 
-            ToolTipService.SetToolTip(this,
-                $"{WidgetTooltipTitle(result.DisplayName, result.Source)} · {usage.LoginMethod}\n" +
-                $"Credit balance: {usage.Cost?.Display ?? "--"}" +
-                StaleTooltipLine(result));
+            SetTileTooltip(
+                result.Source,
+                source =>
+                    $"{WidgetTooltipTitle(result.DisplayName, source)} · {usage.LoginMethod}\n" +
+                    $"Credit balance: {usage.Cost?.Display ?? "--"}" +
+                    StaleTooltipLine(result));
         }
 
         private void ApplyCreditsDisplay(UsageResult result, UsageSnapshot usage, CostSnapshot credits, bool providerChanged = false)
@@ -697,15 +728,19 @@ namespace TaskbarQuota.Controls
             AnimateRender(!_hasRevealed, providerSwitch: providerChanged);
 
             var plan = FormatPlanLabel(result.Id, widgetName, usage.LoginMethod);
-            var tooltip = string.IsNullOrEmpty(plan)
-                ? $"{WidgetTooltipTitle(widgetName, result.Source)}\nCredits: {value} ({FormatCreditCount(remaining)} remaining)"
-                : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\nCredits: {value} ({FormatCreditCount(remaining)} remaining)";
-            if (usage.AdditionalUsage is { Enabled: true } addl)
-                tooltip += $"\nAdditional usage: {addl.StatusText} ({addl.SpendText})";
-            if (usage.Primary.ResetDescription is { } resetDesc)
-                tooltip += $"\nresets in {resetDesc}";
-            tooltip += StaleTooltipLine(result);
-            ToolTipService.SetToolTip(this, tooltip);
+            SetTileTooltip(
+                result.Source,
+                source =>
+                {
+                    var tooltip = string.IsNullOrEmpty(plan)
+                        ? $"{WidgetTooltipTitle(widgetName, source)}\nCredits: {value} ({FormatCreditCount(remaining)} remaining)"
+                        : $"{WidgetTooltipTitle(widgetName, source)} · {plan}\nCredits: {value} ({FormatCreditCount(remaining)} remaining)";
+                    if (usage.AdditionalUsage is { Enabled: true } addl)
+                        tooltip += $"\nAdditional usage: {addl.StatusText} ({addl.SpendText})";
+                    if (usage.Primary.ResetDescription is { } resetDesc)
+                        tooltip += $"\nresets in {resetDesc}";
+                    return tooltip + StaleTooltipLine(result);
+                });
         }
 
         /// <summary>
@@ -820,16 +855,21 @@ namespace TaskbarQuota.Controls
             AnimateRender(!_hasRevealed, providerSwitch: providerChanged);
 
             var plan = FormatPlanLabel(ProviderId.Antigravity, "Antigravity", usage.LoginMethod);
-            var title = WidgetTooltipTitle("Antigravity", result.Source);
-            // Header and body are built separately because `cond ? a : b + c` binds the concatenation to
-            // the false branch only — inlining these dropped the whole body whenever plan was empty.
-            var header = string.IsNullOrEmpty(plan) ? $"{title}\n" : $"{title} · {plan}\n";
             var body =
                 $"Gemini: {WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent)}" +
                 (usage.Primary.ResetDescription is { } r1 ? $" (resets {r1})" : "") + "\n" +
                 $"Non-Gemini: {WidgetSettingsService.FormatDisplayPercent(usage.Secondary?.UsedPercent ?? 0)}" +
                 (usage.Secondary?.ResetDescription is { } r2 ? $" (resets {r2})" : "");
-            ToolTipService.SetToolTip(this, header + body + StaleTooltipLine(result));
+            SetTileTooltip(
+                result.Source,
+                source =>
+                {
+                    var title = WidgetTooltipTitle("Antigravity", source);
+                    // Header and body stay separate because `cond ? a : b + c` binds the concatenation to
+                    // the false branch only — inlining these dropped the body whenever plan was empty.
+                    var header = string.IsNullOrEmpty(plan) ? $"{title}\n" : $"{title} · {plan}\n";
+                    return header + body + StaleTooltipLine(result);
+                });
         }
 
         private void OnWidgetSettingsChanged(object? sender, EventArgs e)

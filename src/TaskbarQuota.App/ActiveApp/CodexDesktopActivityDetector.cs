@@ -25,14 +25,19 @@ namespace TaskbarQuota.ActiveApp
         private const string RunningStatusLayoutClassToken = "shrink-0";
         private const string CompletedStatusClassToken = "no-drag";
         private const string ComposerButtonClassToken = "size-token-button-composer";
+        private static readonly TimeSpan FailureLogInterval = TimeSpan.FromMinutes(1);
 
         private IUIAutomation? _automation;
+        private readonly object _failureLogGate = new();
+        private DateTime _lastFailureLogAtUtc = DateTime.MinValue;
 
         internal bool HasRunningTurn()
         {
+            int candidateCount = 0;
             try
             {
                 var processIds = GetCandidateProcessIds();
+                candidateCount = processIds.Count;
                 if (processIds.Count == 0)
                     return false;
 
@@ -52,11 +57,27 @@ namespace TaskbarQuota.ActiveApp
                 }, IntPtr.Zero);
                 return running;
             }
-            catch
+            catch (Exception ex)
             {
+                bool shouldLog;
+                var now = DateTime.UtcNow;
+                lock (_failureLogGate)
+                {
+                    shouldLog = ShouldLogProbeFailure(now, _lastFailureLogAtUtc);
+                    if (shouldLog)
+                        _lastFailureLogAtUtc = now;
+                }
+                if (shouldLog)
+                {
+                    Diagnostics.Log.Debug(
+                        $"[codex-activity] running-turn probe failed candidates={candidateCount}: {ex.Message}");
+                }
                 return false;
             }
         }
+
+        internal static bool ShouldLogProbeFailure(DateTime now, DateTime lastLoggedAt)
+            => now - lastLoggedAt >= FailureLogInterval;
 
         private bool WindowHasRunningTurn(IntPtr hwnd)
         {

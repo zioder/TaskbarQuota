@@ -897,12 +897,13 @@ namespace TaskbarQuota
                     }
                 }
 
-                if (detected is null && _lastActive is null && WidgetDisplayProvider is null)
+                var widgetDisplayProvider = WidgetDisplayProvider;
+                if (detected is null && _lastActive is null && widgetDisplayProvider is null)
                     return;
 
                 // Last-active fallback: nothing detected and never had one -> show the first enabled
                 // provider (never a hidden default), but do not make the fallback sticky as the active one.
-                target = _lastActive ?? WidgetDisplayProvider ?? ProviderId.Codex;
+                target = _lastActive ?? widgetDisplayProvider ?? ProviderId.Codex;
             }
             catch (Exception ex)
             {

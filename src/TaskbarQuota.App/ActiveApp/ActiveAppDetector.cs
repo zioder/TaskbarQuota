@@ -135,13 +135,20 @@ namespace TaskbarQuota.ActiveApp
         private int? _cliCacheSessionRootPid;
         private IntPtr _cliCacheFocusHwnd;
         private readonly Dictionary<IntPtr, ProviderId> _terminalWindowCliCache = new();
+        private readonly object _presenceGate = new();
         private bool _guiPresenceCache;
         private DateTime _guiPresenceCacheAt = DateTime.MinValue;
+        private bool _guiPresenceRefreshInProgress;
         private bool _cliPresenceCache;
         private DateTime _cliPresenceCacheAt = DateTime.MinValue;
+        private bool _cliPresenceRefreshInProgress;
+        private long _cliPresenceProbeVersion;
+        private int _globalCliPresenceProbeInFlight;
+        private int _globalCliPresenceProbeRequested;
         private bool _backgroundAgentCache;
         private DateTime _backgroundAgentCacheAt = DateTime.MinValue;
         private DateTime _backgroundAgentRetryUntil = DateTime.MinValue;
+        private bool _backgroundAgentRefreshInProgress;
         private bool _codexDesktopWasForeground;
         private volatile bool _openCodeModelStateDirty;
         private volatile bool _clineStateDirty;
@@ -446,7 +453,7 @@ namespace TaskbarQuota.ActiveApp
 
             // Normal browser chat surfaces have their own account-level usage semantics and should not be
             // folded into coding-client providers like Codex or Antigravity.
-            if (_browserTabs.Detect(hwnd, procName, windowTitle) is { } browserProvider)
+            if (_browserTabs.Detect(hwnd, procName) is { } browserProvider)
             {
                 _activeSource = browserProvider.Source;
                 return _lastForegroundResult = browserProvider.Provider;
@@ -480,8 +487,7 @@ namespace TaskbarQuota.ActiveApp
                 {
                     _terminalWindowCliCache[hwnd] = detectedCli;
                     _activeSource = ResolveCliSource(sessionRootName ?? procName);
-                    _cliPresenceCache = true;
-                    _cliPresenceCacheAt = DateTime.UtcNow;
+                    RecordCliPresence();
                 }
                 return _lastForegroundResult = _cliCache;
             }
@@ -761,8 +767,8 @@ namespace TaskbarQuota.ActiveApp
 
             try
             {
-                _cliPresenceCache = DetectCliFromProcesses() != null;
-                _cliPresenceCacheAt = DateTime.UtcNow;
+                long version = BeginCliPresenceProbe();
+                CompleteCliPresenceProbe(version, DetectCliFromProcesses() != null);
             }
             catch (Exception ex)
             {
@@ -773,44 +779,166 @@ namespace TaskbarQuota.ActiveApp
         public SupportedToolPresence GetSupportedToolPresence(bool codexDesktopForeground = false)
         {
             var now = DateTime.UtcNow;
-            if (now - _guiPresenceCacheAt >= PresenceCacheTtl)
-            {
-                _guiPresenceCache = HasAnyKnownGuiProcessRunning();
-                _guiPresenceCacheAt = now;
-            }
+            bool refreshGui;
+            bool refreshCli;
+            bool refreshBackgroundAgent;
+            bool codexDesktopLostForeground;
+            bool backgroundAgentWasRunning;
+            long cliProbeVersion = 0;
 
-            if (now - _cliPresenceCacheAt >= PresenceCacheTtl)
+            lock (_presenceGate)
             {
-                _cliPresenceCache = DetectCliFromProcesses() != null;
-                _cliPresenceCacheAt = now;
-            }
+                refreshGui = !_guiPresenceRefreshInProgress
+                    && now - _guiPresenceCacheAt >= PresenceCacheTtl;
+                if (refreshGui)
+                    _guiPresenceRefreshInProgress = true;
 
-            bool codexDesktopLostForeground = _codexDesktopWasForeground && !codexDesktopForeground;
-            _codexDesktopWasForeground = codexDesktopForeground;
-            if (ShouldRefreshBackgroundAgentPresence(
-                now,
-                _backgroundAgentCacheAt,
-                _backgroundAgentRetryUntil,
-                codexDesktopLostForeground))
-            {
-                bool previouslyRunning = _backgroundAgentCache;
-                _backgroundAgentCache = _codexDesktopActivity.HasRunningTurn();
-                _backgroundAgentCacheAt = now;
-                if (_backgroundAgentCache)
+                refreshCli = !_cliPresenceRefreshInProgress
+                    && now - _cliPresenceCacheAt >= PresenceCacheTtl;
+                if (refreshCli)
                 {
-                    _backgroundAgentRetryUntil = DateTime.MinValue;
+                    _cliPresenceRefreshInProgress = true;
+                    cliProbeVersion = ++_cliPresenceProbeVersion;
                 }
-                else if (codexDesktopLostForeground || previouslyRunning)
+
+                codexDesktopLostForeground = _codexDesktopWasForeground && !codexDesktopForeground;
+                _codexDesktopWasForeground = codexDesktopForeground;
+                refreshBackgroundAgent = !_backgroundAgentRefreshInProgress
+                    && ShouldRefreshBackgroundAgentPresence(
+                        now,
+                        _backgroundAgentCacheAt,
+                        _backgroundAgentRetryUntil,
+                        codexDesktopLostForeground);
+                backgroundAgentWasRunning = _backgroundAgentCache;
+                if (refreshBackgroundAgent)
                 {
-                    // UI Automation can briefly rebuild Codex's tree while its window loses focus or
-                    // closes. Retry only during that handoff; steady idle state retains the cheap 5 s
-                    // cache instead of scanning the accessibility tree twice per second forever.
+                    _backgroundAgentRefreshInProgress = true;
+                }
+                else if (codexDesktopLostForeground)
+                {
+                    // Preserve the transition retry even if another tick already owns the current UIA scan.
                     _backgroundAgentRetryUntil = now + BackgroundAgentTransitionWindow;
                 }
             }
 
-            return new(_guiPresenceCache, _cliPresenceCache, _backgroundAgentCache);
+            if (refreshGui)
+            {
+                bool guiPresent = HasAnyKnownGuiProcessRunning();
+                lock (_presenceGate)
+                {
+                    _guiPresenceCache = guiPresent;
+                    _guiPresenceCacheAt = DateTime.UtcNow;
+                    _guiPresenceRefreshInProgress = false;
+                }
+            }
+
+            if (refreshCli)
+            {
+                // Keep the periodic path to one bulk name/process-tree snapshot. Script-host command lines
+                // are resolved by the separately throttled background probe below.
+                bool cliPresent = DetectCliFromProcesses(resolveGlobalHostCommandLines: false) != null;
+                CompleteCliPresenceProbe(cliProbeVersion, cliPresent);
+                lock (_presenceGate)
+                    _cliPresenceRefreshInProgress = false;
+
+                if (!cliPresent)
+                    QueueGlobalCliPresenceProbe();
+            }
+
+            if (refreshBackgroundAgent)
+            {
+                bool backgroundAgentPresent = _codexDesktopActivity.HasRunningTurn();
+                var completedAt = DateTime.UtcNow;
+                lock (_presenceGate)
+                {
+                    _backgroundAgentCache = backgroundAgentPresent;
+                    _backgroundAgentCacheAt = completedAt;
+                    _backgroundAgentRefreshInProgress = false;
+                    if (backgroundAgentPresent)
+                    {
+                        _backgroundAgentRetryUntil = DateTime.MinValue;
+                    }
+                    else if (codexDesktopLostForeground || backgroundAgentWasRunning)
+                    {
+                        // UI Automation can briefly rebuild Codex's tree while its window loses focus or
+                        // closes. Retry only during that handoff; steady idle state retains the cheap 5 s
+                        // cache instead of scanning the accessibility tree twice per second forever.
+                        _backgroundAgentRetryUntil = completedAt + BackgroundAgentTransitionWindow;
+                    }
+                }
+            }
+
+            lock (_presenceGate)
+                return new(_guiPresenceCache, _cliPresenceCache, _backgroundAgentCache);
         }
+
+        private long BeginCliPresenceProbe()
+        {
+            lock (_presenceGate)
+                return ++_cliPresenceProbeVersion;
+        }
+
+        private void CompleteCliPresenceProbe(long version, bool present)
+        {
+            lock (_presenceGate)
+            {
+                if (!IsCurrentCliPresenceProbeResult(_cliPresenceProbeVersion, version))
+                    return;
+
+                _cliPresenceCache = present;
+                _cliPresenceCacheAt = DateTime.UtcNow;
+            }
+        }
+
+        private void RecordCliPresence()
+        {
+            lock (_presenceGate)
+            {
+                _cliPresenceProbeVersion++;
+                _cliPresenceCache = true;
+                _cliPresenceCacheAt = DateTime.UtcNow;
+            }
+        }
+
+        private void QueueGlobalCliPresenceProbe()
+        {
+            System.Threading.Interlocked.Exchange(ref _globalCliPresenceProbeRequested, 1);
+            if (!TryBeginSingleProbe(ref _globalCliPresenceProbeInFlight))
+                return;
+
+            _ = System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    while (System.Threading.Interlocked.Exchange(
+                               ref _globalCliPresenceProbeRequested,
+                               0) != 0)
+                    {
+                        long version = BeginCliPresenceProbe();
+                        CompleteCliPresenceProbe(version, DetectCliFromProcesses() != null);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.Log.Warning(ex, "Background CLI presence probe failed");
+                }
+                finally
+                {
+                    System.Threading.Interlocked.Exchange(ref _globalCliPresenceProbeInFlight, 0);
+                    if (System.Threading.Volatile.Read(ref _globalCliPresenceProbeRequested) != 0)
+                        QueueGlobalCliPresenceProbe();
+                }
+            });
+        }
+
+        internal static bool IsCurrentCliPresenceProbeResult(
+            long currentVersion,
+            long completedVersion)
+            // A completed process snapshot must not overwrite newer native or foreground evidence.
+            => currentVersion == completedVersion;
+
+        internal static bool TryBeginSingleProbe(ref int inFlight)
+            => System.Threading.Interlocked.CompareExchange(ref inFlight, 1, 0) == 0;
 
         internal static bool ShouldRefreshBackgroundAgentPresence(
             DateTime now,
@@ -879,7 +1007,8 @@ namespace TaskbarQuota.ActiveApp
             int? foregroundTerminalPid = null,
             string? foregroundProcName = null,
             string? windowTitleHint = null,
-            ProviderId? preferredProvider = null)
+            ProviderId? preferredProvider = null,
+            bool resolveGlobalHostCommandLines = true)
         {
             // One cheap, name-only scan builds the process tree and resolves native CLI exes. Script-host
             // CommandLines (node/bun/npm/...) are read separately for the focused session, or conditionally
@@ -967,7 +1096,7 @@ namespace TaskbarQuota.ActiveApp
                     candidate.parentPid,
                     processParents,
                     processNames));
-                if (!hasNativeCliPresence)
+                if (!hasNativeCliPresence && resolveGlobalHostCommandLines)
                     ResolveHostCommandLines(hostPids, processStarts, processParents, candidates);
             }
 

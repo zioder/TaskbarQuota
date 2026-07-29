@@ -42,10 +42,10 @@ namespace TaskbarQuota.ActiveApp
             => !string.IsNullOrWhiteSpace(processName)
             && BrowserProcesses.Contains(NormalizeProcessName(processName));
 
-        internal ProviderId? DetectProvider(IntPtr hwnd, string? processName, string? windowTitle = null)
-            => Detect(hwnd, processName, windowTitle)?.Provider;
+        internal ProviderId? DetectProvider(IntPtr hwnd, string? processName)
+            => Detect(hwnd, processName)?.Provider;
 
-        internal BrowserProviderDetection? Detect(IntPtr hwnd, string? processName, string? windowTitle = null)
+        internal BrowserProviderDetection? Detect(IntPtr hwnd, string? processName)
         {
             if (!IsBrowserProcessName(processName))
                 return null;
@@ -94,8 +94,8 @@ namespace TaskbarQuota.ActiveApp
             return null;
         }
 
-        internal static ProviderId? TryResolveProviderFromTitle(string? windowTitle)
-            => null;
+        // Window titles can contain private prompt/project text and are intentionally never used as
+        // provider evidence. Only the foreground browser's active address-bar URL is classified.
 
         internal static ProviderSource ResolveBrowserSource(string? processName)
         {

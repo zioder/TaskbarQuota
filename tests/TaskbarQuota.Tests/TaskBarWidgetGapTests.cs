@@ -20,6 +20,34 @@ public class TaskBarWidgetGapTests
         Assert.NotEqual(0u, result & (uint)WindowStyles.WS_CHILD);
     }
 
+    [Theory]
+    [InlineData(0u, 5, true)]
+    [InlineData(0u, 0, false)]
+    [InlineData(0x94000000u, 5, false)]
+    public void IsGetWindowLongFailure_RequiresZeroStyleAndWin32Error(
+        uint style,
+        int error,
+        bool expected)
+        => Assert.Equal(expected, TaskBarWidget.IsGetWindowLongFailure(style, error));
+
+    [Theory]
+    [InlineData(true, User32.SWP_SHOWWINDOW, User32.SWP_HIDEWINDOW)]
+    [InlineData(false, User32.SWP_HIDEWINDOW, User32.SWP_SHOWWINDOW)]
+    public void NativeVisibilityFlags_ChangesOnlyTheChildWindowShowState(
+        bool visible,
+        uint expectedVisibilityFlag,
+        uint oppositeVisibilityFlag)
+    {
+        uint result = TaskBarWidget.NativeVisibilityFlags(visible);
+
+        Assert.NotEqual(0u, result & expectedVisibilityFlag);
+        Assert.Equal(0u, result & oppositeVisibilityFlag);
+        Assert.NotEqual(0u, result & User32.SWP_NOMOVE);
+        Assert.NotEqual(0u, result & User32.SWP_NOSIZE);
+        Assert.NotEqual(0u, result & User32.SWP_NOZORDER);
+        Assert.NotEqual(0u, result & User32.SWP_NOACTIVATE);
+    }
+
     [Fact]
     public void ShouldReposition_BeforeFirstPlacement_IsTrueWithoutOverflowing()
     {

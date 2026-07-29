@@ -34,4 +34,21 @@ public class WidgetSummaryRevealTests
 
         Assert.True(WidgetSummary.HasSameRenderedContentForTesting(result, foreground));
     }
+
+    [Fact]
+    public void SourceAwareTooltipBuilderUsesTheCurrentSource()
+    {
+        static string Build(ProviderSource source)
+            => source.IsKnown ? $"Codex {source.ShortViaText}: unavailable" : "Codex: unavailable";
+
+        var desktop = new ProviderSource(ProviderSourceKind.DesktopApp, "Codex", "desktop");
+        var terminal = new ProviderSource(ProviderSourceKind.Cli, "PowerShell", "terminal");
+
+        Assert.Equal(
+            "Codex via Codex: unavailable",
+            WidgetSummary.BuildTooltipForSource(Build, desktop));
+        Assert.Equal(
+            "Codex via PowerShell: unavailable",
+            WidgetSummary.BuildTooltipForSource(Build, terminal));
+    }
 }

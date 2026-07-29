@@ -17,9 +17,6 @@ namespace TaskbarQuota.Taskbar
         private static TrayIconWithContextMenu? _trayIcon;
         private static System.Drawing.Icon? _trayIconSource;
         private static readonly Dictionary<IntPtr, TaskBarWidget> Widgets = new();
-        // Reused snapshot of Widgets.Values, so iterating it while a callback may mutate the dictionary
-        // doesn't allocate. Only valid until the next SnapshotWidgets call, and only used on the UI thread.
-        private static readonly List<TaskBarWidget> _widgetBuffer = new();
         private static FlyoutWindow? _flyout;
         private static DispatcherQueue? _dispatcher;
         private static Action? _showMainWindow;
@@ -145,10 +142,7 @@ namespace TaskbarQuota.Taskbar
                 Services.PinBudgetService.EnforceBudget();
                 // Re-run the tile-fit math against the gap the last position pass measured, so tiles that
                 // were trimmed off a crowded taskbar come back once there is room for them again.
-                // Iterated over the reused buffer rather than Widgets.Values.ToArray(), which allocated an
-                // array every five seconds for the life of the process.
-                SnapshotWidgets();
-                foreach (var widget in _widgetBuffer)
+                foreach (var widget in CreateStableSnapshot(Widgets.Values))
                 {
                     if (widget.IsAlive)
                         widget.RefreshLayout();
@@ -252,6 +246,16 @@ namespace TaskbarQuota.Taskbar
             var providers = coordinator.WidgetDisplayProviders;
             var decision = EvaluateVisibilityDecision(providers, hideImmediately);
             bool visible = decision.ShouldShowWidget && providers.Count > 0;
+            SyncWidgetState(providers, decision, visible, hydrate);
+        }
+
+        private static void SyncWidgetState(
+            IReadOnlyList<ProviderId> providers,
+            WidgetVisibilityDecision decision,
+            bool visible,
+            bool hydrate = true)
+        {
+            var coordinator = UsageCoordinator.Instance;
             bool needsFetch = false;
 
             foreach (var widget in Widgets.Values.ToArray())
@@ -354,7 +358,7 @@ namespace TaskbarQuota.Taskbar
             // before showing it; transitions that keep it visible do no content work at all.
             if (visible && !_lastWidgetVisible)
             {
-                SyncWidgetState();
+                SyncWidgetState(providers, decision, visible);
                 return;
             }
 
@@ -513,9 +517,7 @@ namespace TaskbarQuota.Taskbar
             var decision = EvaluateVisibilityDecision(providers);
             bool visible = decision.ShouldShowWidget && providers.Count > 0;
 
-            // Reused buffer: this runs on every usage publish, so a fresh array per publish was pure waste.
-            SnapshotWidgets();
-            foreach (var widget in _widgetBuffer)
+            foreach (var widget in CreateStableSnapshot(Widgets.Values))
             {
                 if (!widget.IsAlive)
                     continue;
@@ -541,17 +543,11 @@ namespace TaskbarQuota.Taskbar
         }
 
         /// <summary>
-        /// Refills <see cref="_widgetBuffer"/> from the live dictionary. Callers iterate the buffer rather
-        /// than the dictionary because a widget callback can remove an entry mid-loop; the buffer replaces
-        /// the defensive copy that the hot paths used to allocate per pass. UI thread only, and the buffer
-        /// stays valid only until the next call.
+        /// Creates storage owned by this iteration. XAML calls inside the loop can pump the dispatcher and
+        /// re-enter another manager callback; a shared reusable list is then cleared while its outer
+        /// enumerator is still active.
         /// </summary>
-        private static void SnapshotWidgets()
-        {
-            _widgetBuffer.Clear();
-            foreach (var widget in Widgets.Values)
-                _widgetBuffer.Add(widget);
-        }
+        internal static T[] CreateStableSnapshot<T>(IEnumerable<T> source) => source.ToArray();
 
         private static void LogWidgetApply(ProviderId provider, string source)
         {
@@ -601,6 +597,7 @@ namespace TaskbarQuota.Taskbar
             UsageCoordinator.Instance.ActiveToolPresenceChanged -= OnActiveToolPresenceChanged;
             UsageCoordinator.Instance.SupportedSurfacesChanged -= OnSupportedSurfacesChanged;
             WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
+            App.Quitting -= OnQuitting;
             _initialized = false;
             _widgetHealthTimer?.Stop();
             _widgetHealthTimer = null;
