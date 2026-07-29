@@ -2,12 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using H.NotifyIcon.Core;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media.Imaging;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Usage;
+using TaskbarQuota.AgentActivity;
 
 namespace TaskbarQuota.Taskbar
 {
@@ -24,6 +26,7 @@ namespace TaskbarQuota.Taskbar
         private static DispatcherQueue? _dispatcher;
         private static Action? _showMainWindow;
         private static DispatcherTimer? _widgetHealthTimer;
+        private static DispatcherTimer? _activityTimer;
         private static bool _initialized;
         private static bool _isReconcilingWidgets;
         private static ProviderId? _lastLoggedWidgetApplyProvider;
@@ -41,18 +44,33 @@ namespace TaskbarQuota.Taskbar
                 UsageCoordinator.Instance.StateChanged += OnStateChanged;
                 UsageCoordinator.Instance.ActiveProviderChanged += OnActiveProviderChanged;
                 UsageCoordinator.Instance.ActiveToolPresenceChanged += OnActiveToolPresenceChanged;
+                AgentActivityService.Instance.Changed += OnActivityChanged;
                 WidgetSettingsService.Changed += OnWidgetSettingsChanged;
                 App.Quitting += OnQuitting;
                 _initialized = true;
             }
 
             StartWidgetHealthTimer();
+            Log.Information("[activity] starting activity monitor");
+            StartActivityTimer();
             OnActiveToolPresenceChanged(UsageCoordinator.Instance.IsActiveToolPresent);
+        }
+
+        private static void StartActivityTimer()
+        {
+            if (_activityTimer != null)
+                return;
+
+            _activityTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            _activityTimer.Tick += async (_, _) => await AgentActivityService.Instance.RefreshFromTranscriptsAsync();
+            _activityTimer.Start();
+            _ = Task.Run(AgentActivityService.Instance.RefreshFromTranscriptsAsync);
         }
 
         private static void CreateTrayIcon()
         {
             var open = new PopupMenuItem("Open TaskbarQuota", (_, _) => _dispatcher?.TryEnqueue(() => _showMainWindow?.Invoke()));
+            var activity = new PopupMenuItem("Open agent activity", (_, _) => _dispatcher?.TryEnqueue(OpenActivityFlyout));
             var move = new PopupMenuItem("Move primary taskbar widget", (_, _) => _dispatcher?.TryEnqueue(
                 () => PrimaryWidget()?.StartDragging()));
             var reset = new PopupMenuItem("Reset widget positions", (_, _) => _dispatcher?.TryEnqueue(
@@ -76,7 +94,7 @@ namespace TaskbarQuota.Taskbar
 
             _trayIcon = new TrayIconWithContextMenu
             {
-                ContextMenu = new PopupMenu { Items = { open, new PopupMenuSeparator(), move, reset, new PopupMenuSeparator(), quit } },
+                ContextMenu = new PopupMenu { Items = { open, activity, new PopupMenuSeparator(), move, reset, new PopupMenuSeparator(), quit } },
                 ToolTip = "TaskbarQuota",
             };
             _trayIcon.Create();
@@ -219,10 +237,12 @@ namespace TaskbarQuota.Taskbar
 
             var coordinator = UsageCoordinator.Instance;
             var providers = coordinator.WidgetDisplayProviders;
+            var activity = AgentActivityService.Instance.Snapshot;
 
             // No provider to show -> hide the native host instead of leaving a transparent taskbar child
             // window over the notification area (#10).
-            widget.SetVisible(providers.Count > 0);
+            widget.SetVisible(providers.Count > 0 || activity.Primary is not null);
+            widget.SetActivitySnapshot(activity);
             widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
             if (providers.Count == 0)
                 return;
@@ -318,6 +338,7 @@ namespace TaskbarQuota.Taskbar
         {
             var coordinator = UsageCoordinator.Instance;
             var providers = coordinator.WidgetDisplayProviders;
+            var activity = AgentActivityService.Instance.Snapshot;
             bool isDisplayed = providers.Contains(result.Id);
 
             // Reused buffer: this runs on every usage publish, so a fresh array per publish was pure waste.
@@ -329,7 +350,8 @@ namespace TaskbarQuota.Taskbar
 
                 // Reconcile the tile set first, so a provider that just became active already owns a slot
                 // before its result is routed. SetDisplayProviders is a cheap no-op when nothing changed.
-                widget.SetVisible(providers.Count > 0);
+                widget.SetVisible(providers.Count > 0 || activity.Primary is not null);
+                widget.SetActivitySnapshot(activity);
                 widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
                 if (!isDisplayed)
                     continue;
@@ -361,9 +383,10 @@ namespace TaskbarQuota.Taskbar
             Log.Debug($"[synara] widget {source} applied provider={provider}");
         }
 
-        // Provider switches always publish StateChanged immediately after ActiveProviderChanged,
-        // so updating the widget here would only duplicate dispatcher work and add latency.
-        private static void OnActiveProviderChanged(ProviderId? _) { }
+        // Foreground provider detection is strictly for quota context. Agent activity is refreshed by
+        // its own desktop-app and terminal-command scans, even when another app has the focus.
+        private static void OnActiveProviderChanged(ProviderId? _)
+            => _dispatcher?.TryEnqueue(SyncWidgetState);
 
         private static void OnActiveToolPresenceChanged(bool isPresent)
             => _dispatcher?.TryEnqueue(() => ApplyActiveToolPresenceChanged(isPresent));
@@ -379,6 +402,40 @@ namespace TaskbarQuota.Taskbar
             }
         }
 
+        private static void OpenActivityFlyout()
+        {
+            var widget = PrimaryWidget();
+            if (widget is null)
+            {
+                Log.Warning("Cannot open agent activity: no taskbar widget is available");
+                return;
+            }
+
+            try
+            {
+                _flyout ??= new FlyoutWindow();
+                _flyout.ShowAbove(widget.Handle);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to open agent activity from tray");
+                _flyout = null;
+            }
+        }
+
+        private static void OnActivityChanged(AgentActivitySnapshot snapshot)
+            => _dispatcher?.TryEnqueue(() =>
+            {
+                foreach (var widget in Widgets.Values.ToArray())
+                {
+                    if (!widget.IsAlive)
+                        continue;
+
+                    widget.SetActivitySnapshot(snapshot);
+                    widget.SetVisible(snapshot.Primary is not null || UsageCoordinator.Instance.WidgetDisplayProviders.Count > 0);
+                }
+            });
+
         private static void OnWidgetSettingsChanged(object? sender, EventArgs e)
         {
             _dispatcher?.TryEnqueue(SyncWidgetState);
@@ -389,10 +446,13 @@ namespace TaskbarQuota.Taskbar
             UsageCoordinator.Instance.StateChanged -= OnStateChanged;
             UsageCoordinator.Instance.ActiveProviderChanged -= OnActiveProviderChanged;
             UsageCoordinator.Instance.ActiveToolPresenceChanged -= OnActiveToolPresenceChanged;
+            AgentActivityService.Instance.Changed -= OnActivityChanged;
             WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
             _initialized = false;
             _widgetHealthTimer?.Stop();
             _widgetHealthTimer = null;
+            _activityTimer?.Stop();
+            _activityTimer = null;
             if (_trayIcon != null) { _trayIcon.TryRemove(); _trayIcon.Dispose(); _trayIcon = null; }
             try { _flyout?.Close(); } catch { }
             _flyout = null;

@@ -11,6 +11,7 @@ using Microsoft.UI.Xaml.Shapes;
 using Windows.Foundation;
 using Windows.UI;
 using TaskbarQuota.ActiveApp;
+using TaskbarQuota.AgentActivity;
 using TaskbarQuota.Services;
 using TaskbarQuota.Usage;
 using TaskbarQuota.Usage.Providers;
@@ -73,6 +74,7 @@ namespace TaskbarQuota.Controls
         private bool _forcePercentagesOnly;
         private UsageResult? _lastResult;
         private ProviderId? _lastAppliedProvider;
+        private AgentActivityStatus? _agentStatus;
         private string? _lastRenderSignature;
         private bool _hasRevealed;
         private bool _isActiveToolVisible = true;
@@ -156,7 +158,7 @@ namespace TaskbarQuota.Controls
                 row.Track.Background = track;
                 row.Value.Foreground = Foreground;
             }
-            BadgeGlyph.Fill = Foreground;
+            UpdateBadgeFill();
         }
 
         public void Apply(UsageResult result, bool force = false)
@@ -187,7 +189,7 @@ namespace TaskbarQuota.Controls
             var glyph = TaskbarQuota.ViewModels.Ui.Glyph(result.Id);
             if (glyph != null)
             {
-                SetNormalizedGlyph(BadgeGlyph, glyph, Foreground);
+                SetNormalizedGlyph(BadgeGlyph, glyph, BadgeGlyph.Fill as Brush ?? Foreground);
                 BadgeGlyphBox.Visibility = Visibility.Visible;
                 BadgeText.Visibility = Visibility.Collapsed;
             }
@@ -282,6 +284,34 @@ namespace TaskbarQuota.Controls
                     ? $"{WidgetTooltipTitle(widgetName, result.Source)}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}"
                     : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}");
         }
+
+        /// <summary>Colors the provider glyph to match its latest independently-discovered agent task.</summary>
+        public void SetAgentActivity(AgentActivityItem? activity)
+        {
+            _agentStatus = activity is not null && activity.Provider == _lastAppliedProvider
+                ? activity.Status
+                : null;
+            UpdateBadgeFill();
+        }
+
+        private void UpdateBadgeFill()
+        {
+            BadgeGlyph.Fill = _agentStatus switch
+            {
+                AgentActivityStatus.Working => StatusGradient(Color.FromArgb(255, 82, 196, 255), Color.FromArgb(255, 45, 94, 232)),
+                AgentActivityStatus.Waiting => StatusGradient(Color.FromArgb(255, 255, 202, 92), Color.FromArgb(255, 224, 141, 33)),
+                AgentActivityStatus.Completed => StatusGradient(Color.FromArgb(255, 100, 222, 130), Color.FromArgb(255, 20, 142, 73)),
+                AgentActivityStatus.Failed => StatusGradient(Color.FromArgb(255, 255, 130, 130), Color.FromArgb(255, 207, 55, 62)),
+                _ => Foreground,
+            };
+        }
+
+        private static LinearGradientBrush StatusGradient(Color start, Color end) => new()
+        {
+            StartPoint = new Point(0, 0),
+            EndPoint = new Point(1, 1),
+            GradientStops = { new GradientStop { Color = start, Offset = 0 }, new GradientStop { Color = end, Offset = 1 } },
+        };
 
         /// <summary>
         /// Badge the provider glyph with its active source (browser, host app, terminal, desktop app).

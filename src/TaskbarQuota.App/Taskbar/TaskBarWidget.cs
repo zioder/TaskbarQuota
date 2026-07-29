@@ -18,6 +18,7 @@ using TaskbarQuota.Controls;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Interop;
 using TaskbarQuota.Usage;
+using TaskbarQuota.AgentActivity;
 
 namespace TaskbarQuota.Taskbar
 {
@@ -87,6 +88,8 @@ namespace TaskbarQuota.Taskbar
         // fixed pool means the panel's children never change, so no tile is ever unloaded and re-loaded
         // (which would drop its WidgetSettingsService subscription) when the display order shifts.
         private readonly WidgetSummary[] tiles = new WidgetSummary[UsageCoordinator.MaxWidgetTiles];
+        private AgentActivitySummary? activitySummary;
+        private AgentActivitySnapshot activitySnapshot = new(Array.Empty<AgentActivityItem>());
         // separators[i] is the "|" divider between slot i and slot i+1.
         private readonly Microsoft.UI.Xaml.Controls.TextBlock[] separators =
             new Microsoft.UI.Xaml.Controls.TextBlock[UsageCoordinator.MaxWidgetTiles - 1];
@@ -342,6 +345,15 @@ namespace TaskbarQuota.Taskbar
                 VerticalAlignment = Microsoft.UI.Xaml.VerticalAlignment.Stretch,
             };
 
+            activitySummary = new AgentActivitySummary
+            {
+                Margin = new Microsoft.UI.Xaml.Thickness(8, 0, 0, 0),
+                Visibility = Microsoft.UI.Xaml.Visibility.Collapsed,
+                HorizontalAlignment = Microsoft.UI.Xaml.HorizontalAlignment.Center,
+                VerticalAlignment = Microsoft.UI.Xaml.VerticalAlignment.Stretch,
+            };
+            activitySummary.Clicked += OnTileClicked;
+
             for (int i = 0; i < tiles.Length; i++)
             {
                 if (i > 0)
@@ -353,6 +365,9 @@ namespace TaskbarQuota.Taskbar
                 tiles[i] = CreateTile();
                 panel.Children.Add(tiles[i]);
             }
+
+            // The quota is the stable anchor. The wider, changing agent step follows it on the right.
+            panel.Children.Add(activitySummary);
 
             return panel;
         }
@@ -391,6 +406,15 @@ namespace TaskbarQuota.Taskbar
         private void OnTileClicked() => Clicked?.Invoke();
 
         private void WidgetSummary_DesiredHostWidthChanged(int logicalWidth) => RecomputeLayout();
+
+        public void SetActivitySnapshot(AgentActivitySnapshot snapshot)
+        {
+            activitySnapshot = snapshot;
+            activitySummary?.Apply(snapshot);
+            foreach (var tile in tiles)
+                tile?.SetAgentActivity(activitySummary?.FollowedItem ?? snapshot.Primary);
+            RecomputeLayout(forceReposition: true);
+        }
 
         /// <summary>
         /// Binds the tile slots to <paramref name="providers"/> in order (leftmost first) and re-lays out.
@@ -496,6 +520,12 @@ namespace TaskbarQuota.Taskbar
             isRecomputingLayout = true;
             try
             {
+                bool showActivity = activitySnapshot.Primary is not null;
+                if (activitySummary is not null)
+                    activitySummary.Visibility = showActivity
+                        ? Microsoft.UI.Xaml.Visibility.Visible
+                        : Microsoft.UI.Xaml.Visibility.Collapsed;
+
                 Array.Clear(tileSuppressed);
 
                 // Slot and width buffers are fields, not locals: at most three tiles, and this pass runs on
@@ -507,13 +537,14 @@ namespace TaskbarQuota.Taskbar
                         layoutSlots[count++] = i;
                 }
 
-                count = HoldBackTilesThatDoNotFit(layoutSlots, count);
+                int activityWidth = showActivity ? AgentActivitySummary.DesiredLogicalWidth + 8 : 0;
+                count = HoldBackTilesThatDoNotFit(layoutSlots, count, activityWidth);
 
                 // Widths are measured, never rendered — MeasureDesiredWidth is a pure calculation.
                 // Rendering to measure made the tile restart its refresh animation on every usage publish,
                 // which read as a tile flashing about once a second.
                 var brush = TaskbarForegroundBrush();
-                int total = 0;
+                int total = activityWidth;
                 for (int n = 0; n < count; n++)
                 {
                     int i = layoutSlots[n];
@@ -615,7 +646,7 @@ namespace TaskbarQuota.Taskbar
         /// straight back when you switch away, so a pin still guarantees presence the rest of the time.
         /// </summary>
         /// <param name="slots">Occupied slot indices; compacted in place. Returns how many survive.</param>
-        private int HoldBackTilesThatDoNotFit(int[] slots, int count)
+        private int HoldBackTilesThatDoNotFit(int[] slots, int count, int reservedWidth)
         {
             if (count <= 1)
                 return count;
@@ -626,7 +657,7 @@ namespace TaskbarQuota.Taskbar
             // a linear scan rather than an ordered projection: at most three tiles, and this runs on every
             // usage publish, so the LINQ pipeline it replaces was allocating a dictionary, a lambda closure
             // and two lists per pass to sort three items.
-            while (count > 1 && MeasureRow(slots, count) > availableLogicalWidth)
+            while (count > 1 && reservedWidth + MeasureRow(slots, count) > availableLogicalWidth)
             {
                 int worstAt = -1;
                 int worstRecency = int.MinValue;
@@ -2063,6 +2094,9 @@ namespace TaskbarQuota.Taskbar
             host = null;
             hostContent = null;
             summaryPanel = null;
+            if (activitySummary is not null)
+                activitySummary.Clicked -= OnTileClicked;
+            activitySummary = null;
             pendingProviders = null;
             pendingActiveProvider = null;
             Array.Clear(tiles);

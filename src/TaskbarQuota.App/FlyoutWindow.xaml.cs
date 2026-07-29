@@ -14,6 +14,7 @@ using Microsoft.UI.Xaml.Media.Animation;
 using Windows.Foundation;
 using Windows.Graphics;
 using TaskbarQuota.Controls;
+using TaskbarQuota.AgentActivity;
 using TaskbarQuota.Interop;
 using TaskbarQuota.Services;
 using TaskbarQuota.Usage;
@@ -55,6 +56,7 @@ namespace TaskbarQuota
             _dashboardViewModel.DetailContentHeightChanged += DashboardDetailContentHeightChanged;
             ProviderStrip.Loaded += (_, _) => RebuildProviderStrip();
             WidgetSettingsService.Changed += OnWidgetSettingsChanged;
+            AgentActivityService.Instance.Changed += OnActivityChanged;
 
             SystemBackdrop = new DesktopAcrylicBackdrop();
             ThemeService.Register(Root);
@@ -86,6 +88,7 @@ namespace TaskbarQuota
             Closed -= OnClosed;
             Activated -= OnActivated;
             WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
+            AgentActivityService.Instance.Changed -= OnActivityChanged;
             _dashboardViewModel.Cards.CollectionChanged -= DashboardCards_CollectionChanged;
             _dashboardViewModel.SelectedCardChanged -= DashboardSelectedCardChanged;
             _dashboardViewModel.DetailContentWidthChanged -= DashboardDetailContentWidthChanged;
@@ -146,6 +149,7 @@ namespace TaskbarQuota
         {
             _widgetHandle = widgetHandle;
             EnsureDashboardLoaded();
+            RenderActivity(AgentActivityService.Instance.Snapshot);
 
             // Sync the strip selection to the provider the taskbar widget is currently showing,
             // so opening the tray highlights/details that provider rather than a stale selection.
@@ -159,6 +163,66 @@ namespace TaskbarQuota
             ScheduleFlyoutBoundsUpdate();
 
             _ = UpdateAvailabilityService.Instance.CheckSilentlyAsync();
+        }
+
+        private void OnActivityChanged(AgentActivitySnapshot snapshot)
+            => DispatcherQueue.TryEnqueue(() => RenderActivity(snapshot));
+
+        private void RenderActivity(AgentActivitySnapshot snapshot)
+        {
+            ActivityList.Children.Clear();
+            ActivityCountText.Text = snapshot.Items.Count == 0 ? "" : snapshot.Items.Count.ToString();
+            foreach (var item in snapshot.Items)
+            {
+                var card = new Border
+                {
+                    Padding = new Thickness(12, 8, 12, 8),
+                    CornerRadius = new CornerRadius(8),
+                    Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
+                    BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
+                    BorderThickness = new Thickness(1),
+                };
+                var row = new Grid { ColumnSpacing = 10 };
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                var dot = new Border
+                {
+                    Width = 8,
+                    Height = 8,
+                    CornerRadius = new CornerRadius(4),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Background = new SolidColorBrush(item.Status switch
+                    {
+                        AgentActivityStatus.Failed => Colors.Red,
+                        AgentActivityStatus.Waiting => Colors.Orange,
+                        _ => Colors.Green,
+                    }),
+                };
+                Grid.SetColumn(dot, 0);
+                row.Children.Add(dot);
+                var text = new StackPanel { Spacing = 2 };
+                text.Children.Add(new TextBlock { Text = item.Title, Style = (Style)Application.Current.Resources["BodyStrongTextBlockStyle"] });
+                var metadata = string.IsNullOrWhiteSpace(item.Model)
+                    ? $"{item.Provider} · {item.StatusText}"
+                    : $"{item.Provider} · {item.Model} · {item.StatusText}";
+                text.Children.Add(new TextBlock { Text = metadata, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
+                text.Children.Add(new TextBlock { Text = item.Step, TextTrimming = TextTrimming.CharacterEllipsis, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
+                if (item.SubagentCount > 0)
+                    text.Children.Add(new TextBlock { Text = $"▸ {item.SubagentCount} subagents", Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
+                Grid.SetColumn(text, 1);
+                row.Children.Add(text);
+                card.Child = row;
+                ActivityList.Children.Add(card);
+            }
+            ActivityPanel.Visibility = snapshot.Items.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            ContentFrame.Visibility = snapshot.Items.Count > 0 ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        private void ActivityButton_Click(object sender, RoutedEventArgs e)
+        {
+            var showActivity = ActivityPanel.Visibility != Visibility.Visible;
+            ActivityPanel.Visibility = showActivity ? Visibility.Visible : Visibility.Collapsed;
+            ContentFrame.Visibility = showActivity ? Visibility.Collapsed : Visibility.Visible;
         }
 
         private void RegisterWindowSizeHooks()
