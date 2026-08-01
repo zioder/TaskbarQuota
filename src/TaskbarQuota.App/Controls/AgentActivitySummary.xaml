@@ -5,6 +5,9 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:TaskbarQuota.Controls">
     <Grid x:Name="Root" Width="400" Padding="8,3" Background="Transparent" ColumnSpacing="8">
+        <Grid.RenderTransform>
+            <CompositeTransform x:Name="RootTransform" />
+        </Grid.RenderTransform>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="Auto"/>
             <ColumnDefinition Width="*"/>
