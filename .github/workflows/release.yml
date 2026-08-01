@@ -80,6 +80,7 @@ jobs:
           )
 
           $hashes = @()
+          $msixArtifacts = @()
 
           foreach ($target in $targets) {
             Write-Host "=== Publishing $($target.Arch) ==="
@@ -147,6 +148,39 @@ jobs:
             $sizeMb = [math]::Round($built.Length / 1MB, 0)
             $hashes += [pscustomobject]@{ Name = $setupName; Sha256 = $hash; SizeMb = $sizeMb }
             Write-Host "$setupName — $sizeMb MB — sha256:$hash"
+
+            Write-Host "=== Packaging MSIX $($target.Arch) ==="
+            $storeProfile = if ($target.Platform -eq 'x64') { 'store-x64' } else { 'store-arm64' }
+            $msixOutputDir = Join-Path $outputDir "msix-$($target.Arch)"
+            New-Item -ItemType Directory -Force -Path $msixOutputDir | Out-Null
+
+            dotnet publish $env:PROJECT `
+              -c Release `
+              -p:Platform=$($target.Platform) `
+              -p:PublishProfile=$storeProfile `
+              -p:Version=$semver `
+              -p:AssemblyVersion=$assemblyVersion `
+              -p:FileVersion=$assemblyVersion `
+              -p:ApplicationDisplayVersion=$semver `
+              -p:ApplicationVersion=$applicationVersion `
+              -p:AppxPackageDir="$msixOutputDir\" `
+              -r $($target.Rid) `
+              --self-contained true
+
+            $msix = Get-ChildItem -LiteralPath $msixOutputDir -Recurse -Filter '*.msix' -File |
+              Where-Object { $_.Name -notmatch 'Dependencies' } |
+              Select-Object -First 1
+            if (-not $msix) {
+              throw "Expected an MSIX package for $($target.Arch) under $msixOutputDir."
+            }
+
+            $msixName = "TaskbarQuota-$semver-$($target.Arch).msix"
+            $msixPath = Join-Path $outputDir $msixName
+            Copy-Item -LiteralPath $msix.FullName -Destination $msixPath -Force
+            $msixHash = (Get-FileHash -LiteralPath $msixPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $msixSizeMb = [math]::Round((Get-Item -LiteralPath $msixPath).Length / 1MB, 0)
+            $msixArtifacts += [pscustomobject]@{ Name = $msixName; Sha256 = $msixHash; SizeMb = $msixSizeMb }
+            Write-Host "$msixName — $msixSizeMb MB — sha256:$msixHash"
           }
 
           $body = @(
@@ -156,6 +190,18 @@ jobs:
             ''
           )
           foreach ($item in $hashes) {
+            $body += "**$($item.Name)**"
+            $body += "sha256:$($item.Sha256)"
+            $body += "$($item.SizeMb) MB"
+            $body += ''
+          }
+          $body += @(
+            '### MSIX packages',
+            '',
+            'Unsigned MSIX packages are included for direct/manual installation. Windows may require Developer Mode or a trusted signing certificate.',
+            ''
+          )
+          foreach ($item in $msixArtifacts) {
             $body += "**$($item.Name)**"
             $body += "sha256:$($item.Sha256)"
             $body += "$($item.SizeMb) MB"
@@ -181,13 +227,17 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: taskbarquota-${{ steps.version.outputs.semver }}
-          path: artifacts/TaskbarQuotaSetup-*.exe
+          path: |
+            artifacts/TaskbarQuotaSetup-*.exe
+            artifacts/TaskbarQuota-*.msix
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           name: TaskbarQuota ${{ steps.version.outputs.semver }}
-          files: artifacts/TaskbarQuotaSetup-*.exe
+          files: |
+            artifacts/TaskbarQuotaSetup-*.exe
+            artifacts/TaskbarQuota-*.msix
           generate_release_notes: false
           body_path: artifacts/RELEASE_BODY.md
