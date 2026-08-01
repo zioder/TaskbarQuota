@@ -62,6 +62,16 @@
                 </ComboBox>
             </tk:SettingsCard>
 
+            <tk:SettingsCard Header="Hide widget when no AI app is focused"
+                             Description="Fade the active provider's tile out when you switch to a browser or any other app, and bring it back when you return. Pinned providers always stay on the taskbar.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE890;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <ToggleSwitch x:Name="HideWhenUnfocusedToggle"
+                              AutomationProperties.Name="Hide widget when no AI app is focused"
+                              Toggled="OnHideWhenUnfocusedToggled"/>
+            </tk:SettingsCard>
+
             <TextBlock Text="Providers" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,2"/>
             <tk:SettingsCard Header="Hide unavailable providers"
                              Description="Automatically hide providers that are not installed or signed in. You can still add them from the dashboard or below.">

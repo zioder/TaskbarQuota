@@ -7,6 +7,7 @@ using TaskbarQuota.Usage.Providers;
 
 namespace TaskbarQuota.Tests;
 
+[Collection(WidgetRowSettingsCollection.Name)]
 public class ZaiProviderTests
 {
     [Fact]

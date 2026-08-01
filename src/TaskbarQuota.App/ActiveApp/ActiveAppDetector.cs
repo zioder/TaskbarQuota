@@ -361,6 +361,76 @@ namespace TaskbarQuota.ActiveApp
                 return DetectCore();
         }
 
+        /// <summary>
+        /// Fast foreground check for the WinEvent hook path: resolves the provider without any UIA scan
+        /// or WMI query so it completes in under a millisecond even when a browser like Zen is focused.
+        /// <list type="bullet">
+        ///   <item>Known GUI provider process (Cursor, Claude, Codex …) → resolved instantly by name.</item>
+        ///   <item>Synara / T3 Code host → resolved instantly by name, no localStorage read.</item>
+        ///   <item>Browser → uses the <em>already-cached</em> tab URL if it is still within its TTL; does
+        ///         NOT issue a new UI-Automation scan (that is the slow part).</item>
+        ///   <item>Terminal or anything else → returns <see langword="null"/> immediately; the 500 ms tick
+        ///         will sort it out with a full Detect() call.</item>
+        /// </list>
+        /// This is intentionally less accurate than <see cref="Detect"/>: a false-negative (returning null
+        /// when a terminal has a provider CLI) is fine here because the grace timer still runs and the tick
+        /// will correct any wrong hide within 500 ms. A false-positive is impossible — we only return a
+        /// provider when we are certain.
+        /// </summary>
+        public ProviderId? DetectForegroundFast()
+        {
+            var hwnd = GetForegroundWindow();
+            if (hwnd == IntPtr.Zero) return null;
+
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            if (pid == 0) return null;
+
+            var foregroundPid = (int)pid;
+            string? procName;
+            lock (_detectGate)
+            {
+                // Reuse the last-known name for the same pid — avoids an OpenProcess call on every hook fire.
+                procName = foregroundPid == _lastForegroundPid ? _lastForegroundProcessName : null;
+            }
+            procName ??= TryGetProcessName(foregroundPid);
+
+            if (procName == null) return null;
+
+            // Synara / T3 Code host: resolve by process name only (no LevelDB read).
+            if (SynaraStateReader.ResolveHost(procName) is not null)
+                return _lastForegroundResult; // treat it as "provider present"; tick has the accurate value
+
+            // Known GUI provider process (Cursor, Claude, Codex, OpenCode …).
+            if (TryResolveGuiProcess(procName) is { } gui)
+                return gui;
+
+            // Browser: use the cached URL only — never issue a new UIA address-bar scan here.
+            if (BrowserActiveTabDetector.IsBrowserProcessName(procName))
+                return _browserTabs.DetectCachedProvider(hwnd, procName);
+                // A cold cache correctly starts the grace timer — the tick will re-read and potentially
+                // cancel it. The hook path never touches UI Automation or the detector's mutable state.
+
+            // Terminal or anything else: unknown without a WMI scan. Return null and let the tick decide.
+            return null;
+        }
+
+
+        /// <summary>
+        /// True when TaskbarQuota itself owns the foreground window (its main window, or the flyout the
+        /// user just opened from the widget). Focus-follows-provider hiding must treat this as "no change"
+        /// rather than as leaving the AI app, or interacting with our own UI would hide the widget under
+        /// the pointer.
+        /// </summary>
+        public static bool IsOwnProcessForeground()
+        {
+            var hwnd = GetForegroundWindow();
+            if (hwnd == IntPtr.Zero)
+                return false;
+
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            return pid != 0 && (int)pid == Environment.ProcessId;
+        }
+
         private ProviderId? DetectCore()
         {
             var hwnd = GetForegroundWindow();
