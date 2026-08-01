@@ -93,17 +93,18 @@ namespace TaskbarQuota
         public ProviderSource ActiveProviderSource => _activeProviderSource;
 
         /// <summary>
-        /// The provider the taskbar widget should display: the active provider when its widget is enabled,
-        /// otherwise the first enabled-and-available provider (most recently active first, then enum order).
-        /// Null when no provider qualifies, in which case the widget hides instead of falling back to a
-        /// hidden default. Fixes the "widget disappears when Codex is disabled / only Cursor enabled" bug
-        /// (the old code hard-coded <see cref="ProviderId.Codex"/> as the fallback). See issue #7.
+        /// The provider the taskbar widget should display when an active provider is known. A missing active
+        /// provider returns null; the widget must not invent one from the installed-provider enum order.
+        /// Pinned providers are handled separately by <see cref="WidgetDisplayProviders"/>.
         /// </summary>
         public ProviderId? WidgetDisplayProvider
         {
             get
             {
-                if (_lastActive is { } active && WidgetSettingsService.IsProviderVisible(active))
+                if (_lastActive is not { } active)
+                    return null;
+
+                if (WidgetSettingsService.IsProviderVisible(active))
                     return active;
                 foreach (var p in RecentProviders)
                     if (WidgetSettingsService.IsProviderVisible(p) && IsProviderAvailable(p))
@@ -128,8 +129,8 @@ namespace TaskbarQuota
         /// So with Claude pinned + Z.AI pinned and Codex active you get "Codex | Claude | Z.AI", and
         /// focusing Claude re-orders to "Claude | Z.AI" + whatever else is pinned — the active provider
         /// keeps the leading slot while the pinned tiles stay put behind it (issue #25).
-        /// With nothing pinned this returns exactly <see cref="WidgetDisplayProvider"/>, so the existing
-        /// single-tile behavior is unchanged.
+        /// With no active provider this returns only pinned providers; with neither an active nor pinned
+        /// provider it is empty, so the taskbar stays clear until detection selects a provider.
         /// </summary>
         public IReadOnlyList<ProviderId> WidgetDisplayProviders
             => ComputeWidgetDisplayProviders(
@@ -139,8 +140,7 @@ namespace TaskbarQuota
                 Enum.GetValues<ProviderId>(),
                 WidgetSettingsService.IsProviderPinned,
                 WidgetSettingsService.IsProviderVisible,
-                IsProviderAvailable,
-                WidgetDisplayProvider);
+                IsProviderAvailable);
 
         /// <summary>Pure, testable core of <see cref="WidgetDisplayProviders"/>.</summary>
         internal static IReadOnlyList<ProviderId> ComputeWidgetDisplayProviders(
@@ -150,8 +150,7 @@ namespace TaskbarQuota
             IReadOnlyList<ProviderId> ordered,
             Func<ProviderId, bool> isPinned,
             Func<ProviderId, bool> isVisible,
-            Func<ProviderId, bool> isAvailable,
-            ProviderId? fallback)
+            Func<ProviderId, bool> isAvailable)
         {
             var result = new List<ProviderId>();
 
@@ -169,11 +168,6 @@ namespace TaskbarQuota
                 .OrderBy(p => recentIndex.TryGetValue(p, out int index) ? index : int.MaxValue)
                 .ToList();
             result.AddRange(pinned);
-
-            // Nothing active and nothing pinned: keep today's single-tile fallback so users with no pins
-            // still see the last-used / first-enabled provider.
-            if (result.Count == 0 && present && fallback is { } fb)
-                result.Add(fb);
 
             if (result.Count > MaxWidgetTiles)
                 result.RemoveRange(MaxWidgetTiles, result.Count - MaxWidgetTiles);
