@@ -25,7 +25,8 @@ public sealed record AgentActivityItem(
     string? Detail = null,
     string? Model = null,
     string? ThreadId = null,
-    string? ParentThreadId = null)
+    string? ParentThreadId = null,
+    string? Host = null)
 {
     public bool IsLive => Status is AgentActivityStatus.Working or AgentActivityStatus.Waiting;
     public string StatusText => Status switch

@@ -30,6 +30,18 @@
             </Grid.RowDefinitions>
             <StackPanel Orientation="Horizontal" Spacing="8">
                 <TextBlock Text="Agent activity" Style="{StaticResource SubtitleTextBlockStyle}"/>
+                <controls:ProviderAvatar x:Name="ActivityProviderAvatar"
+                                         Width="20"
+                                         Height="20"
+                                         VerticalAlignment="Center"
+                                         ForegroundBrush="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                         Visibility="Collapsed"
+                                         AutomationProperties.Name="Activity provider"/>
+                <TextBlock x:Name="ActivityProviderText"
+                           VerticalAlignment="Center"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Visibility="Collapsed"/>
                 <TextBlock x:Name="ActivityCountText" VerticalAlignment="Center"
                            Style="{StaticResource CaptionTextBlockStyle}"/>
             </StackPanel>

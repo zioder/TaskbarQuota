@@ -410,7 +410,7 @@ namespace TaskbarQuota.Taskbar
         public void SetActivitySnapshot(AgentActivitySnapshot snapshot)
         {
             activitySnapshot = snapshot;
-            activitySummary?.Apply(snapshot);
+            activitySummary?.Apply(snapshot, activeTileProvider);
             foreach (var tile in tiles)
                 tile?.SetAgentActivity(activitySummary?.FollowedItem ?? snapshot.Primary);
             RecomputeLayout(forceReposition: true);
@@ -434,6 +434,7 @@ namespace TaskbarQuota.Taskbar
             }
 
             activeTileProvider = activeProvider;
+            activitySummary?.Apply(activitySnapshot, activeTileProvider);
 
             bool changed = false;
             for (int i = 0; i < tiles.Length; i++)

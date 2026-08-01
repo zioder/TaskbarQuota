@@ -21,11 +21,11 @@ namespace TaskbarQuota
         public const int MinLogicalWidth = BaseLogicalWidth;
 
         /// <summary>
-        /// Chrome beyond the provider icons, so the strip + settings button fit without clipping the
-        /// gear: bottom-chrome margins (12+12) + strip border &amp; padding (1+4+4+1) + strip/settings
-        /// gap (8) + settings border &amp; button (1+48+1) = 92, plus a few px of slack for rounding.
+        /// Chrome beyond the provider icons, so the strip + activity + settings buttons fit without
+        /// clipping the settings gear: bottom-chrome margins (12+12) + strip border &amp; padding
+        /// (1+4+4+1) + two gaps (8+8) + two utility buttons (1+48+1 each) = 150.
         /// </summary>
-        public const int StripChromeLogicalWidth = 100;
+        public const int StripChromeLogicalWidth = 150;
 
         /// <summary>Extra width reserved for the dashboard detail card inside the frame.</summary>
         public const int DetailContentPadding = 40;

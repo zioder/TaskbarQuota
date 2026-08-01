@@ -119,7 +119,8 @@ internal sealed class AgentActivityScanner
                 Detail: null,
                 Model: info.Model,
                 ThreadId: threadId,
-                ParentThreadId: session.ParentThreadId ?? info.ParentThreadId);
+                ParentThreadId: session.ParentThreadId ?? info.ParentThreadId,
+                Host: session.Host);
             return true;
         }
         catch (IOException) { return false; }
@@ -141,9 +142,18 @@ internal sealed class AgentActivityScanner
             if (!root.TryGetProperty("type", out var type) || type.GetString() != "session_meta"
                 || !root.TryGetProperty("payload", out var payload) || payload.ValueKind != JsonValueKind.Object)
                 return default;
+            var originator = payload.TryGetProperty("originator", out var originatorNode)
+                ? originatorNode.GetString()
+                : null;
+            var host = originator?.Equals("t3code_desktop", StringComparison.OrdinalIgnoreCase) == true
+                ? "T3 Code"
+                : originator?.Contains("synara", StringComparison.OrdinalIgnoreCase) == true
+                    ? "Synara"
+                    : null;
             return new SessionMetadata(
                 payload.TryGetProperty("id", out var id) ? id.GetString() : null,
-                payload.TryGetProperty("parent_thread_id", out var parent) ? parent.GetString() : null);
+                payload.TryGetProperty("parent_thread_id", out var parent) ? parent.GetString() : null,
+                host);
         }
         catch (IOException) { return default; }
         catch (UnauthorizedAccessException) { return default; }
@@ -406,5 +416,5 @@ internal sealed class AgentActivityScanner
 
     private sealed record TailInfo(string Step, string Summary, string Model, string ThreadId,
         string ParentThreadId, DateTimeOffset? StartedAt, DateTimeOffset? LastActivity, TranscriptState State);
-    private readonly record struct SessionMetadata(string? ThreadId, string? ParentThreadId);
+    private readonly record struct SessionMetadata(string? ThreadId, string? ParentThreadId, string? Host);
 }
