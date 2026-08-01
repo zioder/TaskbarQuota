@@ -12,15 +12,18 @@ public class WidgetSummaryRevealTests
 {
     [Fact]
     public void RevealsOutrightWhenTheFirstRenderSkipsTheTransition()
-        => Assert.True(WidgetSummary.ShouldRevealWithoutTransition(isFirstReveal: true, isActiveToolVisible: true));
+        => Assert.True(WidgetSummary.ShouldRevealWithoutTransition(isFirstReveal: true));
 
+    // Slot seeding happens before the layout pass marks the new tile active. The first render must establish
+    // a visible resting value regardless; the synchronous layout pass remains responsible for collapsing a
+    // tile that ultimately does not fit.
     [Fact]
-    public void StaysHiddenWhenTheTileIsNotMeantToShow()
-        => Assert.False(WidgetSummary.ShouldRevealWithoutTransition(isFirstReveal: true, isActiveToolVisible: false));
+    public void FirstSuppressedRenderDoesNotDependOnPreLayoutVisibilityState()
+        => Assert.True(WidgetSummary.ShouldRevealWithoutTransition(isFirstReveal: true));
 
     // Later renders are cross-fades over an already visible tile; forcing the root back to 1 there would
     // undo a hide that SetActiveToolVisible had just animated.
     [Fact]
     public void LeavesLaterRendersAlone()
-        => Assert.False(WidgetSummary.ShouldRevealWithoutTransition(isFirstReveal: false, isActiveToolVisible: true));
+        => Assert.False(WidgetSummary.ShouldRevealWithoutTransition(isFirstReveal: false));
 }

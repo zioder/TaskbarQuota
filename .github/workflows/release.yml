@@ -104,29 +104,16 @@ jobs:
               throw "Publish output not found for $($target.Arch)."
             }
 
-            $priPath = Join-Path $publishDirRel 'TaskbarQuota.pri'
-            if (-not (Test-Path $priPath)) {
-              throw "Publish output is missing TaskbarQuota.pri (WinUI XAML resources). Installer would crash on launch."
+            $priPath = @('TaskbarQuota.pri', 'resources.pri') |
+              ForEach-Object { Join-Path $publishDirRel $_ } |
+              Where-Object { Test-Path $_ } |
+              Select-Object -First 1
+            if (-not $priPath) {
+              throw "Publish output is missing the WinUI PRI resource file. Installer would crash on launch."
             }
 
             $publishDir = (Resolve-Path -LiteralPath $publishDirRel).Path
-            $binDir = (Resolve-Path -LiteralPath "src/TaskbarQuota.App/bin/$($target.Platform)/Release/net10.0-windows10.0.19041.0/$($target.Rid)").Path
-
-            # dotnet publish often omits loose .xbf even with DisableEmbeddedXbf; copy from build output.
-            $xbfFiles = Get-ChildItem -Path $binDir -Filter '*.xbf' -Recurse -File
-            if ($xbfFiles.Count -eq 0) {
-              throw "No .xbf files in $binDir — WinUI markup did not compile."
-            }
-
-            foreach ($xbf in $xbfFiles) {
-              $relative = $xbf.FullName.Substring($binDir.Length).TrimStart('\', '/')
-              $dest = Join-Path $publishDir $relative
-              $destDir = Split-Path $dest -Parent
-              if ($destDir -and -not (Test-Path $destDir)) {
-                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-              }
-              Copy-Item -LiteralPath $xbf.FullName -Destination $dest -Force
-            }
+            # The project copies loose .xbf files into the publish directory after publishing.
 
             $requiredXbf = @(
               'MainWindow.xbf',
@@ -140,7 +127,7 @@ jobs:
               }
             }
 
-            Write-Host "Copied $($xbfFiles.Count) .xbf file(s) into publish directory."
+            Write-Host "Verified loose XBF files in publish directory."
             $outputDir = (Resolve-Path -LiteralPath artifacts).Path
 
             Write-Host "Publish directory: $publishDir"
@@ -160,6 +147,7 @@ jobs:
             $sizeMb = [math]::Round($built.Length / 1MB, 0)
             $hashes += [pscustomobject]@{ Name = $setupName; Sha256 = $hash; SizeMb = $sizeMb }
             Write-Host "$setupName — $sizeMb MB — sha256:$hash"
+
           }
 
           $body = @(
@@ -194,13 +182,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: taskbarquota-${{ steps.version.outputs.semver }}
-          path: artifacts/TaskbarQuotaSetup-*.exe
+          path: |
+            artifacts/TaskbarQuotaSetup-*.exe
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           name: TaskbarQuota ${{ steps.version.outputs.semver }}
-          files: artifacts/TaskbarQuotaSetup-*.exe
+          files: |
+            artifacts/TaskbarQuotaSetup-*.exe
           generate_release_notes: false
           body_path: artifacts/RELEASE_BODY.md

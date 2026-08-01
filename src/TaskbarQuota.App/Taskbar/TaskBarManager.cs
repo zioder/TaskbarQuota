@@ -30,6 +30,9 @@ namespace TaskbarQuota.Taskbar
         private static bool _initialized;
         private static bool _isReconcilingWidgets;
         private static ProviderId? _lastLoggedWidgetApplyProvider;
+        // Foreground hook: fires the instant Windows switches windows so the focus-follows-provider
+        // widget reacts on the switch itself instead of waiting for the next 500 ms detect tick.
+        private static ActiveApp.ForegroundWatcher? _foregroundWatcher;
 
         public static void Initialize(DispatcherQueue dispatcher, Action showMainWindow)
         {
@@ -45,8 +48,19 @@ namespace TaskbarQuota.Taskbar
                 UsageCoordinator.Instance.ActiveProviderChanged += OnActiveProviderChanged;
                 UsageCoordinator.Instance.ActiveToolPresenceChanged += OnActiveToolPresenceChanged;
                 AgentActivityService.Instance.Changed += OnActivityChanged;
+                UsageCoordinator.Instance.ProviderForegroundChanged += OnProviderForegroundChanged;
+                // Lets the coordinator's focus tracker treat our flyout and an active widget drag as neutral
+                // instead of as the user having left the provider app. Otherwise the opt-in hide-on-unfocus
+                // path can hide the widget during the drag and restore its old position.
+                UsageCoordinator.Instance.IsOwnUiEngaged = () =>
+                    _flyout?.IsShown == true || TaskBarWidget.IsAnyUserRepositioning;
                 WidgetSettingsService.Changed += OnWidgetSettingsChanged;
                 App.Quitting += OnQuitting;
+                // Installed from the UI thread on purpose: WINEVENT_OUTOFCONTEXT callbacks arrive through
+                // that thread's message pump, which this one has and background threads do not.
+                _foregroundWatcher = new ActiveApp.ForegroundWatcher();
+                _foregroundWatcher.ForegroundChanged += OnForegroundChanged;
+                _foregroundWatcher.Start();
                 _initialized = true;
             }
 
@@ -239,13 +253,19 @@ namespace TaskbarQuota.Taskbar
             var providers = coordinator.WidgetDisplayProviders;
             var activity = AgentActivityService.Instance.Snapshot;
 
-            // No provider to show -> hide the native host instead of leaving a transparent taskbar child
-            // window over the notification area (#10).
-            widget.SetVisible(providers.Count > 0 || activity.Primary is not null);
             widget.SetActivitySnapshot(activity);
-            widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
+            // window over the notification area (#10). The tiles are deliberately left bound while it
+            // hides: unbinding collapses them in the same frame, which wiped out the fade and made the
+            // widget look like it had blinked out of existence. SetVisible re-binds nothing on the way
+            // back in either — the set below runs first on show.
             if (providers.Count == 0)
+            {
+                widget.SetVisible(activity.Primary is not null);
                 return;
+            }
+
+            widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
+            widget.SetVisible(true);
 
             bool needsFetch = false;
             foreach (var provider in providers)
@@ -273,10 +293,13 @@ namespace TaskbarQuota.Taskbar
         /// </summary>
         private static UsageResult? HydrateResult(UsageCoordinator coordinator, ProviderId provider)
         {
-            if (coordinator.LastState is { } last && last.Id == provider)
-                return last;
             if (coordinator.Service.TryGetCached(provider, out var cached))
                 return cached;
+            // A failed refresh is cached deliberately. Prefer that current failure over LastState,
+            // which may still contain the previous successful snapshot and would resurrect stale quota
+            // values when the widget is recreated (especially after cookie/auth failures).
+            if (coordinator.LastState is { } last && last.Id == provider)
+                return last;
             if (coordinator.Service.TryGetLastSuccessfulLiveResult(provider, out var lastSuccess))
                 return lastSuccess;
             if (coordinator.Service.Get(provider) is { } usageProvider)
@@ -350,9 +373,17 @@ namespace TaskbarQuota.Taskbar
 
                 // Reconcile the tile set first, so a provider that just became active already owns a slot
                 // before its result is routed. SetDisplayProviders is a cheap no-op when nothing changed.
-                widget.SetVisible(providers.Count > 0 || activity.Primary is not null);
                 widget.SetActivitySnapshot(activity);
+                // As in SyncWidgetState, an empty set only hides — rebinding the slots here would collapse
+                // the tiles mid-fade.
+                if (providers.Count == 0)
+                {
+                    widget.SetVisible(activity.Primary is not null);
+                    continue;
+                }
+
                 widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
+                widget.SetVisible(true);
                 if (!isDisplayed)
                     continue;
 
@@ -388,8 +419,21 @@ namespace TaskbarQuota.Taskbar
         private static void OnActiveProviderChanged(ProviderId? _)
             => _dispatcher?.TryEnqueue(SyncWidgetState);
 
+        /// <summary>
+        /// Fired from the WinEvent hook the instant the foreground window changes. Relays to the
+        /// coordinator so it can re-detect whether a provider is in front without waiting for the
+        /// next 500 ms tick — this is what makes "switch away" hide the widget right away.
+        /// </summary>
+        private static void OnForegroundChanged()
+            => UsageCoordinator.Instance.NotifyForegroundChanged();
+
         private static void OnActiveToolPresenceChanged(bool isPresent)
             => _dispatcher?.TryEnqueue(() => ApplyActiveToolPresenceChanged(isPresent));
+
+        // Focus-follows-provider flip (opt-in setting): the tile set changes even though presence and the
+        // active provider did not, so the widget has to be re-synced from the recomputed set.
+        private static void OnProviderForegroundChanged(bool _)
+            => _dispatcher?.TryEnqueue(SyncWidgetState);
 
         private static void ApplyActiveToolPresenceChanged(bool isPresent)
         {
@@ -447,12 +491,20 @@ namespace TaskbarQuota.Taskbar
             UsageCoordinator.Instance.ActiveProviderChanged -= OnActiveProviderChanged;
             UsageCoordinator.Instance.ActiveToolPresenceChanged -= OnActiveToolPresenceChanged;
             AgentActivityService.Instance.Changed -= OnActivityChanged;
+            UsageCoordinator.Instance.ProviderForegroundChanged -= OnProviderForegroundChanged;
+            UsageCoordinator.Instance.IsOwnUiEngaged = null;
             WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
             _initialized = false;
             _widgetHealthTimer?.Stop();
             _widgetHealthTimer = null;
             _activityTimer?.Stop();
             _activityTimer = null;
+            if (_foregroundWatcher is { } watcher)
+            {
+                watcher.ForegroundChanged -= OnForegroundChanged;
+                watcher.Dispose();
+                _foregroundWatcher = null;
+            }
             if (_trayIcon != null) { _trayIcon.TryRemove(); _trayIcon.Dispose(); _trayIcon = null; }
             try { _flyout?.Close(); } catch { }
             _flyout = null;

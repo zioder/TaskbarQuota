@@ -19,6 +19,7 @@ using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Interop;
 using TaskbarQuota.Usage;
 using TaskbarQuota.AgentActivity;
+using Anim = Microsoft.UI.Xaml.Media.Animation;
 
 namespace TaskbarQuota.Taskbar
 {
@@ -61,6 +62,7 @@ namespace TaskbarQuota.Taskbar
         private static readonly WndProc SharedWndProc = SharedWindowProc;
         private static bool windowClassRegistered;
         private static int windowClassUsers;
+        private static int userRepositioningCount;
 
         // Minimum horizontal recompute delta (logical px, DPI-scaled) before the resting widget is moved.
         private int RepositionDeadbandPx => (int)Math.Ceiling(2 * dpiScale);
@@ -76,6 +78,7 @@ namespace TaskbarQuota.Taskbar
         private readonly string displayKey;
         private readonly string WidgetClassName = "TaskbarQuotaWidgetWinRT";
         private readonly TaskbarStructureWatcher taskbarWatcher;
+        private readonly ClassicTaskbarSpaceReservation classicTaskbarReservation;
         private readonly string positionPath;
         private readonly CancellationTokenSource positionUpdateCancellation = new();
         private readonly SemaphoreSlim positionUpdateGate = new(1, 1);
@@ -124,6 +127,11 @@ namespace TaskbarQuota.Taskbar
         private bool loggedMissingPanel;
         private DesktopWindowXamlSource? host;
         private Microsoft.UI.Xaml.FrameworkElement? hostContent;
+        // Show/hide cross-fade state. Short on purpose: the widget lives on the taskbar, so anything
+        // slower reads as lag rather than as a transition.
+        private const int HostFadeMilliseconds = 100;
+        private Anim.Storyboard? hostFadeStoryboard;
+        private int hostFadeGeneration;
         private int WidgetHostWidth;
         private int currentOffsetX = int.MinValue;
         private int currentOffsetY = 0;
@@ -143,7 +151,12 @@ namespace TaskbarQuota.Taskbar
         // widget snaps back to a computed lane mid-drag (issue #17 case 2).
         // isSettling covers the async snap right after release: without it a watcher poll landing mid-snap
         // would recompute a resting position from the not-yet-saved offset and yank the widget away.
-        private bool IsUserRepositioning => isDragging || isPointerTracking || isDirectDrag || isSettling;
+        // Public so the coordinator can treat the widget as our own UI while the user is moving it. Without
+        // this, the focus-following option sees the drag host become foreground, hides the widget, and the
+        // hide path restores the old position in the middle of the drag.
+        public bool IsUserRepositioning => isDragging || isPointerTracking || isDirectDrag || isSettling;
+        public static bool IsAnyUserRepositioning => Volatile.Read(ref userRepositioningCount) > 0;
+        private bool userRepositioningRegistered;
         private bool isSettling;
         private int draggingInnerOffsetX;
         // Where the drag currently sits, and the free gap it is tracking the cursor inside.
@@ -213,6 +226,7 @@ namespace TaskbarQuota.Taskbar
             positionPath = target.GetPositionPath();
 
             taskbarWatcher = new TaskbarStructureWatcher(hwndShell, hwndReBar);
+            classicTaskbarReservation = new ClassicTaskbarSpaceReservation(hwndShell);
             taskbarWatcher.TaskbarChangedNotificationCompleted += (_, e) =>
             {
                 if (initialized)
@@ -306,23 +320,108 @@ namespace TaskbarQuota.Taskbar
                 && target.IsPrimary == isPrimaryTaskbar
                 && string.Equals(target.DisplayKey, displayKey, StringComparison.Ordinal);
 
+        /// <summary>
+        /// Shows or hides the widget with a short cross-fade. A native window can't be animated, so the
+        /// XAML content carries the fade and the window is only hidden once it has finished — otherwise
+        /// the "hide when no provider is focused" setting made the widget vanish in a single frame.
+        /// </summary>
         public void SetVisible(bool visible)
         {
-            if (appWindow is null || isVisible == visible)
+            if (appWindow is null)
+                return;
+
+            // The cached flag is only our requested state. During Explorer/XAML-island startup the native
+            // window can remain hidden even after an earlier Show request, so an equal cached value must not
+            // suppress recovery when AppWindow reports a different actual state.
+            if (isVisible == visible && appWindow.IsVisible == visible)
                 return;
 
             isVisible = visible;
+            // Invalidates any fade still in flight, so a show landing mid-hide cancels that hide's window
+            // teardown instead of racing it.
+            hostFadeGeneration++;
+
             if (visible)
             {
                 QueuePositionUpdate(TaskbarChangeReason.None);
+                if (hostContent is not null)
+                    hostContent.Opacity = 0;
                 appWindow.Show(false);
+                AnimateHostOpacity(1);
+                return;
             }
-            else
+
+            if (isDragging)
+                EndDragging(revert: true);
+
+            if (hostContent is null)
             {
-                if (isDragging)
-                    EndDragging(revert: true);
+                classicTaskbarReservation.Restore();
                 appWindow.Hide();
+                return;
             }
+
+            int generation = hostFadeGeneration;
+            AnimateHostOpacity(0, () =>
+            {
+                if (generation != hostFadeGeneration || destroyed || appWindow is null)
+                    return;
+
+                classicTaskbarReservation.Restore();
+                appWindow.Hide();
+                // Leave the content opaque again so the next Show has nothing to undo if it takes the
+                // no-animation path (e.g. the host was rebuilt in between).
+                if (hostContent is { } content)
+                    content.Opacity = 1;
+            });
+        }
+
+        private void AnimateHostOpacity(double to, Action? completed = null)
+        {
+            if (hostContent is not { } content)
+            {
+                completed?.Invoke();
+                return;
+            }
+
+            hostFadeStoryboard?.Stop();
+
+            double from = content.Opacity;
+
+            // When hiding (to == 0) we always run the storyboard, even if the content is already
+            // near-transparent: skipping it would call the completion immediately, which hides the
+            // window without any animation and is the "instant disappear" the user saw.
+            // When showing (to == 1) skip is fine — nothing to animate if we're already opaque.
+            bool skip = Math.Abs(from - to) < 0.01 && to > 0.5;
+            if (skip)
+            {
+                content.Opacity = to;
+                completed?.Invoke();
+                return;
+            }
+
+            // Park the local value at the destination and let the animation supply the start through From,
+            // the same rule the tile animations follow: an interrupted fade then settles visible rather
+            // than leaving the host stuck transparent.
+            content.Opacity = to;
+
+            var animation = new Anim.DoubleAnimation
+            {
+                From = from < 0.01 ? 0.15 : from, // guarantee at least a short visible flash so the fade is perceptible
+                To = to,
+                Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(HostFadeMilliseconds)),
+                EasingFunction = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut },
+            };
+            Anim.Storyboard.SetTarget(animation, content);
+            Anim.Storyboard.SetTargetProperty(animation, "Opacity");
+
+            var storyboard = new Anim.Storyboard();
+            storyboard.Children.Add(animation);
+            if (completed is not null)
+                storyboard.Completed += (_, _) => completed();
+
+            hostFadeStoryboard = storyboard;
+            storyboard.Begin();
         }
 
         public void Destroy() => appWindow?.Destroy();
@@ -906,6 +1005,11 @@ namespace TaskbarQuota.Taskbar
                 }
                 bool useDefault = offsetX == -1;
 
+                // The widget is a left-side taskbar surface by default. Do not reserve the tray-side slot:
+                // that reservation made every fresh install land on the right and also competed with the
+                // drag solver. A saved custom position remains authoritative.
+                classicTaskbarReservation.Restore();
+
                 // The Widgets/weather pill is a XAML element the child-window scan can't see, so fetch its
                 // bounds separately (UIA, with a cached fallback) and treat it as an obstacle like any other.
                 RECT? wbRect = isWidgetsEnabled ? await taskbarWatcher.GetWidgetsButtonRectAsync() : null;
@@ -925,10 +1029,6 @@ namespace TaskbarQuota.Taskbar
                     lastTaskButtonClientRects = converted;
                 }
 
-                // Every taskbar button (app icons + system buttons) is an obstacle, so the widget can never rest
-                // on top of the app cluster — same set for resting and dragging (issue #17).
-                var obstacles = CollectObstacleClientRects(taskbarScreenRect, wbClient, lastTaskButtonClientRects);
-
                 var (leftBound, rightBound) = ComputeUsableHorizontalBounds(
                     taskbarRect,
                     hasNotificationArea ? trayNotifyRect : null,
@@ -939,12 +1039,18 @@ namespace TaskbarQuota.Taskbar
                 int preferredX;
                 if (!useDefault)
                     preferredX = offsetX;
-                else if (!hasNotificationArea)
-                    preferredX = IsRtlUI ? leftBound : rightBound - WidgetHostWidth;
-                else if (isCentered)
+                else if (IsRtlUI && hasNotificationArea)
+                    preferredX = ComputeFarLeftAnchor(taskbarRect, trayNotifyRect, wbRect, taskbarScreenRect, isCentered, isWidgetsEnabled);
+                else if (IsRtlUI)
+                    preferredX = rightBound - WidgetHostWidth;
+                else if (hasNotificationArea)
                     preferredX = ComputeFarLeftAnchor(taskbarRect, trayNotifyRect, wbRect, taskbarScreenRect, isCentered, isWidgetsEnabled);
                 else
-                    preferredX = IsRtlUI ? leftBound : rightBound - WidgetHostWidth;
+                    preferredX = leftBound;
+
+                // Every taskbar button (app icons + system buttons) is an obstacle, so the widget can never rest
+                // on top of the app cluster — same set for resting and dragging (issue #17).
+                var obstacles = CollectObstacleClientRects(taskbarScreenRect, wbClient, lastTaskButtonClientRects);
 
                 // Only ever rest inside a gap that FULLY fits the widget; if none does, don't move it into an
                 // overlap — keep the last valid spot (issue #17). First run with no fit hugs the tray.
@@ -952,12 +1058,13 @@ namespace TaskbarQuota.Taskbar
                 // The widget is not one of its own obstacles, so the gap it sits in measures the full space
                 // it may occupy. That is the budget the tile-fit math trims against.
                 UpdateAvailableWidth(gaps);
+
                 int? placed = PlaceInFittingGap(preferredX, gaps, WidgetHostWidth);
                 if (placed is not { } fitX)
                 {
                     if (currentOffsetX != int.MinValue)
                         return;
-                    offsetX = Math.Max(leftBound, rightBound - WidgetHostWidth);
+                    offsetX = Math.Clamp(preferredX, leftBound, Math.Max(leftBound, rightBound - WidgetHostWidth));
                 }
                 else
                 {
@@ -1018,7 +1125,10 @@ namespace TaskbarQuota.Taskbar
         public void StartDragging()
         {
             if (isDragging || appWindow is null || hostContent is null || summaryPanel is null) return;
+            BeginUserRepositioning();
+            isDragging = true;
             SetVisible(true);
+            classicTaskbarReservation.Restore();
             SetTilesHitTestVisible(false);
             User32.GetWindowRect(hwndShell, out var taskbarRect);
             User32.SetCursorPos(
@@ -1027,7 +1137,6 @@ namespace TaskbarQuota.Taskbar
             hostContent.KeyUp += Content_KeyUp;
             hostContent.PointerPressed += Content_PointerPressed;
             hostContent.PointerReleased += Content_PointerReleased;
-            isDragging = true;
             PrimeObstacleCacheForDrag();
             if (!host!.HasFocus && hwnd != User32.GetForegroundWindow())
                 User32.SetForegroundWindow(hwnd);
@@ -1035,7 +1144,12 @@ namespace TaskbarQuota.Taskbar
 
         public void EndDragging(bool revert)
         {
-            if (!isDragging || appWindow is null || hostContent is null || summaryPanel is null) return;
+            if (!isDragging || appWindow is null || hostContent is null || summaryPanel is null)
+            {
+                if (!isDragging && !isPointerTracking && !isDirectDrag)
+                    EndUserRepositioning();
+                return;
+            }
             isDragging = false;
             hostContent.ReleasePointerCaptures();
             hostContent.KeyUp -= Content_KeyUp;
@@ -1048,6 +1162,8 @@ namespace TaskbarQuota.Taskbar
                 dragPreviewX = null;
                 activeDragGap = null;
                 appWindow.Move(new PointInt32(currentOffsetX, currentOffsetY));
+                QueuePositionUpdate(TaskbarChangeReason.None);
+                EndUserRepositioning();
                 return;
             }
             _ = SnapToValidPositionAsync(dragPreviewX ?? appWindow.Position.X);
@@ -1084,6 +1200,7 @@ namespace TaskbarQuota.Taskbar
         private void WidgetSummary_PointerPressed(object sender, PointerRoutedEventArgs e)
         {
             if (appWindow is null || sender is not WidgetSummary summary) return;
+            BeginUserRepositioning();
             isPointerTracking = true;
             isDirectDrag = false;
             PrimeObstacleCacheForDrag();
@@ -1104,6 +1221,7 @@ namespace TaskbarQuota.Taskbar
                 if (Math.Abs(point.x - pressCursorPositionX) < Math.Ceiling(4 * dpiScale))
                     return;
                 isDirectDrag = true;
+                classicTaskbarReservation.Restore();
                 SuppressTileClicks();
                 e.Handled = true;
             }
@@ -1114,8 +1232,9 @@ namespace TaskbarQuota.Taskbar
 
         private void WidgetSummary_PointerReleased(object sender, PointerRoutedEventArgs e)
         {
+            bool wasDirectDrag = isDirectDrag;
             (sender as WidgetSummary)?.ReleasePointerCaptures();
-            if (isDirectDrag && appWindow is not null)
+            if (wasDirectDrag && appWindow is not null)
             {
                 _ = SnapToValidPositionAsync(dragPreviewX ?? appWindow.Position.X);
                 SuppressTileClicks();
@@ -1123,13 +1242,37 @@ namespace TaskbarQuota.Taskbar
             }
             isPointerTracking = false;
             isDirectDrag = false;
+            if (!wasDirectDrag)
+                EndUserRepositioning();
         }
 
         private void WidgetSummary_PointerCanceled(object sender, PointerRoutedEventArgs e)
         {
+            bool wasDirectDrag = isDirectDrag;
             isPointerTracking = false;
             isDirectDrag = false;
             (sender as WidgetSummary)?.ReleasePointerCaptures();
+            if (wasDirectDrag)
+                QueuePositionUpdate(TaskbarChangeReason.None);
+            EndUserRepositioning();
+        }
+
+        private void BeginUserRepositioning()
+        {
+            if (userRepositioningRegistered)
+                return;
+
+            userRepositioningRegistered = true;
+            Interlocked.Increment(ref userRepositioningCount);
+        }
+
+        private void EndUserRepositioning()
+        {
+            if (!userRepositioningRegistered)
+                return;
+
+            userRepositioningRegistered = false;
+            Interlocked.Decrement(ref userRepositioningCount);
         }
 
         private void SetTilesHitTestVisible(bool visible)
@@ -1347,7 +1490,11 @@ namespace TaskbarQuota.Taskbar
         /// </summary>
         private async Task SnapToValidPositionAsync(int droppedX)
         {
-            if (appWindow is null) return;
+            if (appWindow is null)
+            {
+                EndUserRepositioning();
+                return;
+            }
 
             isSettling = true;
             try
@@ -1396,6 +1543,8 @@ namespace TaskbarQuota.Taskbar
             finally
             {
                 isSettling = false;
+                if (!isDragging && !isPointerTracking && !isDirectDrag)
+                    EndUserRepositioning();
             }
         }
 
@@ -1446,7 +1595,6 @@ namespace TaskbarQuota.Taskbar
                 Log.Warning(ex, "Failed to prime the taskbar obstacle cache for a drag");
             }
         }
-
 
         /// <summary>Keeps a widget of <paramref name="width"/> inside [leftBound, rightBound].</summary>
         internal static int ClampToSpan(int desiredX, int leftBound, int rightBound, int width)
@@ -1871,8 +2019,9 @@ namespace TaskbarQuota.Taskbar
                 if (!int.TryParse(File.ReadAllText(positionPath), NumberStyles.Integer, CultureInfo.InvariantCulture, out int offset))
                     return -1;
 
-                // A saved offset of 0 lands under the Start button on LTR taskbars and looks "missing".
-                return offset == 0 ? -1 : offset;
+                // Zero is a valid left-edge position. It used to be treated as the default sentinel, which
+                // made a drag released at the far-left edge snap back to the right on the next refresh.
+                return offset;
             }
             catch (Exception ex)
             {
@@ -1994,9 +2143,11 @@ namespace TaskbarQuota.Taskbar
                 return;
 
             disposedValue = true;
+            EndUserRepositioning();
             initialized = false;
             isVisible = false;
             positionUpdateCancellation.Cancel();
+            classicTaskbarReservation.Dispose();
             try { appWindow?.Hide(); } catch { }
             foreach (var tile in tiles)
             {

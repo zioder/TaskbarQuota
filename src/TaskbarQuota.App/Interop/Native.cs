@@ -36,6 +36,17 @@ namespace TaskbarQuota.Interop
         [DllImport("user32.dll")]
         public static extern IntPtr SetParent([In] IntPtr hWndChild, [In] IntPtr hWndNewParent);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetWindowPos(
+            [In] IntPtr hWnd,
+            [In, Optional] IntPtr hWndInsertAfter,
+            int x,
+            int y,
+            int cx,
+            int cy,
+            SetWindowPosFlags uFlags);
+
         [DllImport("User32.dll", CharSet = CharSet.Unicode)]
         public static extern IntPtr FindWindow([In, MarshalAs(UnmanagedType.LPWStr)] string? lpClassName, [In, MarshalAs(UnmanagedType.LPWStr)] string? lpWindowName);
 
@@ -53,6 +64,32 @@ namespace TaskbarQuota.Interop
 
         [DllImport("user32.dll")]
         public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowProc lpEnumFunc, IntPtr lParam);
+
+        public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+        public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+        public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
+
+        public delegate void WinEventProc(
+            IntPtr hWinEventHook,
+            uint eventType,
+            IntPtr hwnd,
+            int idObject,
+            int idChild,
+            uint dwEventThread,
+            uint dwmsEventTime);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr SetWinEventHook(
+            uint eventMin,
+            uint eventMax,
+            IntPtr hmodWinEventProc,
+            WinEventProc lpfnWinEventProc,
+            uint idProcess,
+            uint idThread,
+            uint dwFlags);
+
+        [DllImport("user32.dll")]
+        public static extern bool UnhookWinEvent(IntPtr hWinEventHook);
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool EnumWindows(EnumWindowProc lpEnumFunc, IntPtr lParam);
@@ -218,6 +255,13 @@ namespace TaskbarQuota.Interop
         GA_PARENT = 1,
         GA_ROOT = 2,
         GA_ROOTOWNER = 3,
+    }
+
+    [Flags]
+    public enum SetWindowPosFlags : uint
+    {
+        SWP_NOZORDER = 0x0004,
+        SWP_NOACTIVATE = 0x0010,
     }
 
     [StructLayout(LayoutKind.Sequential)]

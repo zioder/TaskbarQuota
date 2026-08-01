@@ -95,6 +95,45 @@ public class GrokProviderTests
     }
 
     [Fact]
+    public void ParseBilling_AcceptsNewWeeklyFreeTierShapeWithOmittedUsage()
+    {
+        const string json = """
+        {
+          "config": {
+            "currentPeriod": { "type": "weekly", "billingPeriodEnd": "2026-07-15T00:00:00Z" },
+            "onDemandCap": { "val": 0 },
+            "onDemandUsed": { "val": 0 },
+            "prepaidBalance": { "val": 0 },
+            "isUnifiedBillingUser": true
+          }
+        }
+        """;
+        using var doc = JsonDocument.Parse(json);
+
+        var snapshot = GrokProvider.ParseBilling(doc.RootElement);
+
+        Assert.Equal(0, snapshot.UsedPercent);
+        Assert.Equal(0, snapshot.LimitUnits);
+        Assert.True(snapshot.IsWeekly);
+        Assert.Equal(DateTimeOffset.Parse("2026-07-15T00:00:00Z"), snapshot.ResetAt);
+    }
+
+    [Fact]
+    public void ParseBilling_UsesExplicitNewTierPercentage()
+    {
+        const string json = """
+        { "config": { "currentPeriod": { "kind": "weekly", "percentUsed": 37.5 }, "onDemandCap": { "val": 100 } } }
+        """;
+        using var doc = JsonDocument.Parse(json);
+
+        var snapshot = GrokProvider.ParseBilling(doc.RootElement);
+
+        Assert.Equal(37.5, snapshot.UsedPercent);
+        Assert.Equal(100, snapshot.OnDemandCapUnits);
+        Assert.True(snapshot.IsWeekly);
+    }
+
+    [Fact]
     public void ParseBilling_ThrowsWhenShapeChanged()
     {
         using var doc = JsonDocument.Parse("""{ "config": { "used": { "val": 1 } } }""");
