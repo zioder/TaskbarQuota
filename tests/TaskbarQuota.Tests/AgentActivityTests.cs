@@ -62,6 +62,18 @@ public sealed class AgentActivityTests
         Assert.Equal(AgentActivityScanner.TranscriptState.Waiting, info.State);
     }
 
+    [Theory]
+    [InlineData("t3code_desktop", "T3 Code")]
+    [InlineData("synara", "Synara")]
+    public void ClaudeTranscript_ExtractsHost(string originator, string expectedHost)
+    {
+        var transcript = $"{{\"type\":\"user\",\"originator\":\"{originator}\",\"sessionId\":\"claude-thread\",\"timestamp\":\"2026-08-01T12:00:00Z\",\"message\":{{\"content\":\"Identify the host\"}}}}";
+
+        var info = AgentActivityScanner.ParseTranscriptForTesting(ProviderId.Claude, transcript);
+
+        Assert.Equal(expectedHost, info.Host);
+    }
+
     [Fact]
     public void CodexTranscript_ExtractsPromptAndShellAction()
     {

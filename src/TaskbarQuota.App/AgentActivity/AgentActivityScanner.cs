@@ -7,6 +7,7 @@ using System.Management;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
+using TaskbarQuota.ActiveApp;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Usage;
 
@@ -47,7 +48,7 @@ internal sealed class AgentActivityScanner
                 parsed.Add(item);
         }
 
-        return GroupSessions(parsed)
+        return ApplyActiveHostFallback(GroupSessions(parsed))
             .Where(item => item.IsLive || DateTimeOffset.Now - item.UpdatedAt < RecentWindow)
             .OrderByDescending(item => item.IsLive)
             .ThenByDescending(item => item.UpdatedAt)
@@ -133,7 +134,7 @@ internal sealed class AgentActivityScanner
                 ParentThreadId: provider == ProviderId.Claude
                     ? claude?.ParentThreadId ?? info.ParentThreadId
                     : session.ParentThreadId ?? info.ParentThreadId,
-                Host: session.Host);
+                Host: session.Host ?? info.Host);
             return true;
         }
         catch (IOException) { return false; }
@@ -155,18 +156,10 @@ internal sealed class AgentActivityScanner
             if (!root.TryGetProperty("type", out var type) || type.GetString() != "session_meta"
                 || !root.TryGetProperty("payload", out var payload) || payload.ValueKind != JsonValueKind.Object)
                 return default;
-            var originator = payload.TryGetProperty("originator", out var originatorNode)
-                ? originatorNode.GetString()
-                : null;
-            var host = originator?.Equals("t3code_desktop", StringComparison.OrdinalIgnoreCase) == true
-                ? "T3 Code"
-                : originator?.Contains("synara", StringComparison.OrdinalIgnoreCase) == true
-                    ? "Synara"
-                    : null;
             return new SessionMetadata(
                 payload.TryGetProperty("id", out var id) ? id.GetString() : null,
                 payload.TryGetProperty("parent_thread_id", out var parent) ? parent.GetString() : null,
-                host);
+                DetectHost(payload));
         }
         catch (IOException) { return default; }
         catch (UnauthorizedAccessException) { return default; }
@@ -175,7 +168,7 @@ internal sealed class AgentActivityScanner
 
     private static TailInfo ParseTail(ProviderId provider, string text)
     {
-        string step = "", summary = "", model = "", threadId = "", parentId = "", prompt = "";
+        string step = "", summary = "", model = "", threadId = "", parentId = "", prompt = "", host = "";
         DateTimeOffset? started = null, activity = null;
         var state = TranscriptState.Unknown;
         foreach (var line in text.Split('\n').Reverse())
@@ -195,10 +188,15 @@ internal sealed class AgentActivityScanner
 
                 if (provider == ProviderId.Claude)
                     ParseClaudeEvent(root, ref step, ref summary, ref model, ref threadId,
-                        ref parentId, ref prompt, ref state);
+                        ref parentId, ref prompt, ref host, ref state);
+
+                if (host.Length == 0)
+                    host = DetectHost(root) ?? "";
 
                 if (root.TryGetProperty("payload", out var payload) && payload.ValueKind == JsonValueKind.Object)
                 {
+                    if (host.Length == 0)
+                        host = DetectHost(payload) ?? "";
                     if (parentId.Length == 0 && payload.TryGetProperty("parent_thread_id", out var parent)) parentId = JsonText(parent);
                     if (model.Length == 0 && payload.TryGetProperty("model", out var modelNode)) model = JsonText(modelNode);
 
@@ -257,7 +255,7 @@ internal sealed class AgentActivityScanner
                 break;
         }
 
-        return new TailInfo(step, summary, model, threadId, parentId, prompt, started, activity, state);
+        return new TailInfo(step, summary, model, threadId, parentId, prompt, host, started, activity, state);
     }
 
     internal static TailInfo ParseTranscriptForTesting(ProviderId provider, string text)
@@ -268,11 +266,14 @@ internal sealed class AgentActivityScanner
 
     private static void ParseClaudeEvent(JsonElement root, ref string step, ref string summary,
         ref string model, ref string threadId, ref string parentId, ref string prompt,
-        ref TranscriptState state)
+        ref string host, ref TranscriptState state)
     {
         var type = root.TryGetProperty("type", out var typeNode) ? typeNode.GetString() : null;
         if (type is not ("user" or "assistant"))
             return;
+
+        if (host.Length == 0)
+            host = DetectHost(root) ?? "";
 
         if (threadId.Length == 0)
             threadId = FirstString(root, "sessionId", "session_id", "uuid");
@@ -435,6 +436,40 @@ internal sealed class AgentActivityScanner
 
     private static string JsonText(JsonElement value)
         => value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : value.ToString();
+
+    private static string? DetectHost(JsonElement value)
+    {
+        foreach (var name in new[] { "originator", "host", "host_app", "source", "origin", "runtime" })
+        {
+            if (!value.TryGetProperty(name, out var property))
+                continue;
+
+            if (property.ValueKind == JsonValueKind.Object)
+            {
+                if (DetectHost(property) is { } nested)
+                    return nested;
+                continue;
+            }
+
+            if (property.ValueKind == JsonValueKind.String && MapHost(property.GetString()) is { } host)
+                return host;
+        }
+
+        return null;
+    }
+
+    private static string? MapHost(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        if (value.Contains("t3code", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("t3 code", StringComparison.OrdinalIgnoreCase))
+            return "T3 Code";
+        if (value.Contains("synara", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("dpcode", StringComparison.OrdinalIgnoreCase))
+            return "Synara";
+        return null;
+    }
 
     private static string FirstString(JsonElement value, params string[] names)
     {
@@ -654,10 +689,36 @@ internal sealed class AgentActivityScanner
         return groups;
     }
 
+    private static IReadOnlyList<AgentActivityItem> ApplyActiveHostFallback(IReadOnlyList<AgentActivityItem> items)
+    {
+        var selection = UsageCoordinator.Instance.ActiveSynaraHost;
+        if (selection is null)
+            return items;
+
+        var host = selection.Host == HostApp.T3Code ? "T3 Code" : "Synara";
+        var candidates = items
+            .Where(item => item.Provider == selection.Provider && string.IsNullOrWhiteSpace(item.Host))
+            .ToArray();
+        if (candidates.Length == 0)
+            return items;
+
+        AgentActivityItem? selected = null;
+        if (!string.IsNullOrWhiteSpace(selection.ThreadTitle))
+            selected = candidates.FirstOrDefault(item => string.Equals(
+                item.Title, selection.ThreadTitle, StringComparison.OrdinalIgnoreCase));
+        selected ??= candidates.Where(item => item.IsLive)
+            .OrderByDescending(item => item.UpdatedAt)
+            .FirstOrDefault()
+            ?? candidates.OrderByDescending(item => item.UpdatedAt).First();
+
+        return items.Select(item => item.Id == selected.Id ? item with { Host = host } : item).ToArray();
+    }
+
     internal enum TranscriptState { Unknown, Action, Waiting, Finished }
 
     internal sealed record TailInfo(string Step, string Summary, string Model, string ThreadId,
-        string ParentThreadId, string Prompt, DateTimeOffset? StartedAt, DateTimeOffset? LastActivity, TranscriptState State);
+        string ParentThreadId, string Prompt, string Host, DateTimeOffset? StartedAt,
+        DateTimeOffset? LastActivity, TranscriptState State);
     private sealed record ClaudeToolAction(string Step, bool Waiting);
     private sealed record ClaudeSessionContext(string? ThreadId, string? ParentThreadId, string? ProjectTitle);
     private readonly record struct SessionMetadata(string? ThreadId, string? ParentThreadId, string? Host);
