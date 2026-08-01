@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using Microsoft.Data.Sqlite;
 using TaskbarQuota.AgentActivity;
 using TaskbarQuota.Usage;
 using Xunit;
@@ -88,6 +90,83 @@ public sealed class AgentActivityTests
         Assert.Equal("Run the tests for the scanner", info.Prompt);
         Assert.Equal("Ran tests", info.Step);
         Assert.Equal(AgentActivityScanner.TranscriptState.Action, info.State);
+    }
+
+    [Fact]
+    public void OpenCodeDatabase_ExtractsSessionPromptModelAndRunningTool()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"taskbarquota-opencode-{Guid.NewGuid():N}.db");
+        try
+        {
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            using (var connection = new SqliteConnection($"Data Source={path}"))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, title TEXT, model TEXT, time_created INTEGER, time_updated INTEGER);
+                    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER, time_updated INTEGER);
+                    CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT, time_created INTEGER, time_updated INTEGER);
+                    """;
+                command.ExecuteNonQuery();
+
+                command.Parameters.Clear();
+                command.CommandText = "INSERT INTO session VALUES ($id, NULL, $title, $model, $created, $updated);";
+                command.Parameters.AddWithValue("$id", "ses_1");
+                command.Parameters.AddWithValue("$title", "Refactor activity scanner");
+                command.Parameters.AddWithValue("$model", "{\"id\":\"gpt-5\",\"providerID\":\"openai\"}");
+                command.Parameters.AddWithValue("$created", now - 5_000);
+                command.Parameters.AddWithValue("$updated", now);
+                command.ExecuteNonQuery();
+
+                command.Parameters.Clear();
+                command.CommandText = "INSERT INTO message VALUES ($id, 'ses_1', $data, $created, $updated);";
+                command.Parameters.AddWithValue("$id", "msg_user");
+                command.Parameters.AddWithValue("$data", $"{{\"role\":\"user\",\"time\":{{\"created\":{now - 2_000}}}}}");
+                command.Parameters.AddWithValue("$created", now - 2_000);
+                command.Parameters.AddWithValue("$updated", now - 2_000);
+                command.ExecuteNonQuery();
+
+                command.Parameters.Clear();
+                command.CommandText = "INSERT INTO message VALUES ($id, 'ses_1', $data, $created, $updated);";
+                command.Parameters.AddWithValue("$id", "msg_assistant");
+                command.Parameters.AddWithValue("$data", $"{{\"role\":\"assistant\",\"time\":{{\"created\":{now - 1_000}}},\"finish\":\"tool-calls\",\"modelID\":\"gpt-5\",\"providerID\":\"openai\"}}");
+                command.Parameters.AddWithValue("$created", now - 1_000);
+                command.Parameters.AddWithValue("$updated", now - 1_000);
+                command.ExecuteNonQuery();
+
+                command.Parameters.Clear();
+                command.CommandText = "INSERT INTO part VALUES ($id, 'msg_user', 'ses_1', $data, $created, $updated);";
+                command.Parameters.AddWithValue("$id", "part_prompt");
+                command.Parameters.AddWithValue("$data", "{\"type\":\"text\",\"text\":\"Run the tests for the scanner\"}");
+                command.Parameters.AddWithValue("$created", now - 2_000);
+                command.Parameters.AddWithValue("$updated", now - 2_000);
+                command.ExecuteNonQuery();
+
+                command.Parameters.Clear();
+                command.CommandText = "INSERT INTO part VALUES ($id, 'msg_assistant', 'ses_1', $data, $created, $updated);";
+                command.Parameters.AddWithValue("$id", "part_tool");
+                command.Parameters.AddWithValue("$data", $"{{\"type\":\"tool\",\"tool\":\"bash\",\"state\":{{\"status\":\"running\",\"input\":{{\"command\":\"dotnet test\"}},\"time\":{{\"start\":{now - 500}}}}}}}");
+                command.Parameters.AddWithValue("$created", now - 500);
+                command.Parameters.AddWithValue("$updated", now - 500);
+                command.ExecuteNonQuery();
+            }
+
+            var item = Assert.Single(AgentActivityScanner.ReadOpenCodeForTesting(path));
+
+            Assert.Equal(ProviderId.OpenCode, item.Provider);
+            Assert.Equal("Refactor activity scanner", item.Title);
+            Assert.Equal("Run the tests for the scanner", item.Detail);
+            Assert.Equal("gpt-5", item.Model);
+            Assert.Equal("Ran tests", item.Step);
+            Assert.Equal(AgentActivityStatus.Working, item.Status);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(path))
+                File.Delete(path);
+        }
     }
 
     [Fact]

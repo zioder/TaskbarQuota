@@ -7,6 +7,7 @@ using System.Management;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
+using Microsoft.Data.Sqlite;
 using TaskbarQuota.ActiveApp;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Usage;
@@ -35,6 +36,7 @@ internal sealed class AgentActivityScanner
         var files = new List<(ProviderId Provider, string Path, DateTimeOffset Modified)>();
         AddRecent(files, Path.Combine(_home, ".codex", "sessions"), ProviderId.Codex, cancellationToken);
         AddRecent(files, Path.Combine(_home, ".claude", "projects"), ProviderId.Claude, cancellationToken);
+        AddOpenCodeDatabases(files, cancellationToken);
 
         var parsed = new List<AgentActivityItem>();
         var liveClaims = new Dictionary<ProviderId, int>();
@@ -44,8 +46,14 @@ internal sealed class AgentActivityScanner
             int claim = liveClaims.TryGetValue(file.Provider, out var currentClaim) ? currentClaim : 0;
             bool claimLive = liveProviders.TryGetValue(file.Provider, out var liveCount) && claim < liveCount;
             liveClaims[file.Provider] = claim + 1;
-            if (TryRead(file.Provider, file.Path, file.Modified, claimLive, out var item))
+            if (file.Provider == ProviderId.OpenCode)
+            {
+                parsed.AddRange(ReadOpenCodeSessions(file.Path, file.Modified, claimLive));
+            }
+            else if (TryRead(file.Provider, file.Path, file.Modified, claimLive, out var item))
+            {
                 parsed.Add(item);
+            }
         }
 
         return ApplyActiveHostFallback(GroupSessions(parsed))
@@ -73,6 +81,42 @@ internal sealed class AgentActivityScanner
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+    }
+
+    private void AddOpenCodeDatabases(List<(ProviderId, string, DateTimeOffset)> output,
+        CancellationToken cancellationToken)
+    {
+        var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var overridePath = Environment.GetEnvironmentVariable("OPENCODE_DB_PATH");
+        if (!string.IsNullOrWhiteSpace(overridePath))
+            candidates.Add(overridePath);
+
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        var xdgData = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
+        candidates.Add(Path.Combine(localAppData, "opencode", "opencode.db"));
+        candidates.Add(Path.Combine(appData, "opencode", "opencode.db"));
+        candidates.Add(Path.Combine(_home, ".local", "share", "opencode", "opencode.db"));
+        if (!string.IsNullOrWhiteSpace(xdgData))
+            candidates.Add(Path.Combine(xdgData, "opencode", "opencode.db"));
+
+        foreach (var path in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                if (!File.Exists(path))
+                    continue;
+                var modified = File.GetLastWriteTimeUtc(path);
+                // SQLite WAL mode can leave the main database timestamp unchanged while the
+                // companion -wal file receives the active session writes. The session query below
+                // applies the recency window, so keep the database candidate even when its main
+                // file is older than six hours.
+                output.Add((ProviderId.OpenCode, path, new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
     }
 
     private bool TryRead(ProviderId provider, string path, DateTimeOffset modified,
@@ -141,6 +185,325 @@ internal sealed class AgentActivityScanner
         catch (UnauthorizedAccessException) { return false; }
         catch (JsonException) { return false; }
     }
+
+    private static IReadOnlyList<AgentActivityItem> ReadOpenCodeSessions(
+        string path, DateTimeOffset modified, bool claimLive)
+    {
+        var items = new List<AgentActivityItem>();
+        try
+        {
+            var connectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = path,
+                Mode = SqliteOpenMode.ReadOnly,
+                Cache = SqliteCacheMode.Shared,
+                Pooling = false,
+            }.ToString();
+            using var connection = new SqliteConnection(connectionString);
+            connection.Open();
+
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT id, parent_id, title, model, time_created, time_updated
+                FROM session
+                WHERE COALESCE(time_updated, time_created, 0) >= $cutoff
+                ORDER BY time_updated DESC, time_created DESC
+                LIMIT 80;
+                """;
+            command.Parameters.AddWithValue("$cutoff", DateTimeOffset.Now.Add(-RecentWindow).ToUnixTimeMilliseconds());
+
+            var sessions = new List<OpenCodeSessionRow>();
+            using (var reader = command.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    sessions.Add(new OpenCodeSessionRow(
+                        reader.GetString(0),
+                        reader.IsDBNull(1) ? null : reader.GetString(1),
+                        reader.IsDBNull(2) ? "" : reader.GetString(2),
+                        reader.IsDBNull(3) ? "" : reader.GetString(3),
+                        reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                        reader.IsDBNull(5) ? 0 : reader.GetInt64(5)));
+                }
+            }
+
+            // OpenCode normally has one process serving several stored sessions. The newest session
+            // receives the process claim; older sessions remain visible as recent/completed history.
+            bool claimed = false;
+            foreach (var session in sessions)
+            {
+                var tail = ReadOpenCodeTail(connection, session.Id);
+                var lastActivity = Max(
+                    FromUnixMilliseconds(session.UpdatedAt, modified),
+                    tail.LastActivity ?? modified);
+                var fresh = DateTimeOffset.Now - lastActivity < BusyWindow;
+                var live = claimLive && !claimed;
+                if (live)
+                    claimed = true;
+
+                var status = !live
+                    ? tail.State == TranscriptState.Failed ? AgentActivityStatus.Failed : AgentActivityStatus.Completed
+                    : tail.State == TranscriptState.Waiting
+                        ? AgentActivityStatus.Waiting
+                        : fresh ? AgentActivityStatus.Working : AgentActivityStatus.Idle;
+                var step = status == AgentActivityStatus.Completed
+                    ? "Completed"
+                    : status == AgentActivityStatus.Failed
+                        ? "Failed"
+                        : status == AgentActivityStatus.Waiting
+                            ? string.IsNullOrWhiteSpace(tail.Step) ? "Waiting for input" : tail.Step
+                        : status == AgentActivityStatus.Idle ? "Waiting for the next prompt"
+                        : !string.IsNullOrWhiteSpace(tail.Step) ? tail.Step
+                        : !string.IsNullOrWhiteSpace(tail.Summary) ? tail.Summary
+                        : fresh ? "Working" : "Thinking";
+
+                items.Add(new AgentActivityItem(
+                    $"opencode:{session.Id}", ProviderId.OpenCode,
+                    string.IsNullOrWhiteSpace(session.Title)
+                        ? SummarizeTitle(tail.Prompt) ?? "OpenCode"
+                        : Trim(Clean(session.Title), 72),
+                    step, status,
+                    FromUnixMilliseconds(session.CreatedAt, modified), lastActivity,
+                    Detail: tail.Prompt,
+                    Model: ParseOpenCodeModel(session.Model),
+                    ThreadId: session.Id,
+                    ParentThreadId: session.ParentId));
+            }
+        }
+        catch (SqliteException) { }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+
+        return items;
+    }
+
+    internal static IReadOnlyList<AgentActivityItem> ReadOpenCodeForTesting(string path, bool claimLive = true)
+        => ReadOpenCodeSessions(path, DateTimeOffset.Now, claimLive);
+
+    private static OpenCodeTail ReadOpenCodeTail(SqliteConnection connection, string sessionId)
+    {
+        var messages = new List<OpenCodeMessageRow>();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT id, data, time_created, time_updated
+                FROM message
+                WHERE session_id = $session
+                ORDER BY time_created DESC, id DESC
+                LIMIT 100;
+                """;
+            command.Parameters.AddWithValue("$session", sessionId);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                messages.Add(new OpenCodeMessageRow(
+                    reader.GetString(0), reader.GetString(1),
+                    reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                    reader.IsDBNull(3) ? 0 : reader.GetInt64(3)));
+            }
+        }
+
+        var parts = new List<OpenCodePartRow>();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT id, message_id, data, time_created, time_updated
+                FROM part
+                WHERE session_id = $session
+                ORDER BY time_created DESC, id DESC
+                LIMIT 200;
+                """;
+            command.Parameters.AddWithValue("$session", sessionId);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                parts.Add(new OpenCodePartRow(
+                    reader.GetString(0), reader.GetString(1), reader.GetString(2),
+                    reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                    reader.IsDBNull(4) ? 0 : reader.GetInt64(4)));
+            }
+        }
+
+        var parsedMessages = messages
+            .Select(ParseOpenCodeMessage)
+            .Where(message => message is not null)
+            .Cast<OpenCodeMessageInfo>()
+            .ToArray();
+        var parsedParts = parts
+            .Select(ParseOpenCodePart)
+            .Where(part => part is not null)
+            .Cast<OpenCodePartInfo>()
+            .ToArray();
+        var latestUser = parsedMessages.FirstOrDefault(message => message.Role == "user");
+        var latestAssistant = parsedMessages.FirstOrDefault(message => message.Role == "assistant");
+        var latestTool = parsedParts.FirstOrDefault(part => part.Type == "tool");
+        var latestReasoning = parsedParts.FirstOrDefault(part => part.Type == "reasoning");
+
+        var prompt = latestUser is null ? "" : ExtractOpenCodeMessageText(latestUser.Id, parts);
+        var summary = latestAssistant is null ? "" : ExtractOpenCodeMessageText(latestAssistant.Id, parts);
+        if (summary.Length == 0 && latestReasoning is not null)
+            summary = latestReasoning.Text;
+
+        var state = TranscriptState.Unknown;
+        var step = "";
+        if (latestTool is not null
+            && (latestAssistant is null || latestTool.ActivityAt >= latestAssistant.CreatedAt))
+        {
+            state = latestTool.Status switch
+            {
+                "pending" => TranscriptState.Waiting,
+                "running" => TranscriptState.Action,
+                "error" => TranscriptState.Failed,
+                _ => TranscriptState.Action,
+            };
+            step = DescribeOpenCodeTool(latestTool.Tool, latestTool.Input);
+        }
+        else if (latestUser is not null
+            && (latestAssistant is null || latestUser.CreatedAt > latestAssistant.CreatedAt || !latestAssistant.Completed))
+        {
+            state = TranscriptState.Action;
+            step = "Thinking";
+        }
+        else if (latestAssistant?.Failed == true)
+        {
+            state = TranscriptState.Failed;
+        }
+        else if (latestAssistant is not null)
+        {
+            state = TranscriptState.Finished;
+        }
+
+        var activity = parsedMessages.Select(message => message.ActivityAt)
+            .Concat(parsedParts.Select(part => part.ActivityAt))
+            .DefaultIfEmpty()
+            .Max();
+        return new OpenCodeTail(step, summary, prompt,
+            activity == default ? null : activity, state);
+    }
+
+    private static OpenCodeMessageInfo? ParseOpenCodeMessage(OpenCodeMessageRow row)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(row.Data);
+            var root = document.RootElement;
+            var role = root.TryGetProperty("role", out var roleNode) ? roleNode.GetString() : null;
+            if (role is not ("user" or "assistant"))
+                return null;
+
+            var created = FromUnixMilliseconds(row.CreatedAt, DateTimeOffset.MinValue);
+            var completed = 0L;
+            if (root.TryGetProperty("time", out var time) && time.ValueKind == JsonValueKind.Object
+                && time.TryGetProperty("completed", out var completedNode)
+                && completedNode.TryGetInt64(out var parsedCompleted))
+                completed = parsedCompleted;
+            var finish = root.TryGetProperty("finish", out var finishNode) ? finishNode.GetString() : null;
+            var failed = root.TryGetProperty("error", out var errorNode) && errorNode.ValueKind != JsonValueKind.Null;
+            var isComplete = completed > 0 || !string.IsNullOrWhiteSpace(finish) && finish != "tool-calls";
+            var activity = Max(
+                FromUnixMilliseconds(row.CreatedAt, DateTimeOffset.MinValue),
+                FromUnixMilliseconds(row.UpdatedAt, DateTimeOffset.MinValue),
+                FromUnixMilliseconds(completed, DateTimeOffset.MinValue));
+            return new OpenCodeMessageInfo(row.Id, role!, created, activity, isComplete, failed);
+        }
+        catch (JsonException) { return null; }
+    }
+
+    private static OpenCodePartInfo? ParseOpenCodePart(OpenCodePartRow row)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(row.Data);
+            var root = document.RootElement;
+            var type = root.TryGetProperty("type", out var typeNode) ? typeNode.GetString() : null;
+            if (string.IsNullOrWhiteSpace(type))
+                return null;
+
+            var activity = Max(
+                FromUnixMilliseconds(row.CreatedAt, DateTimeOffset.MinValue),
+                FromUnixMilliseconds(row.UpdatedAt, DateTimeOffset.MinValue));
+            if (root.TryGetProperty("time", out var time) && time.ValueKind == JsonValueKind.Object)
+            {
+                if (time.TryGetProperty("start", out var start) && start.TryGetInt64(out var startTime))
+                    activity = Max(activity, FromUnixMilliseconds(startTime, DateTimeOffset.MinValue));
+                if (time.TryGetProperty("end", out var end) && end.TryGetInt64(out var endTime))
+                    activity = Max(activity, FromUnixMilliseconds(endTime, DateTimeOffset.MinValue));
+            }
+
+            if (type == "tool")
+            {
+                var tool = root.TryGetProperty("tool", out var toolNode) ? toolNode.GetString() ?? "tool" : "tool";
+                var status = "";
+                var input = "";
+                if (root.TryGetProperty("state", out var state) && state.ValueKind == JsonValueKind.Object)
+                {
+                    status = state.TryGetProperty("status", out var statusNode) ? statusNode.GetString() ?? "" : "";
+                    if (state.TryGetProperty("input", out var inputNode))
+                        input = JsonText(inputNode);
+                }
+                return new OpenCodePartInfo(row.MessageId, type, activity, tool, status, input, "");
+            }
+
+            var text = root.TryGetProperty("text", out var textNode) ? Clean(textNode.GetString()) : "";
+            return new OpenCodePartInfo(row.MessageId, type, activity, "", "", "", text);
+        }
+        catch (JsonException) { return null; }
+    }
+
+    private static string ExtractOpenCodeMessageText(string messageId, IEnumerable<OpenCodePartRow> rows)
+    {
+        var text = rows
+            .Where(row => row.MessageId == messageId)
+            .Select(ParseOpenCodePart)
+            .Where(part => part is not null)
+            .Select(part => part!.Text)
+            .Where(value => value.Length > 0)
+            .LastOrDefault();
+        return text ?? "";
+    }
+
+    private static string DescribeOpenCodeTool(string name, string input)
+    {
+        if (name is "bash" or "shell" or "terminal" or "run_terminal_command")
+            return DescribeAction("shell_command", input);
+        if (name.Contains("edit", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("write", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("patch", StringComparison.OrdinalIgnoreCase))
+            return "Edited code";
+        if (name is "read" or "grep" or "glob" or "list" or "search")
+            return "Inspected files";
+        if (name is "task" or "subtask" or "agent")
+            return "Running subagent";
+        if (name.Contains("question", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("approval", StringComparison.OrdinalIgnoreCase))
+            return "Waiting for input";
+        return $"Running {name}";
+    }
+
+    private static string ParseOpenCodeModel(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return "";
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.TryGetProperty("id", out var id)
+                ? Clean(id.GetString())
+                : "";
+        }
+        catch (JsonException) { return ""; }
+    }
+
+    private static DateTimeOffset FromUnixMilliseconds(long value, DateTimeOffset fallback)
+    {
+        if (value <= 0)
+            return fallback;
+        try { return DateTimeOffset.FromUnixTimeMilliseconds(value).ToLocalTime(); }
+        catch (ArgumentOutOfRangeException) { return fallback; }
+    }
+
+    private static DateTimeOffset Max(params DateTimeOffset[] values)
+        => values.Max();
 
     private static SessionMetadata ReadSessionMetadata(string path)
     {
@@ -714,7 +1077,7 @@ internal sealed class AgentActivityScanner
         return items.Select(item => item.Id == selected.Id ? item with { Host = host } : item).ToArray();
     }
 
-    internal enum TranscriptState { Unknown, Action, Waiting, Finished }
+    internal enum TranscriptState { Unknown, Action, Waiting, Finished, Failed }
 
     internal sealed record TailInfo(string Step, string Summary, string Model, string ThreadId,
         string ParentThreadId, string Prompt, string Host, DateTimeOffset? StartedAt,
@@ -722,4 +1085,13 @@ internal sealed class AgentActivityScanner
     private sealed record ClaudeToolAction(string Step, bool Waiting);
     private sealed record ClaudeSessionContext(string? ThreadId, string? ParentThreadId, string? ProjectTitle);
     private readonly record struct SessionMetadata(string? ThreadId, string? ParentThreadId, string? Host);
+    private sealed record OpenCodeSessionRow(string Id, string? ParentId, string Title, string Model, long CreatedAt, long UpdatedAt);
+    private sealed record OpenCodeMessageRow(string Id, string Data, long CreatedAt, long UpdatedAt);
+    private sealed record OpenCodePartRow(string Id, string MessageId, string Data, long CreatedAt, long UpdatedAt);
+    private sealed record OpenCodeMessageInfo(
+        string Id, string Role, DateTimeOffset CreatedAt, DateTimeOffset ActivityAt, bool Completed, bool Failed);
+    private sealed record OpenCodePartInfo(
+        string MessageId, string Type, DateTimeOffset ActivityAt, string Tool, string Status, string Input, string Text);
+    private sealed record OpenCodeTail(
+        string Step, string Summary, string Prompt, DateTimeOffset? LastActivity, TranscriptState State);
 }
