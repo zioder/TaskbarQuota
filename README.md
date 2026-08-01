@@ -295,10 +295,8 @@ Download the latest installer from [GitHub Releases](https://github.com/zioder/T
 | -------- | --- |
 | `TaskbarQuotaSetup-<version>-x64.exe` | Intel / AMD (most PCs) |
 | `TaskbarQuotaSetup-<version>-arm64.exe` | Windows on ARM |
-| `TaskbarQuota-<version>-x64.msix` | Intel / AMD (MSIX) |
-| `TaskbarQuota-<version>-arm64.msix` | Windows on ARM (MSIX) |
 
-Run the matching `.exe`, then launch TaskbarQuota from the Start menu. The GitHub installers and MSIX packages are unsigned; Windows may show **SmartScreen** or require Developer Mode/a trusted certificate — **More info** → **Run anyway**.
+Run the matching `.exe`, then launch TaskbarQuota from the Start menu. The GitHub installers are unsigned; Windows may show **SmartScreen** — **More info** → **Run anyway**.
 
 Microsoft Store builds use the signed package identity `ZiedKallel.TaskbarQuota_q2e4dm2bjnsne`. When a Store-installed build sees an update, TaskbarQuota opens the Microsoft Store product page instead of downloading the unsigned GitHub installer.
 
@@ -306,7 +304,7 @@ Microsoft Store builds use the signed package identity `ZiedKallel.TaskbarQuota_
 
 ```text
 TaskbarQuota/
-├── .github/workflows/release.yml   # Tag builds → GitHub Release installers + MSIX packages
+├── .github/workflows/release.yml   # Tag builds → GitHub Release installers
 ├── installer/TaskbarQuota.iss      # Inno Setup (x64 + arm64)
 ├── src/
 │   ├── taskbarquota.png            # README / branding icon
