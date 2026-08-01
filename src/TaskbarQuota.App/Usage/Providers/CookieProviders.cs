@@ -152,6 +152,8 @@ namespace TaskbarQuota.Usage.Providers
                 return await GetText($"{ServerUrl}?id={BillingServerId}&args={Uri.EscapeDataString(args)}",
                     BillingServerId, WorkspacePageUrl(workspaceId), cookie, ct).ConfigureAwait(false);
             }
+            catch (ProviderException ex) when (ex.Kind == ProviderErrorKind.AuthRequired) { throw; }
+            catch (OperationCanceledException) { throw; }
             catch { return null; }
         }
 
@@ -237,6 +239,8 @@ namespace TaskbarQuota.Usage.Providers
         private static async Task<string?> TryGetPageText(string url, string referer, string cookie, CancellationToken ct)
         {
             try { return await GetPageText(url, referer, cookie, ct).ConfigureAwait(false); }
+            catch (ProviderException ex) when (ex.Kind == ProviderErrorKind.AuthRequired) { throw; }
+            catch (OperationCanceledException) { throw; }
             catch { return null; }
         }
 
