@@ -30,6 +30,7 @@ namespace TaskbarQuota
         // fetch for one that is still running — a slow or offline endpoint would otherwise accumulate
         // concurrent requests and could publish an older snapshot out of order.
         private readonly HashSet<ProviderId> _widgetRefreshInFlight = new();
+        private readonly object _openCodeModelStateLock = new();
         private Timer? _timer;
         // Synara persists provider switches through a 300 ms-debounced localStorage writer, and Chromium
         // then flushes that to its on-disk LevelDB on its own (variable, sometimes >1 s) cadence. The
@@ -67,6 +68,8 @@ namespace TaskbarQuota
         private bool? _lastHasDetectedTool;
         private DateTime _lastPresenceProbeAt = DateTime.MinValue;
         private ProviderSource _activeProviderSource = ProviderSource.Unknown;
+        private ProviderId? _lastObservedOpenCodeProvider;
+        private bool _hasObservedOpenCodeProvider;
 
         public UsageService Service => _service;
         public ProviderId? ActiveProvider => _lastActive;
@@ -481,13 +484,20 @@ namespace TaskbarQuota
 
             if (!ShouldReactToOpenCodeModelChange(foreground))
             {
-                if (modelProvider is ProviderId backgroundProvider)
+                if (modelProvider is ProviderId backgroundProvider
+                    && ShouldRefreshOpenCodeProvider(backgroundProvider))
                     await RefreshProviderCacheSilentlyAsync(backgroundProvider).ConfigureAwait(false);
                 return;
             }
 
             var target = modelProvider ?? foreground!.Value;
             if (!IsOpenCodeProvider(target))
+                return;
+
+            // OpenCode rewrites its model/state files while the user types. The file event only matters
+            // when it changes the quota surface (Zen vs Go); republishing the same provider forces a
+            // network fetch and restarts the taskbar widget's refresh animation on every keystroke.
+            if (!ShouldRefreshOpenCodeProvider(target))
                 return;
 
             await _gate.WaitAsync().ConfigureAwait(false);
@@ -560,6 +570,25 @@ namespace TaskbarQuota
 
         internal static bool IsOpenCodeProvider(ProviderId provider)
             => provider is ProviderId.OpenCode or ProviderId.OpenCodeGo;
+
+        internal bool ShouldRefreshOpenCodeProvider(ProviderId provider)
+        {
+            lock (_openCodeModelStateLock)
+            {
+                if (!ShouldRefreshOpenCodeProvider(_lastObservedOpenCodeProvider, _hasObservedOpenCodeProvider, provider))
+                    return false;
+
+                _hasObservedOpenCodeProvider = true;
+                _lastObservedOpenCodeProvider = provider;
+                return true;
+            }
+        }
+
+        internal static bool ShouldRefreshOpenCodeProvider(
+            ProviderId? lastObservedProvider,
+            bool hasObservedProvider,
+            ProviderId provider)
+            => !hasObservedProvider || lastObservedProvider != provider;
 
         private void OnClineProviderStateChanged() => _ = HandleClineProviderSwitchAsync();
 
