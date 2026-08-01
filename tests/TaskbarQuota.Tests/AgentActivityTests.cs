@@ -170,6 +170,52 @@ public sealed class AgentActivityTests
     }
 
     [Fact]
+    public void GrokSession_ExtractsPromptModelAndRunningTool()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"taskbarquota-grok-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var now = DateTimeOffset.UtcNow.ToString("O");
+            File.WriteAllText(Path.Combine(directory, "summary.json"), $$"""
+                {
+                  "info": { "id": "grok-session-1", "cwd": "C:\\work" },
+                  "session_summary": "",
+                  "created_at": "{{now}}",
+                  "updated_at": "{{now}}",
+                  "current_model_id": "grok-4.5",
+                  "agent_name": "grok-build"
+                }
+                """);
+            File.WriteAllText(Path.Combine(directory, "chat_history.jsonl"), $$"""
+                {"type":"system","content":"system prompt"}
+                {"type":"user","content":[{"type":"text","text":"Refactor Grok activity tracking"}]}
+                {"type":"assistant","content":"","tool_calls":[{"id":"call-1","name":"shell_command","arguments":"dotnet test"}]}
+                """);
+            File.WriteAllText(Path.Combine(directory, "events.jsonl"), $$"""
+                {"type":"turn_started","ts":"{{now}}","session_id":"grok-session-1"}
+                {"type":"tool_started","ts":"{{now}}","tool_name":"shell_command"}
+                """);
+
+            var item = Assert.Single(AgentActivityScanner.ReadGrokForTesting(
+                Path.Combine(directory, "summary.json")));
+
+            Assert.Equal(ProviderId.Grok, item.Provider);
+            Assert.Equal("grok-session-1", item.ThreadId);
+            Assert.Equal("Refactor Grok activity tracking", item.Title);
+            Assert.Equal("Refactor Grok activity tracking", item.Detail);
+            Assert.Equal("grok-4.5", item.Model);
+            Assert.Equal("Running command", item.Step);
+            Assert.Equal(AgentActivityStatus.Working, item.Status);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+                Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ActivityTitle_IsSummarizedFromLatestPrompt()
     {
         var title = AgentActivityScanner.SummarizeTitleForTesting(

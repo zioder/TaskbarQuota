@@ -36,6 +36,7 @@ internal sealed class AgentActivityScanner
         var files = new List<(ProviderId Provider, string Path, DateTimeOffset Modified)>();
         AddRecent(files, Path.Combine(_home, ".codex", "sessions"), ProviderId.Codex, cancellationToken);
         AddRecent(files, Path.Combine(_home, ".claude", "projects"), ProviderId.Claude, cancellationToken);
+        AddGrokSessions(files, cancellationToken);
         AddOpenCodeDatabases(files, cancellationToken);
 
         var parsed = new List<AgentActivityItem>();
@@ -46,7 +47,12 @@ internal sealed class AgentActivityScanner
             int claim = liveClaims.TryGetValue(file.Provider, out var currentClaim) ? currentClaim : 0;
             bool claimLive = liveProviders.TryGetValue(file.Provider, out var liveCount) && claim < liveCount;
             liveClaims[file.Provider] = claim + 1;
-            if (file.Provider == ProviderId.OpenCode)
+            if (file.Provider == ProviderId.Grok)
+            {
+                if (TryReadGrokSession(file.Path, file.Modified, claimLive, out var grokItem))
+                    parsed.Add(grokItem);
+            }
+            else if (file.Provider == ProviderId.OpenCode)
             {
                 parsed.AddRange(ReadOpenCodeSessions(file.Path, file.Modified, claimLive));
             }
@@ -77,6 +83,47 @@ internal sealed class AgentActivityScanner
                 var modified = File.GetLastWriteTimeUtc(path);
                 if (DateTime.UtcNow - modified <= RecentWindow)
                     output.Add((provider, path, new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private void AddGrokSessions(List<(ProviderId, string, DateTimeOffset)> output,
+        CancellationToken cancellationToken)
+    {
+        var grokHome = Environment.GetEnvironmentVariable("GROK_HOME");
+        if (string.IsNullOrWhiteSpace(grokHome))
+            grokHome = Path.Combine(_home, ".grok");
+
+        var root = Path.Combine(grokHome, "sessions");
+        if (!Directory.Exists(root))
+            return;
+
+        try
+        {
+            foreach (var summaryPath in Directory.EnumerateFiles(root, "summary.json", SearchOption.AllDirectories))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var sessionDirectory = Path.GetDirectoryName(summaryPath);
+                if (string.IsNullOrWhiteSpace(sessionDirectory))
+                    continue;
+
+                var modified = File.GetLastWriteTimeUtc(summaryPath);
+                foreach (var name in new[] { "chat_history.jsonl", "events.jsonl", "prompt_context.json" })
+                {
+                    var companion = Path.Combine(sessionDirectory, name);
+                    if (File.Exists(companion))
+                    {
+                        var companionModified = File.GetLastWriteTimeUtc(companion);
+                        if (companionModified > modified)
+                            modified = companionModified;
+                    }
+                }
+
+                if (DateTime.UtcNow - modified <= RecentWindow)
+                    output.Add((ProviderId.Grok, summaryPath,
+                        new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
             }
         }
         catch (IOException) { }
@@ -184,6 +231,307 @@ internal sealed class AgentActivityScanner
         catch (IOException) { return false; }
         catch (UnauthorizedAccessException) { return false; }
         catch (JsonException) { return false; }
+    }
+
+    private static bool TryReadGrokSession(string summaryPath, DateTimeOffset modified,
+        bool claimLive, out AgentActivityItem item)
+    {
+        item = default!;
+        try
+        {
+            var sessionDirectory = Path.GetDirectoryName(summaryPath);
+            if (string.IsNullOrWhiteSpace(sessionDirectory))
+                return false;
+
+            using var summaryDocument = JsonDocument.Parse(File.ReadAllText(summaryPath));
+            var summary = summaryDocument.RootElement;
+            var info = summary.TryGetProperty("info", out var infoNode) && infoNode.ValueKind == JsonValueKind.Object
+                ? infoNode
+                : default;
+            var threadId = FirstNonEmpty(
+                FirstString(info, "id"),
+                FirstString(summary, "session_id", "sessionId", "id"),
+                Path.GetFileName(sessionDirectory));
+            var parentThreadId = FirstString(summary, "parent_session_id", "parentSessionId", "parent_thread_id", "parentThreadId");
+            var model = FirstNonEmpty(
+                FirstString(summary, "current_model_id", "model_id", "model"),
+                FirstString(info, "current_model_id", "model_id", "model"));
+            var createdAt = FirstTimestamp(summary, "created_at", "createdAt")
+                ?? FirstTimestamp(info, "created_at", "createdAt")
+                ?? modified;
+            var summaryUpdatedAt = FirstTimestamp(summary, "last_active_at", "updated_at", "updatedAt")
+                ?? FirstTimestamp(info, "last_active_at", "updated_at", "updatedAt");
+
+            var history = ReadGrokTail(Path.Combine(sessionDirectory, "chat_history.jsonl"));
+            var events = ReadGrokTail(Path.Combine(sessionDirectory, "events.jsonl"));
+            var historyInfo = ParseGrokHistory(history);
+            var eventInfo = ParseGrokEvents(events);
+            var lastActivity = Max(modified, summaryUpdatedAt ?? modified,
+                historyInfo.LastActivity ?? modified, eventInfo.LastActivity ?? modified);
+            var fresh = DateTimeOffset.Now - lastActivity < BusyWindow;
+            var live = claimLive && modified > DateTimeOffset.Now - RecentWindow;
+            var state = eventInfo.State != TranscriptState.Unknown ? eventInfo.State : historyInfo.State;
+            var status = !live
+                ? state == TranscriptState.Failed ? AgentActivityStatus.Failed : AgentActivityStatus.Completed
+                : state == TranscriptState.Waiting
+                    ? AgentActivityStatus.Waiting
+                    : fresh ? AgentActivityStatus.Working : AgentActivityStatus.Idle;
+
+            var prompt = historyInfo.Prompt;
+            var title = FirstNonEmpty(
+                SummarizeTitle(prompt) ?? "",
+                SummarizeTitle(FirstString(summary, "session_summary", "summary")) ?? "",
+                FirstString(summary, "agent_name", "agentName"),
+                "Grok");
+            var step = status == AgentActivityStatus.Completed
+                ? "Completed"
+                : status == AgentActivityStatus.Failed
+                    ? "Failed"
+                    : status == AgentActivityStatus.Waiting
+                        ? string.IsNullOrWhiteSpace(eventInfo.Step) ? "Waiting for input" : eventInfo.Step
+                    : status == AgentActivityStatus.Idle ? "Waiting for the next prompt"
+                    : !string.IsNullOrWhiteSpace(eventInfo.Step) ? eventInfo.Step
+                    : !string.IsNullOrWhiteSpace(historyInfo.Step) ? historyInfo.Step
+                    : !string.IsNullOrWhiteSpace(historyInfo.Summary) ? historyInfo.Summary
+                    : "Thinking";
+            item = new AgentActivityItem(
+                $"grok:{threadId}", ProviderId.Grok, Trim(Clean(title), 72), step, status,
+                createdAt, lastActivity,
+                Detail: prompt,
+                Model: Clean(model),
+                ThreadId: threadId,
+                ParentThreadId: parentThreadId,
+                Host: DetectHost(summary));
+            return true;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (JsonException) { return false; }
+    }
+
+    internal static IReadOnlyList<AgentActivityItem> ReadGrokForTesting(string summaryPath,
+        bool claimLive = true)
+    {
+        var modified = File.GetLastWriteTimeUtc(summaryPath);
+        return TryReadGrokSession(summaryPath,
+            new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime(), claimLive,
+            out var item)
+            ? new[] { item }
+            : Array.Empty<AgentActivityItem>();
+    }
+
+    private static string ReadGrokTail(string path)
+    {
+        try
+        {
+            if (!File.Exists(path))
+                return "";
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            stream.Seek(Math.Max(0, stream.Length - 262_144), SeekOrigin.Begin);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            return reader.ReadToEnd();
+        }
+        catch (IOException) { return ""; }
+        catch (UnauthorizedAccessException) { return ""; }
+    }
+
+    private static GrokTranscriptInfo ParseGrokHistory(string text)
+    {
+        string prompt = "", step = "", summary = "";
+        var state = TranscriptState.Unknown;
+        DateTimeOffset? activity = null;
+        foreach (var line in text.Split('\n'))
+        {
+            if (string.IsNullOrWhiteSpace(line))
+                continue;
+            try
+            {
+                using var document = JsonDocument.Parse(line);
+                var root = document.RootElement;
+                var type = FirstString(root, "type");
+                activity = FirstTimestamp(root, "timestamp", "ts", "created_at") ?? activity;
+                if (type == "user")
+                {
+                    var synthetic = FirstString(root, "synthetic_reason", "syntheticReason");
+                    var content = root.TryGetProperty("content", out var contentNode)
+                        ? ExtractGrokText(contentNode)
+                        : "";
+                    if (synthetic.Length == 0 && content.Length > 0)
+                        prompt = content;
+                    if (state == TranscriptState.Unknown || content.Length > 0)
+                    {
+                        state = TranscriptState.Action;
+                        step = "Thinking";
+                    }
+                }
+                else if (type == "assistant")
+                {
+                    if (root.TryGetProperty("tool_calls", out var calls) && calls.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var call in calls.EnumerateArray().Reverse())
+                        {
+                            var name = FirstString(call, "name");
+                            if (name.Length == 0 && call.TryGetProperty("function", out var function))
+                                name = FirstString(function, "name");
+                            if (name.Length > 0)
+                            {
+                                step = DescribeGrokAction(name, GetPayloadDetails(call));
+                                state = TranscriptState.Action;
+                                break;
+                            }
+                        }
+                    }
+                    else if (root.TryGetProperty("content", out var content))
+                    {
+                        summary = ExtractGrokText(content);
+                    }
+                }
+                else if (type is "reasoning" or "backend_tool_call")
+                {
+                    summary = ExtractGrokText(root);
+                    state = TranscriptState.Action;
+                }
+                else if (type is "tool_result" or "backend_tool_result")
+                {
+                    state = TranscriptState.Action;
+                }
+            }
+            catch (JsonException) { }
+        }
+
+        return new GrokTranscriptInfo(prompt, step, summary, state, activity);
+    }
+
+    private static GrokTranscriptInfo ParseGrokEvents(string text)
+    {
+        string step = "";
+        var state = TranscriptState.Unknown;
+        DateTimeOffset? activity = null;
+        foreach (var line in text.Split('\n'))
+        {
+            if (string.IsNullOrWhiteSpace(line))
+                continue;
+            try
+            {
+                using var document = JsonDocument.Parse(line);
+                var root = document.RootElement;
+                var type = FirstString(root, "type");
+                activity = FirstTimestamp(root, "ts", "timestamp", "created_at") ?? activity;
+                switch (type)
+                {
+                    case "turn_started":
+                    case "loop_started":
+                        state = TranscriptState.Action;
+                        step = "Thinking";
+                        break;
+                    case "phase_changed":
+                        var phase = FirstString(root, "phase");
+                        if (phase.Contains("permission", StringComparison.OrdinalIgnoreCase))
+                        {
+                            state = TranscriptState.Waiting;
+                            step = "Waiting for input";
+                        }
+                        else if (phase.Length > 0)
+                        {
+                            state = TranscriptState.Action;
+                            step = phase switch
+                            {
+                                "tool_execution" => "Running command",
+                                "streaming_reasoning" => "Thinking",
+                                "streaming_text" => "Writing response",
+                                _ => step,
+                            };
+                        }
+                        break;
+                    case "tool_started":
+                    case "mcp_tool_call_started":
+                        var tool = FirstString(root, "tool_name", "tool", "name");
+                        state = TranscriptState.Action;
+                        step = tool.Length == 0 ? "Running command" : DescribeGrokAction(tool, GetPayloadDetails(root));
+                        break;
+                    case "permission_requested":
+                        state = TranscriptState.Waiting;
+                        step = "Waiting for input";
+                        break;
+                    case "permission_resolved":
+                        var decision = FirstString(root, "decision");
+                        state = decision.Contains("deny", StringComparison.OrdinalIgnoreCase)
+                            || decision.Contains("cancel", StringComparison.OrdinalIgnoreCase)
+                            ? TranscriptState.Failed
+                            : TranscriptState.Action;
+                        break;
+                    case "turn_ended":
+                        var outcome = FirstString(root, "outcome");
+                        state = outcome.Contains("error", StringComparison.OrdinalIgnoreCase)
+                            ? TranscriptState.Failed
+                            : TranscriptState.Finished;
+                        break;
+                }
+            }
+            catch (JsonException) { }
+        }
+
+        return new GrokTranscriptInfo("", step, "", state, activity);
+    }
+
+    private static string ExtractGrokText(JsonElement value)
+    {
+        if (value.ValueKind == JsonValueKind.String)
+            return Clean(value.GetString());
+        if (value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var part in value.EnumerateArray().Reverse())
+            {
+                var text = ExtractGrokText(part);
+                if (text.Length > 0)
+                    return text;
+            }
+            return "";
+        }
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var name in new[] { "text", "content", "summary", "summary_text", "message" })
+            {
+                if (!value.TryGetProperty(name, out var nested))
+                    continue;
+                var text = ExtractGrokText(nested);
+                if (text.Length > 0)
+                    return text;
+            }
+        }
+        return "";
+    }
+
+    private static string DescribeGrokAction(string name, string? details)
+    {
+        var normalized = name.ToLowerInvariant();
+        if (normalized.Contains("shell") || normalized.Contains("terminal")
+            || normalized.Contains("command") || normalized is "bash" or "cmd" or "powershell")
+            return DescribeAction("shell_command", details);
+        if (normalized.Contains("patch") || normalized.Contains("edit") || normalized.Contains("write"))
+            return "Edited code";
+        if (normalized.Contains("read") || normalized.Contains("search") || normalized.Contains("grep")
+            || normalized.Contains("glob") || normalized.Contains("list"))
+            return "Inspected files";
+        if (normalized.Contains("agent") || normalized.Contains("subagent"))
+            return "Running subagent";
+        return DescribeAction(name, details);
+    }
+
+    private static DateTimeOffset? FirstTimestamp(JsonElement value, params string[] names)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+            return null;
+        foreach (var name in names)
+        {
+            if (!value.TryGetProperty(name, out var property))
+                continue;
+            if (property.ValueKind == JsonValueKind.String
+                && DateTimeOffset.TryParse(property.GetString(), out var parsed))
+                return parsed.ToLocalTime();
+        }
+        return null;
     }
 
     private static IReadOnlyList<AgentActivityItem> ReadOpenCodeSessions(
@@ -836,11 +1184,16 @@ internal sealed class AgentActivityScanner
 
     private static string FirstString(JsonElement value, params string[] names)
     {
+        if (value.ValueKind != JsonValueKind.Object)
+            return "";
         foreach (var name in names)
             if (value.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String)
                 return property.GetString() ?? "";
         return "";
     }
+
+    private static string FirstNonEmpty(params string[] values)
+        => values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? "";
 
     private static string? SummarizeTitle(string? prompt)
     {
@@ -935,6 +1288,7 @@ internal sealed class AgentActivityScanner
                     case "codex":
                     case "chatgpt": Add(ProviderId.Codex); break;
                     case "claude": Add(ProviderId.Claude); break;
+                    case "grok": Add(ProviderId.Grok); break;
                     case "cursor": Add(ProviderId.Cursor); break;
                     case "antigravity": Add(ProviderId.Antigravity); break;
                     case "devin": Add(ProviderId.Devin); break;
@@ -962,7 +1316,7 @@ internal sealed class AgentActivityScanner
             "Name = 'bun.exe' OR Name = 'deno.exe' OR Name = 'npm.exe' OR Name = 'npx.exe' OR " +
             "Name = 'pnpm.exe' OR Name = 'yarn.exe' OR Name = 'wsl.exe' OR Name = 'bash.exe' OR " +
             "Name = 'codex.exe' OR Name = 'claude.exe' OR Name = 'cursor-agent.exe' OR " +
-            "Name = 'opencode.exe' OR Name = 'cline.exe' OR Name = 'agy.exe'";
+            "Name = 'opencode.exe' OR Name = 'cline.exe' OR Name = 'agy.exe' OR Name = 'grok.exe'";
 
         try
         {
@@ -993,6 +1347,7 @@ internal sealed class AgentActivityScanner
         if (text.Contains("claude-code") || text.Contains(" claude") || executable.Equals("claude", StringComparison.OrdinalIgnoreCase)) { provider = ProviderId.Claude; return true; }
         if (text.Contains("cursor-agent") || text.Contains("cursor agent")) { provider = ProviderId.Cursor; return true; }
         if (text.Contains("antigravity") || executable.Equals("agy", StringComparison.OrdinalIgnoreCase)) { provider = ProviderId.Antigravity; return true; }
+        if (text.Contains("grok") || executable.Equals("grok", StringComparison.OrdinalIgnoreCase)) { provider = ProviderId.Grok; return true; }
         if (text.Contains("opencode")) { provider = ProviderId.OpenCode; return true; }
         if (text.Contains("cline")) { provider = ProviderId.Cline; return true; }
         if (text.Contains(" codex") || executable.Equals("codex", StringComparison.OrdinalIgnoreCase)) { provider = ProviderId.Codex; return true; }
@@ -1088,6 +1443,8 @@ internal sealed class AgentActivityScanner
     private sealed record OpenCodeSessionRow(string Id, string? ParentId, string Title, string Model, long CreatedAt, long UpdatedAt);
     private sealed record OpenCodeMessageRow(string Id, string Data, long CreatedAt, long UpdatedAt);
     private sealed record OpenCodePartRow(string Id, string MessageId, string Data, long CreatedAt, long UpdatedAt);
+    private sealed record GrokTranscriptInfo(string Prompt, string Step, string Summary,
+        TranscriptState State, DateTimeOffset? LastActivity);
     private sealed record OpenCodeMessageInfo(
         string Id, string Role, DateTimeOffset CreatedAt, DateTimeOffset ActivityAt, bool Completed, bool Failed);
     private sealed record OpenCodePartInfo(
