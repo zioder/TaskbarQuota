@@ -33,6 +33,8 @@ namespace TaskbarQuota.ActiveApp
 
         private static readonly TimeSpan CacheTtl = TimeSpan.FromMilliseconds(350);
 
+        private readonly object _cacheGate = new();
+        private readonly object _automationGate = new();
         private IUIAutomation? _automation;
         private IntPtr _cachedHwnd;
         private ProviderId? _cachedProvider;
@@ -50,7 +52,9 @@ namespace TaskbarQuota.ActiveApp
             if (!IsBrowserProcessName(processName))
                 return null;
 
-            var provider = DetectActiveProvider(hwnd);
+            var provider = DetectActiveProvider(hwnd)
+                ?? TryResolveProviderFromUrl(
+                    FirefoxSessionStoreReader.TryReadSelectedTabUrl(processName));
 
             return provider is { } p
                 ? new BrowserProviderDetection(p, ResolveBrowserSource(processName))
@@ -62,16 +66,22 @@ namespace TaskbarQuota.ActiveApp
             if (hwnd == IntPtr.Zero)
                 return null;
 
-            var now = DateTime.UtcNow;
-            if (hwnd == _cachedHwnd && now - _cachedAtUtc < CacheTtl)
-                return _cachedProvider;
+            lock (_cacheGate)
+            {
+                var now = DateTime.UtcNow;
+                if (hwnd == _cachedHwnd && now - _cachedAtUtc < CacheTtl)
+                    return _cachedProvider;
+            }
 
             // Cache only the provider classification. URLs may contain private paths, conversation IDs,
             // or query text and are not needed after the active-tab decision has been made.
             var provider = TryResolveProviderFromUrl(TryReadActiveTabUrlCore(hwnd));
-            _cachedHwnd = hwnd;
-            _cachedProvider = provider;
-            _cachedAtUtc = now;
+            lock (_cacheGate)
+            {
+                _cachedHwnd = hwnd;
+                _cachedProvider = provider;
+                _cachedAtUtc = DateTime.UtcNow;
+            }
             return provider;
         }
 
@@ -119,22 +129,25 @@ namespace TaskbarQuota.ActiveApp
 
         private string? TryReadActiveTabUrlCore(IntPtr hwnd)
         {
-            try
+            lock (_automationGate)
             {
-                _automation ??= new CUIAutomation();
-                var root = _automation.ElementFromHandle(hwnd);
-                if (root is null)
-                    return null;
+                try
+                {
+                    _automation ??= new CUIAutomation();
+                    var root = _automation.ElementFromHandle(hwnd);
+                    if (root is null)
+                        return null;
 
-                if (TryFindUrlInEdits(root) is { } editUrl)
-                    return editUrl;
-            }
-            catch (Exception ex)
-            {
-                Diagnostics.Log.Debug($"[browser] URL UIA read failed: {ex.Message}");
-            }
+                    if (TryFindUrlInEdits(root) is { } editUrl)
+                        return editUrl;
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.Log.Debug($"[browser] URL UIA read failed: {ex.Message}");
+                }
 
-            return null;
+                return null;
+            }
         }
 
         private string? TryFindUrlInEdits(IUIAutomationElement root)
