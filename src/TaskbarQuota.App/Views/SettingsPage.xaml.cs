@@ -46,6 +46,7 @@ namespace TaskbarQuota.Views
             StartupToggle.IsOn = StartupSettingsService.IsEnabled;
             ApplyQuotaAlertSettingsToControls();
             AutoHideUnavailableToggle.IsOn = WidgetSettingsService.AutoHideUnavailable;
+            HideWhenUnfocusedToggle.IsOn = WidgetSettingsService.HideWhenProviderUnfocused;
             ViewModel.ReloadProviders();
             RebuildProviderSettings();
             VersionLabel.Text = $"Version {AppVersion.GetDisplayLabel()}";
@@ -170,6 +171,14 @@ namespace TaskbarQuota.Views
                 return;
 
             WidgetSettingsService.ApplyAutoHideUnavailable(AutoHideUnavailableToggle.IsOn);
+        }
+
+        private void OnHideWhenUnfocusedToggled(object sender, RoutedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            WidgetSettingsService.ApplyHideWhenProviderUnfocused(HideWhenUnfocusedToggle.IsOn);
         }
 
         private void OnProviderDashboardToggled(object sender, RoutedEventArgs e)

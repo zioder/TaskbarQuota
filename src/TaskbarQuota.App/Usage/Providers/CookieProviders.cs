@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -168,6 +169,9 @@ namespace TaskbarQuota.Usage.Providers
         private const string BillingServerId = "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d";
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
         private static readonly Regex WorkspaceRe = new(@"wrk_[A-Za-z0-9_-]+", RegexOptions.Compiled);
+        private static readonly object WorkspaceCacheGate = new();
+        private static readonly Dictionary<string, (string workspaceId, DateTimeOffset expiresAt)> WorkspaceCache = new(StringComparer.Ordinal);
+        private static readonly TimeSpan WorkspaceCacheTtl = TimeSpan.FromMinutes(5);
 
         internal static string WorkspacePageUrl(string workspaceId, string? segment = null)
         {
@@ -195,7 +199,6 @@ namespace TaskbarQuota.Usage.Providers
         {
             string workspaceId = NormalizeWorkspaceId(CredentialStore.Instance.WorkspaceId(Id))
                 ?? await FetchWorkspaceId(cookie, ct, "OpenCode").ConfigureAwait(false);
-
             var texts = new List<string>();
             var pageTasks = new[]
             {
@@ -216,8 +219,11 @@ namespace TaskbarQuota.Usage.Providers
 
             var combined = string.Join("\n", texts);
             var monthlyUsage = FindMoneyValue(combined, "monthlyUsage", "monthly_usage", "currentUsage", "usage");
-            var balance = ParseBillingBalance(combined)
-                ?? FindMoneyValue(combined, "zenBalance", "currentBalance", "current_balance", "balance");
+            // Billing responses contain the customer ID and balance in the same object. Parse that
+            // response on its own so an unrelated customerID on a page cannot be paired with a
+            // balance from a different response.
+            var balance = !string.IsNullOrEmpty(billingText) ? ParseBillingBalance(billingText) : null;
+            balance ??= FindMoneyValue(combined, "zenBalance", "currentBalance", "current_balance", "balance");
             var monthlyLimit = FindMoneyValue(combined, "monthlyLimit", "monthly_limit");
 
             if (monthlyUsage is null && balance is null)
@@ -256,32 +262,41 @@ namespace TaskbarQuota.Usage.Providers
 
         internal static async Task<string> FetchWorkspaceId(string cookie, CancellationToken ct, string providerName)
         {
-            string? text = null;
+            var cacheKey = WorkspaceCacheKey(providerName, cookie);
+            lock (WorkspaceCacheGate)
+            {
+                if (WorkspaceCache.TryGetValue(cacheKey, out var cached)
+                    && cached.expiresAt > DateTimeOffset.UtcNow)
+                    return cached.workspaceId;
+            }
+
             try
             {
-                text = await GetText($"{ServerUrl}?id={WorkspacesServerId}", WorkspacesServerId,
+                var getText = await GetText($"{ServerUrl}?id={WorkspacesServerId}", WorkspacesServerId,
                     "https://opencode.ai", cookie, ct).ConfigureAwait(false);
+                var getIds = ParseWorkspaceIds(getText);
+                if (getIds.Count > 0)
+                    return CacheWorkspaceId(cacheKey, SelectWorkspaceId(providerName, "GET", getIds));
             }
-            catch (ProviderException ex) when (ex.Kind != ProviderErrorKind.AuthRequired)
+            catch (ProviderException ex) when (ex.Kind == ProviderErrorKind.Other)
             {
-                // The server function can reject GET after a deployment changes its transport.
-                // Preserve auth errors, but let the POST form handle status/transport failures.
+                // Solid server functions can reject GET after a deployment changes their transport.
+                // Only an undifferentiated server failure should fall back to POST; auth and rate
+                // limit responses must be surfaced to the caller.
             }
             catch (HttpRequestException)
             {
                 // A connection-level GET failure may still succeed through the POST route.
             }
-
-            if (text != null)
+            catch (TaskCanceledException) when (!ct.IsCancellationRequested)
             {
-                var getIds = ParseWorkspaceIds(text);
-                if (getIds.Count > 0) return SelectWorkspaceId(providerName, "GET", getIds);
+                // HttpClient.Timeout presents as TaskCanceledException; the POST route may still work.
             }
-
-            text = await GetText(ServerUrl, WorkspacesServerId, "https://opencode.ai", cookie, ct,
+            var text = await GetText(ServerUrl, WorkspacesServerId, "https://opencode.ai", cookie, ct,
                 HttpMethod.Post, "[]").ConfigureAwait(false);
             var ids = ParseWorkspaceIds(text);
-            if (ids.Count > 0) return SelectWorkspaceId(providerName, "POST", ids);
+            if (ids.Count > 0)
+                return CacheWorkspaceId(cacheKey, SelectWorkspaceId(providerName, "POST", ids));
             throw new ProviderException(ProviderErrorKind.Parse, $"{providerName}: no workspace id found.");
         }
 
@@ -294,6 +309,16 @@ namespace TaskbarQuota.Usage.Providers
             return ids[0];
         }
 
+        private static string WorkspaceCacheKey(string providerName, string cookie)
+            => $"{providerName}:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(cookie)))}";
+
+        private static string CacheWorkspaceId(string cacheKey, string workspaceId)
+        {
+            lock (WorkspaceCacheGate)
+                WorkspaceCache[cacheKey] = (workspaceId, DateTimeOffset.UtcNow + WorkspaceCacheTtl);
+            return workspaceId;
+        }
+
         private static async Task<string?> TryGetBillingText(string workspaceId, string cookie, CancellationToken ct)
         {
             try
@@ -302,7 +327,7 @@ namespace TaskbarQuota.Usage.Providers
                 return await GetText($"{ServerUrl}?id={BillingServerId}&args={Uri.EscapeDataString(args)}",
                     BillingServerId, WorkspacePageUrl(workspaceId), cookie, ct).ConfigureAwait(false);
             }
-            catch (ProviderException ex) when (ex.Kind == ProviderErrorKind.AuthRequired) { throw; }
+            catch (ProviderException ex) when (ex.Kind is ProviderErrorKind.AuthRequired or ProviderErrorKind.RateLimited) { throw; }
             catch (OperationCanceledException) { throw; }
             catch { return null; }
         }
@@ -337,7 +362,6 @@ namespace TaskbarQuota.Usage.Providers
                 foreach (var item in element.EnumerateArray())
                     if (TryFindBillingBalance(item, out balance)) return true;
             }
-
             balance = 0;
             return false;
         }
@@ -366,8 +390,12 @@ namespace TaskbarQuota.Usage.Providers
                 req.Content = new StringContent(body, Encoding.UTF8, "application/json");
             using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
             var text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden || LooksSignedOut(text))
+            if (LooksSignedOut(text))
                 throw new ProviderException(ProviderErrorKind.AuthRequired, "OpenCode cookies expired.");
+            if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                throw new ProviderException(ProviderErrorKind.AuthRequired, "OpenCode cookies expired.");
+            if (resp.StatusCode == HttpStatusCode.TooManyRequests)
+                throw new ProviderException(ProviderErrorKind.RateLimited, "OpenCode API rate limited.");
             if (!resp.IsSuccessStatusCode)
                 throw new ProviderException(ProviderErrorKind.Other, $"OpenCode API {(int)resp.StatusCode}");
             return text;
@@ -385,6 +413,8 @@ namespace TaskbarQuota.Usage.Providers
             var text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden || LooksSignedOut(text))
                 throw new ProviderException(ProviderErrorKind.AuthRequired, "OpenCode cookies expired.");
+            if (resp.StatusCode == HttpStatusCode.TooManyRequests)
+                throw new ProviderException(ProviderErrorKind.RateLimited, "OpenCode API rate limited.");
             if (!resp.IsSuccessStatusCode)
                 throw new ProviderException(ProviderErrorKind.Other, $"OpenCode API {(int)resp.StatusCode}");
             return text;
@@ -393,7 +423,7 @@ namespace TaskbarQuota.Usage.Providers
         private static async Task<string?> TryGetPageText(string url, string referer, string cookie, CancellationToken ct)
         {
             try { return await GetPageText(url, referer, cookie, ct).ConfigureAwait(false); }
-            catch (ProviderException ex) when (ex.Kind == ProviderErrorKind.AuthRequired) { throw; }
+            catch (ProviderException ex) when (ex.Kind is ProviderErrorKind.AuthRequired or ProviderErrorKind.RateLimited) { throw; }
             catch (OperationCanceledException) { throw; }
             catch { return null; }
         }
@@ -403,8 +433,9 @@ namespace TaskbarQuota.Usage.Providers
             var lower = text.ToLowerInvariant();
             return lower.Contains("auth/authorize")
                 || lower.Contains("\"signin\"")
-                || lower.Contains("please sign in to continue")
-                || lower.Contains("<title>openauth</title>")
+                || lower.Contains("please sign in")
+                || lower.Contains("sign in")
+                || lower.Contains("openauth")
                 || lower.Contains("continue with github")
                 || lower.Contains("continue with google")
                 || (lower.Contains("actor of type") && lower.Contains("not associated with an account"));
@@ -671,6 +702,8 @@ namespace TaskbarQuota.Usage.Providers
             var text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden || OpenCodeProvider.LooksSignedOut(text))
                 throw new ProviderException(ProviderErrorKind.AuthRequired, "OpenCode Go cookies expired.");
+            if (resp.StatusCode == HttpStatusCode.TooManyRequests)
+                throw new ProviderException(ProviderErrorKind.RateLimited, "OpenCode Go API rate limited.");
             if (!resp.IsSuccessStatusCode)
                 throw new ProviderException(ProviderErrorKind.Other, $"OpenCode Go API {(int)resp.StatusCode}");
             return text;

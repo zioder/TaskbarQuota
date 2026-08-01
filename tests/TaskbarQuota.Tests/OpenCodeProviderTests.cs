@@ -63,7 +63,7 @@ public class OpenCodeProviderTests
         => Assert.Equal(expected, OpenCodeProvider.NormalizeWorkspaceId(input));
 
     [Fact]
-    public void ParseWorkspaceIds_DeduplicatesOccurrences()
+    public void ParseWorkspaceIds_DeduplicatesStructuredAndJsonOccurrences()
     {
         var ids = OpenCodeProvider.ParseWorkspaceIds(
             "id: \"wrk_first\", data: { workspace: \"wrk_second\", again: \"wrk_first\" }");

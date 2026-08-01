@@ -130,8 +130,15 @@ public class OpenCodeGoProviderTests
         Assert.True(OpenCodeProvider.LooksSignedOut(html));
     }
 
+    [Theory]
+    [InlineData("<title>OpenAuth</title>")]
+    [InlineData("<button>Continue with GitHub</button>")]
+    [InlineData("<button>Continue with Google</button>")]
+    public void LooksSignedOut_WithOpenAuthPage_ReturnsTrue(string html)
+        => Assert.True(OpenCodeProvider.LooksSignedOut(html));
+
     [Fact]
-    public void GoPagePayload_ParsesEmbeddedUsageWindows()
+    public void GoPagePayload_ParsesCurrentCodexBarStyleEmbeddedUsage()
     {
         var html = "<script>window.__data={rollingUsage:{usagePercent:37.5,resetInSec:7200}," +
                    "weeklyUsage:{usagePercent:51,resetInSec:172800}," +
