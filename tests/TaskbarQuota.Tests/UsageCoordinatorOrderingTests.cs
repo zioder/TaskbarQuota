@@ -60,6 +60,14 @@ public class UsageCoordinatorOrderingTests
     public void ShouldReactToOpenCodeModelChange_ReturnsFalseWhenNothingDetected()
         => Assert.False(UsageCoordinator.ShouldReactToOpenCodeModelChange(null));
 
+    [Fact]
+    public void ShouldRefreshOpenCodeProvider_DeduplicatesRepeatedStateWrites()
+    {
+        Assert.True(UsageCoordinator.ShouldRefreshOpenCodeProvider(null, false, ProviderId.OpenCode));
+        Assert.False(UsageCoordinator.ShouldRefreshOpenCodeProvider(ProviderId.OpenCode, true, ProviderId.OpenCode));
+        Assert.True(UsageCoordinator.ShouldRefreshOpenCodeProvider(ProviderId.OpenCode, true, ProviderId.OpenCodeGo));
+    }
+
     private static IReadOnlyList<UsageResult> Results(params ProviderId[] ids)
         => ids.Select(id => UsageResult.Pending(id, new TestProvider(id), "Loading")).ToArray();
 

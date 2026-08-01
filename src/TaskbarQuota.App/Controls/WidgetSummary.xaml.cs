@@ -860,13 +860,13 @@ namespace TaskbarQuota.Controls
         /// <summary>
         /// Whether a render that skips the cross-fade still has to put the tile on screen outright.
         ///
-        /// True exactly when this is the tile's first render and it is meant to be showing: the root ships
-        /// at Opacity 0, and the reveal is the only thing that raises it. A suppressed transition that
-        /// returned early here left the tile permanently invisible even though it measured, laid out and
-        /// reported itself Visible.
+        /// True exactly when this is the tile's first render: the root ships at Opacity 0, and the reveal is
+        /// the only thing that raises it. Provider seeding happens before the layout pass marks the slot
+        /// visible, so consulting the pre-layout visibility flag here can leave the tile permanently
+        /// transparent. The synchronous layout pass still collapses any slot that should not be shown.
         /// </summary>
-        internal static bool ShouldRevealWithoutTransition(bool isFirstReveal, bool isActiveToolVisible)
-            => isFirstReveal && isActiveToolVisible;
+        internal static bool ShouldRevealWithoutTransition(bool isFirstReveal)
+            => isFirstReveal;
 
         private void AnimateRender(bool isFirstReveal, bool providerSwitch = false)
         {
@@ -880,7 +880,7 @@ namespace TaskbarQuota.Controls
                 // transition) used to stay fully transparent for the life of the process: measured, laid
                 // out, Visible, and painting nothing. Show it outright instead — skipping the fade is the
                 // whole point of the suppression, showing it is not.
-                if (ShouldRevealWithoutTransition(isFirstReveal, _isActiveToolVisible))
+                if (ShouldRevealWithoutTransition(isFirstReveal))
                 {
                     Root.Opacity = 1;
                     RootTranslate.Y = 0;

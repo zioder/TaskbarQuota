@@ -167,6 +167,20 @@ This is the core behavior — everything else (widget, flyout, fetch cache) hang
 
 Each provider card on the dashboard shows plan name, reset times, rate windows, and optional cost or balance when the API returns it. Use **Fix** on a card when auto-detection fails to paste tokens or cookie headers into `%LOCALAPPDATA%\TaskbarQuota\credentials.json`.
 
+### OpenCode browser-cookie fallback (Windows)
+
+OpenCode automatic cookie detection reads each browser profile separately. It supports Firefox, Zen, Waterfox, LibreWolf, and Floorp, plus Chromium profiles whose cookies are still decryptable with the Windows user key (typically Chrome/Edge/Brave versions below 127). Profiles are never merged, so a stale readable Chrome session cannot overwrite a valid Gecko session.
+
+Chromium 127 and newer use App-Bound Encryption, which a normal desktop app cannot decrypt with the user DPAPI key. If OpenCode is signed in only there:
+
+1. Open `https://opencode.ai` and open Developer Tools (`F12`).
+2. Select **Network**, reload the page, and select an OpenCode request.
+3. Use **Copy → Copy as cURL**. You may paste the full cURL command, or only the value after the request's `Cookie:` header; TaskbarQuota extracts the cookie automatically.
+4. Open TaskbarQuota's **Fix** action for **OpenCode** or **OpenCode Go** and paste it into **Cookie header**.
+5. If workspace detection also fails, paste the `wrk_...` value from the OpenCode URL (or the full workspace URL) into **Workspace ID**.
+
+Cookie headers are session credentials. Keep them private and do not paste them into issues or chat. The saved manual value is stored locally in `%LOCALAPPDATA%\TaskbarQuota\credentials.json`.
+
 ### Dashboard & shell
 
 - **Full dashboard** — all registered providers at once with refresh, error states, and detail cards.
@@ -197,7 +211,7 @@ TaskBarManager → WidgetSummary (taskbar) + Dashboard + Flyout
 ```
 
 1. **Detection** — `ActiveAppDetector` maps the foreground process (or CLI child of a known terminal) to a `ProviderId`.
-2. **Fetch** — the matching `IUsageProvider` loads tokens from CLI config files, environment variables, TaskbarQuota credentials, Cursor's local database, or `CookieExtractor` (Chromium / Firefox profiles, copied to `%TEMP%` for locked DBs).
+2. **Fetch** — the matching `IUsageProvider` loads tokens from CLI config files, environment variables, TaskbarQuota credentials, Cursor's local database, or `CookieExtractor` (Chromium / Firefox profiles, opened directly with a read-only SQLite connection).
 3. **Normalize** — results become a `UsageSnapshot` with `RateWindow` rows and optional `CostSnapshot`.
 4. **Display** — `UsageCoordinator` raises `StateChanged`; the taskbar widget and dashboard apply the snapshot. Fetches are cached so providers are not hammered on every tick.
 

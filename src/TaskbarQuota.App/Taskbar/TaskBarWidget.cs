@@ -18,6 +18,7 @@ using TaskbarQuota.Controls;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Interop;
 using TaskbarQuota.Usage;
+using Anim = Microsoft.UI.Xaml.Media.Animation;
 
 namespace TaskbarQuota.Taskbar
 {
@@ -122,6 +123,11 @@ namespace TaskbarQuota.Taskbar
         private bool loggedMissingPanel;
         private DesktopWindowXamlSource? host;
         private Microsoft.UI.Xaml.FrameworkElement? hostContent;
+        // Show/hide cross-fade state. Short on purpose: the widget lives on the taskbar, so anything
+        // slower reads as lag rather than as a transition.
+        private const int HostFadeMilliseconds = 100;
+        private Anim.Storyboard? hostFadeStoryboard;
+        private int hostFadeGeneration;
         private int WidgetHostWidth;
         private int currentOffsetX = int.MinValue;
         private int currentOffsetY = 0;
@@ -305,24 +311,108 @@ namespace TaskbarQuota.Taskbar
                 && target.IsPrimary == isPrimaryTaskbar
                 && string.Equals(target.DisplayKey, displayKey, StringComparison.Ordinal);
 
+        /// <summary>
+        /// Shows or hides the widget with a short cross-fade. A native window can't be animated, so the
+        /// XAML content carries the fade and the window is only hidden once it has finished — otherwise
+        /// the "hide when no provider is focused" setting made the widget vanish in a single frame.
+        /// </summary>
         public void SetVisible(bool visible)
         {
-            if (appWindow is null || isVisible == visible)
+            if (appWindow is null)
+                return;
+
+            // The cached flag is only our requested state. During Explorer/XAML-island startup the native
+            // window can remain hidden even after an earlier Show request, so an equal cached value must not
+            // suppress recovery when AppWindow reports a different actual state.
+            if (isVisible == visible && appWindow.IsVisible == visible)
                 return;
 
             isVisible = visible;
+            // Invalidates any fade still in flight, so a show landing mid-hide cancels that hide's window
+            // teardown instead of racing it.
+            hostFadeGeneration++;
+
             if (visible)
             {
                 QueuePositionUpdate(TaskbarChangeReason.None);
+                if (hostContent is not null)
+                    hostContent.Opacity = 0;
                 appWindow.Show(false);
+                AnimateHostOpacity(1);
+                return;
             }
-            else
+
+            if (isDragging)
+                EndDragging(revert: true);
+
+            if (hostContent is null)
             {
-                if (isDragging)
-                    EndDragging(revert: true);
                 classicTaskbarReservation.Restore();
                 appWindow.Hide();
+                return;
             }
+
+            int generation = hostFadeGeneration;
+            AnimateHostOpacity(0, () =>
+            {
+                if (generation != hostFadeGeneration || destroyed || appWindow is null)
+                    return;
+
+                classicTaskbarReservation.Restore();
+                appWindow.Hide();
+                // Leave the content opaque again so the next Show has nothing to undo if it takes the
+                // no-animation path (e.g. the host was rebuilt in between).
+                if (hostContent is { } content)
+                    content.Opacity = 1;
+            });
+        }
+
+        private void AnimateHostOpacity(double to, Action? completed = null)
+        {
+            if (hostContent is not { } content)
+            {
+                completed?.Invoke();
+                return;
+            }
+
+            hostFadeStoryboard?.Stop();
+
+            double from = content.Opacity;
+
+            // When hiding (to == 0) we always run the storyboard, even if the content is already
+            // near-transparent: skipping it would call the completion immediately, which hides the
+            // window without any animation and is the "instant disappear" the user saw.
+            // When showing (to == 1) skip is fine — nothing to animate if we're already opaque.
+            bool skip = Math.Abs(from - to) < 0.01 && to > 0.5;
+            if (skip)
+            {
+                content.Opacity = to;
+                completed?.Invoke();
+                return;
+            }
+
+            // Park the local value at the destination and let the animation supply the start through From,
+            // the same rule the tile animations follow: an interrupted fade then settles visible rather
+            // than leaving the host stuck transparent.
+            content.Opacity = to;
+
+            var animation = new Anim.DoubleAnimation
+            {
+                From = from < 0.01 ? 0.15 : from, // guarantee at least a short visible flash so the fade is perceptible
+                To = to,
+                Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(HostFadeMilliseconds)),
+                EasingFunction = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut },
+            };
+            Anim.Storyboard.SetTarget(animation, content);
+            Anim.Storyboard.SetTargetProperty(animation, "Opacity");
+
+            var storyboard = new Anim.Storyboard();
+            storyboard.Children.Add(animation);
+            if (completed is not null)
+                storyboard.Completed += (_, _) => completed();
+
+            hostFadeStoryboard = storyboard;
+            storyboard.Begin();
         }
 
         public void Destroy() => appWindow?.Destroy();

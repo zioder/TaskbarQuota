@@ -57,6 +57,9 @@ public static class WidgetSettingsService
     private static readonly string AutoHideUnavailablePath =
         Path.Combine(AppStorage.AppDataDirectory, "auto-hide-unavailable.txt");
 
+    private static readonly string HideWhenUnfocusedPath =
+        Path.Combine(AppStorage.AppDataDirectory, "hide-when-unfocused.txt");
+
     private static readonly Dictionary<string, bool> RowVisibility = LoadRowVisibility();
     private static readonly Dictionary<string, bool> ProviderVisibility = LoadProviderVisibility();
     private static readonly Dictionary<string, bool> DashboardProviderVisibility = LoadDashboardProviderVisibility();
@@ -65,6 +68,13 @@ public static class WidgetSettingsService
     public static WidgetDisplayMode Current { get; private set; } = LoadWidgetDisplayMode();
     public static PercentageDisplayMode CurrentPercentageMode { get; private set; } = LoadPercentageDisplayMode();
     public static bool AutoHideUnavailable { get; private set; } = LoadAutoHideUnavailable();
+    /// <summary>
+    /// Opt-in: the active provider's tile only stays on the taskbar while that provider's app is the
+    /// foreground window. Off (the default) keeps today's behaviour, where the last active provider
+    /// remains on the bar after the user switches to a browser or any other unrelated app. Pinned tiles
+    /// are never affected — a pin is an explicit "always show this" request.
+    /// </summary>
+    public static bool HideWhenProviderUnfocused { get; private set; } = LoadHideWhenUnfocused();
     public static event EventHandler? Changed;
     public static event EventHandler? DashboardCompositionChanged;
     public static event EventHandler? PercentageModeChanged;
@@ -224,6 +234,16 @@ public static class WidgetSettingsService
         AutoHideUnavailable = enabled;
         Save(AutoHideUnavailablePath, enabled ? 1 : 0);
         DashboardCompositionChanged?.Invoke(null, EventArgs.Empty);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ApplyHideWhenProviderUnfocused(bool enabled)
+    {
+        if (HideWhenProviderUnfocused == enabled)
+            return;
+
+        HideWhenProviderUnfocused = enabled;
+        Save(HideWhenUnfocusedPath, enabled ? 1 : 0);
         Changed?.Invoke(null, EventArgs.Empty);
     }
 
@@ -600,6 +620,24 @@ public static class WidgetSettingsService
         catch
         {
             return true;
+        }
+    }
+
+    // Opt-in, so an absent file means off — the opposite default from AutoHideUnavailable, whose file
+    // absence means "on". Existing installs must not silently start hiding the widget after an update.
+    private static bool LoadHideWhenUnfocused()
+    {
+        try
+        {
+            if (!File.Exists(HideWhenUnfocusedPath))
+                return false;
+
+            string raw = File.ReadAllText(HideWhenUnfocusedPath);
+            return int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value) && value != 0;
+        }
+        catch
+        {
+            return false;
         }
     }
 

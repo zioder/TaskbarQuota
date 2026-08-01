@@ -30,6 +30,7 @@ namespace TaskbarQuota
         // fetch for one that is still running — a slow or offline endpoint would otherwise accumulate
         // concurrent requests and could publish an older snapshot out of order.
         private readonly HashSet<ProviderId> _widgetRefreshInFlight = new();
+        private readonly object _openCodeModelStateLock = new();
         private Timer? _timer;
         // Synara persists provider switches through a 300 ms-debounced localStorage writer, and Chromium
         // then flushes that to its on-disk LevelDB on its own (variable, sometimes >1 s) cadence. The
@@ -67,6 +68,25 @@ namespace TaskbarQuota
         private bool? _lastHasDetectedTool;
         private DateTime _lastPresenceProbeAt = DateTime.MinValue;
         private ProviderSource _activeProviderSource = ProviderSource.Unknown;
+        private ProviderId? _lastObservedOpenCodeProvider;
+        private bool _hasObservedOpenCodeProvider;
+        // Focus-follows-provider state, only consulted when WidgetSettingsService.HideWhenProviderUnfocused
+        // is on. Starts true so the widget shows from launch and only ever hides after a detect that
+        // actually saw an unrelated foreground app.
+        private bool _providerForegroundActive = true;
+        private DateTime _providerUnfocusedSinceUtc = DateTime.MinValue;
+        // Grace period before the tile is dropped, counted from the first provider-free foreground. Kept
+        // short: it only exists to swallow the momentary focusless gap while a window is being raised, and
+        // anything longer reads as the widget lagging behind the window switch. Showing is always instant.
+        // 120ms: enough to absorb the transient focus gap during Alt-Tab/window transitions (~80ms max),
+        // short enough that the hide feels instant to the user rather than sluggish.
+        private static readonly TimeSpan ProviderUnfocusHideDelay = TimeSpan.FromMilliseconds(120);
+        // Re-check scheduled when a foreground switch starts the grace period, so the hide lands as soon as
+        // it expires instead of waiting for the next 500 ms detect tick.
+        private Timer? _unfocusHideTimer;
+        // The focus state is written from the detect tick, the foreground hook and the grace timer — three
+        // different threads.
+        private readonly object _focusLock = new();
 
         public UsageService Service => _service;
         public ProviderId? ActiveProvider => _lastActive;
@@ -114,7 +134,7 @@ namespace TaskbarQuota
         public IReadOnlyList<ProviderId> WidgetDisplayProviders
             => ComputeWidgetDisplayProviders(
                 _lastActive,
-                IsActiveToolPresent,
+                IsActiveToolPresent && IsActiveTileAllowedByFocus,
                 RecentProviders,
                 Enum.GetValues<ProviderId>(),
                 WidgetSettingsService.IsProviderPinned,
@@ -173,6 +193,140 @@ namespace TaskbarQuota
         /// <summary>Last usage snapshot pushed to listeners; used to hydrate the taskbar widget if it was created late.</summary>
         public UsageResult? LastState { get; private set; }
         public bool IsActiveToolPresent => _lastHasDetectedTool ?? _detector.HasAnyKnownToolRunning();
+
+        /// <summary>
+        /// Whether the active provider currently earns a tile. Always true unless the user opted into
+        /// <see cref="WidgetSettingsService.HideWhenProviderUnfocused"/>, in which case it follows whether
+        /// a provider app is actually in the foreground.
+        /// </summary>
+        public bool IsActiveTileAllowedByFocus
+            => !WidgetSettingsService.HideWhenProviderUnfocused || _providerForegroundActive;
+
+        /// <summary>
+        /// Set by the taskbar layer to report that our own UI is on screen (the flyout). While it returns
+        /// true the focus tracker holds its current state, so opening the flyout — which takes the
+        /// foreground away from the provider app — never hides the widget the user is interacting with.
+        /// </summary>
+        public Func<bool>? IsOwnUiEngaged { get; set; }
+
+        /// <summary>Raised when <see cref="IsActiveTileAllowedByFocus"/> flips, so the widget can re-sync.</summary>
+        public event Action<bool>? ProviderForegroundChanged;
+
+        /// <summary>
+        /// Called by the taskbar layer's foreground hook the instant Windows switches windows. Re-runs
+        /// detection off the UI thread (it can hit WMI) so leaving or returning to a provider app is
+        /// reflected on the switch itself rather than up to one detect tick later.
+        /// </summary>
+        public void NotifyForegroundChanged()
+        {
+            if (!WidgetSettingsService.HideWhenProviderUnfocused)
+                return;
+
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    // DetectForegroundFast() never issues a UIA scan or WMI query, so switching to Zen
+                    // (or any browser that is not currently serving a provider URL) returns in <1 ms.
+                    // The grace timer's final re-check still uses full Detect() for accuracy.
+                    UpdateProviderForeground(_detector.DetectForegroundFast() is not null);
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.Log.Debug($"[focus] foreground re-detect failed: {ex.Message}");
+                }
+            });
+        }
+
+        /// <summary>
+        /// Folds one detect pass into the focus state. Called from every path that resolves a provider, so
+        /// the fast Synara/OpenCode/Cline switch handlers keep the widget up without waiting for a tick.
+        /// </summary>
+        private void UpdateProviderForeground(bool providerForeground)
+        {
+            bool changedTo;
+            lock (_focusLock)
+            {
+                bool ownUiEngaged = !providerForeground
+                    && (ActiveAppDetector.IsOwnProcessForeground() || IsOwnUiEngaged?.Invoke() == true);
+
+                var (next, unfocusedSince) = ResolveProviderForegroundState(
+                    providerForeground,
+                    ownUiEngaged,
+                    _providerForegroundActive,
+                    _providerUnfocusedSinceUtc,
+                    DateTime.UtcNow,
+                    ProviderUnfocusHideDelay);
+
+                _providerUnfocusedSinceUtc = unfocusedSince;
+                if (_providerForegroundActive == next)
+                {
+                    // Inside the grace window: come back exactly when it expires rather than drifting to
+                    // whenever the next detect tick happens to land. Skip re-arming when ownUiEngaged froze
+                    // the state — the next genuine foreground change will re-evaluate normally.
+                    if (!ownUiEngaged && next && unfocusedSince != DateTime.MinValue)
+                        ArmUnfocusHideCheck(unfocusedSince);
+                    return;
+                }
+
+                _providerForegroundActive = next;
+                changedTo = next;
+            }
+
+            Diagnostics.Log.Debug($"[focus] provider foreground={changedTo} (hide-when-unfocused={WidgetSettingsService.HideWhenProviderUnfocused})");
+            ProviderForegroundChanged?.Invoke(changedTo);
+        }
+
+        /// <summary>One-shot re-check at the end of the hide grace period. Caller holds <see cref="_focusLock"/>.</summary>
+        private void ArmUnfocusHideCheck(DateTime unfocusedSinceUtc)
+        {
+            var remaining = ProviderUnfocusHideDelay - (DateTime.UtcNow - unfocusedSinceUtc) + TimeSpan.FromMilliseconds(15);
+            if (remaining < TimeSpan.Zero)
+                remaining = TimeSpan.Zero;
+
+            if (_unfocusHideTimer is { } timer)
+            {
+                timer.Change(remaining, Timeout.InfiniteTimeSpan);
+                return;
+            }
+
+            _unfocusHideTimer = new Timer(
+                _ =>
+                {
+                    try { UpdateProviderForeground(_detector.Detect() is not null); }
+                    catch (Exception ex) { Diagnostics.Log.Debug($"[focus] grace re-check failed: {ex.Message}"); }
+                },
+                null,
+                remaining,
+                Timeout.InfiniteTimeSpan);
+        }
+
+        /// <summary>
+        /// Pure core of <see cref="UpdateProviderForeground"/>. Shows instantly, hides only after the
+        /// foreground has been provider-free for <paramref name="hideDelay"/>, and treats our own UI in
+        /// front as neither — it holds both the state and the running grace period untouched.
+        /// </summary>
+        internal static (bool Active, DateTime UnfocusedSinceUtc) ResolveProviderForegroundState(
+            bool providerForeground,
+            bool ownUiEngaged,
+            bool current,
+            DateTime unfocusedSinceUtc,
+            DateTime nowUtc,
+            TimeSpan hideDelay)
+        {
+            if (ownUiEngaged && !providerForeground)
+                return (current, unfocusedSinceUtc);
+
+            if (providerForeground)
+                return (true, DateTime.MinValue);
+
+            if (unfocusedSinceUtc == DateTime.MinValue)
+                unfocusedSinceUtc = nowUtc;
+
+            return nowUtc - unfocusedSinceUtc < hideDelay
+                ? (current, unfocusedSinceUtc)
+                : (false, unfocusedSinceUtc);
+        }
         public IReadOnlyList<ProviderId> RecentProviders
         {
             get
@@ -356,6 +510,8 @@ namespace TaskbarQuota
                     ActiveToolPresenceChanged?.Invoke(true);
                 }
 
+                UpdateProviderForeground(true);
+
                 // Synara fires on every localStorage write (incl. composer keystrokes). Only act when the
                 // provider/model/thread selection actually changed — otherwise it's already on screen.
                 if (!providerChanged && !hostChanged)
@@ -481,8 +637,12 @@ namespace TaskbarQuota
 
             if (!ShouldReactToOpenCodeModelChange(foreground))
             {
-                if (modelProvider is ProviderId backgroundProvider)
-                    await RefreshProviderCacheSilentlyAsync(backgroundProvider).ConfigureAwait(false);
+                if (modelProvider is ProviderId backgroundProvider
+                    && ShouldRefreshOpenCodeProvider(backgroundProvider))
+                {
+                    if (!await RefreshProviderCacheSilentlyAsync(backgroundProvider).ConfigureAwait(false))
+                        ForgetOpenCodeProviderObservation(backgroundProvider);
+                }
                 return;
             }
 
@@ -490,11 +650,20 @@ namespace TaskbarQuota
             if (!IsOpenCodeProvider(target))
                 return;
 
+            // OpenCode rewrites its model/state files while the user types. The file event only matters
+            // when it changes the quota surface (Zen vs Go); republishing the same provider forces a
+            // network fetch and restarts the taskbar widget's refresh animation on every keystroke.
+            if (!ShouldRefreshOpenCodeProvider(target))
+                return;
+
             await _gate.WaitAsync().ConfigureAwait(false);
             try
             {
                 if (!ShouldReactToOpenCodeModelChange(_detector.Detect()))
+                {
+                    ForgetOpenCodeProviderObservation(target);
                     return;
+                }
 
                 var previous = _lastActive;
                 _lastActive = target;
@@ -511,9 +680,12 @@ namespace TaskbarQuota
                     _lastHasDetectedTool = true;
                     ActiveToolPresenceChanged?.Invoke(true);
                 }
+
+                UpdateProviderForeground(true);
             }
             catch (Exception ex)
             {
+                ForgetOpenCodeProviderObservation(target);
                 Diagnostics.Log.Error(ex, "OpenCode model switch failed");
                 return;
             }
@@ -526,11 +698,16 @@ namespace TaskbarQuota
             {
                 var fresh = (await _service.FetchAsync(target, force: true).ConfigureAwait(false))
                     .WithSource(SourceFor(target));
+                if (!fresh.Ok)
+                    ForgetOpenCodeProviderObservation(target);
                 await _gate.WaitAsync().ConfigureAwait(false);
                 try
                 {
                     if (!ShouldReactToOpenCodeModelChange(_detector.Detect()) || _lastActive != target)
+                    {
+                        ForgetOpenCodeProviderObservation(target);
                         return;
+                    }
 
                     if (target != _lastLogged)
                     {
@@ -551,6 +728,7 @@ namespace TaskbarQuota
             }
             catch (Exception ex)
             {
+                ForgetOpenCodeProviderObservation(target);
                 Diagnostics.Log.Error(ex, "OpenCode model switch refresh failed");
             }
         }
@@ -560,6 +738,37 @@ namespace TaskbarQuota
 
         internal static bool IsOpenCodeProvider(ProviderId provider)
             => provider is ProviderId.OpenCode or ProviderId.OpenCodeGo;
+
+        internal bool ShouldRefreshOpenCodeProvider(ProviderId provider)
+        {
+            lock (_openCodeModelStateLock)
+            {
+                if (!ShouldRefreshOpenCodeProvider(_lastObservedOpenCodeProvider, _hasObservedOpenCodeProvider, provider))
+                    return false;
+
+                _hasObservedOpenCodeProvider = true;
+                _lastObservedOpenCodeProvider = provider;
+                return true;
+            }
+        }
+
+        private void ForgetOpenCodeProviderObservation(ProviderId provider)
+        {
+            lock (_openCodeModelStateLock)
+            {
+                if (_hasObservedOpenCodeProvider && _lastObservedOpenCodeProvider == provider)
+                {
+                    _hasObservedOpenCodeProvider = false;
+                    _lastObservedOpenCodeProvider = null;
+                }
+            }
+        }
+
+        internal static bool ShouldRefreshOpenCodeProvider(
+            ProviderId? lastObservedProvider,
+            bool hasObservedProvider,
+            ProviderId provider)
+            => !hasObservedProvider || lastObservedProvider != provider;
 
         private void OnClineProviderStateChanged() => _ = HandleClineProviderSwitchAsync();
 
@@ -605,6 +814,7 @@ namespace TaskbarQuota
                     ActiveProviderChanged?.Invoke(target);
 
                 PublishImmediateState(target);
+                UpdateProviderForeground(true);
             }
             catch (Exception ex)
             {
@@ -640,15 +850,17 @@ namespace TaskbarQuota
             }
         }
 
-        private async Task RefreshProviderCacheSilentlyAsync(ProviderId provider)
+        private async Task<bool> RefreshProviderCacheSilentlyAsync(ProviderId provider)
         {
             try
             {
-                await _service.FetchAsync(provider, force: true).ConfigureAwait(false);
+                var result = await _service.FetchAsync(provider, force: true).ConfigureAwait(false);
+                return result.Ok;
             }
             catch (Exception ex)
             {
                 Diagnostics.Log.Warning(ex, $"Background refresh for {provider} failed");
+                return false;
             }
         }
 
@@ -816,6 +1028,10 @@ namespace TaskbarQuota
                     ActiveSynaraHost = null;
                     ClearSynaraHold();
                 }
+
+                // Foreground bookkeeping runs on every tick, including the ones that end in the no-tool
+                // early-out below, so the hide grace period keeps counting while nothing is detected.
+                UpdateProviderForeground(detected is not null);
 
                 var hasDetectedTool = detected != null || ShouldAssumeToolStillRunning() || ProbeToolPresence();
                 if (!hasDetectedTool)
