@@ -39,6 +39,7 @@ internal sealed class AgentActivityScanner
         AddRecent(files, Path.Combine(_home, ".claude", "projects"), ProviderId.Claude, cancellationToken);
         AddGrokSessions(files, cancellationToken);
         AddAntigravityDatabases(files, cancellationToken);
+        AddAntigravityGuiTranscripts(files, cancellationToken);
         AddOpenCodeDatabases(files, cancellationToken);
 
         var parsed = new List<AgentActivityItem>();
@@ -56,7 +57,10 @@ internal sealed class AgentActivityScanner
             }
             else if (file.Provider == ProviderId.Antigravity)
             {
-                if (TryReadAntigravitySession(file.Path, file.Modified, claimLive, out var antigravityItem))
+                var read = IsAntigravityGuiTranscript(file.Path)
+                    ? TryReadAntigravityGuiSession(file.Path, file.Modified, claimLive, out var antigravityItem)
+                    : TryReadAntigravitySession(file.Path, file.Modified, claimLive, out antigravityItem);
+                if (read)
                     parsed.Add(antigravityItem);
             }
             else if (file.Provider == ProviderId.OpenCode)
@@ -175,6 +179,41 @@ internal sealed class AgentActivityScanner
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini", "antigravity-cli")
             : root;
     }
+
+    private static string GetAntigravityGuiHome()
+    {
+        var root = Environment.GetEnvironmentVariable("ANTIGRAVITY_GUI_HOME");
+        return string.IsNullOrWhiteSpace(root)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini", "antigravity")
+            : root;
+    }
+
+    private void AddAntigravityGuiTranscripts(List<(ProviderId, string, DateTimeOffset)> output,
+        CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(GetAntigravityGuiHome(), "brain");
+        if (!Directory.Exists(root))
+            return;
+
+        try
+        {
+            foreach (var path in Directory.EnumerateFiles(root, "transcript.jsonl", SearchOption.AllDirectories))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var modified = File.GetLastWriteTimeUtc(path);
+                if (DateTime.UtcNow - modified <= RecentWindow)
+                    output.Add((ProviderId.Antigravity, path,
+                        new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private static bool IsAntigravityGuiTranscript(string path)
+        => Path.GetFileName(path).Equals("transcript.jsonl", StringComparison.OrdinalIgnoreCase)
+            && path.Contains($"{Path.DirectorySeparatorChar}brain{Path.DirectorySeparatorChar}",
+                StringComparison.OrdinalIgnoreCase);
 
     private static AntigravityConversationMetadata? ReadAntigravityMetadata(string root, string id)
     {
@@ -330,6 +369,286 @@ internal sealed class AgentActivityScanner
             out var item)
             ? new[] { item }
             : Array.Empty<AgentActivityItem>();
+    }
+
+    private static bool TryReadAntigravityGuiSession(string transcriptPath, DateTimeOffset modified,
+        bool claimLive, out AgentActivityItem item)
+    {
+        item = default!;
+        try
+        {
+            var transcript = ReadAntigravityGuiTranscript(transcriptPath);
+            var info = ParseAntigravityGuiTranscript(transcript);
+            if (!info.HasConversation)
+                return false;
+
+            var lastActivity = Max(modified, info.LastActivity ?? modified);
+            var fresh = DateTimeOffset.Now - lastActivity < BusyWindow;
+            var live = claimLive && modified > DateTimeOffset.Now - RecentWindow;
+            var status = !live
+                ? info.State == TranscriptState.Failed ? AgentActivityStatus.Failed : AgentActivityStatus.Completed
+                : info.State == TranscriptState.Waiting
+                    ? AgentActivityStatus.Waiting
+                    : fresh ? AgentActivityStatus.Working : AgentActivityStatus.Idle;
+            var title = FirstNonEmpty(SummarizeTitle(info.Prompt) ?? "", "Antigravity");
+            var step = status == AgentActivityStatus.Completed
+                ? "Completed"
+                : status == AgentActivityStatus.Failed
+                    ? "Failed"
+                    : status == AgentActivityStatus.Waiting
+                        ? "Waiting for input"
+                    : status == AgentActivityStatus.Idle
+                        ? "Waiting for the next prompt"
+                    : FirstNonEmpty(info.Step, info.Summary, "Thinking");
+            var threadId = GetAntigravityGuiConversationId(transcriptPath);
+            item = new AgentActivityItem(
+                $"antigravity-gui:{threadId}", ProviderId.Antigravity, Trim(Clean(title), 72), step, status,
+                info.StartedAt ?? modified, lastActivity,
+                SubagentCount: info.SubagentCount,
+                Detail: info.Prompt,
+                Model: info.Model,
+                ThreadId: threadId);
+            return true;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (JsonException) { return false; }
+    }
+
+    internal static IReadOnlyList<AgentActivityItem> ReadAntigravityGuiForTesting(
+        string transcriptPath, bool claimLive = true)
+    {
+        var modified = File.GetLastWriteTimeUtc(transcriptPath);
+        return TryReadAntigravityGuiSession(transcriptPath,
+            new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime(), claimLive,
+            out var item)
+            ? new[] { item }
+            : Array.Empty<AgentActivityItem>();
+    }
+
+    private static string ReadAntigravityGuiTranscript(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        if (stream.Length <= 524_288)
+        {
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            return reader.ReadToEnd();
+        }
+
+        const int headBytes = 131_072;
+        using var headReader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true,
+            bufferSize: 16_384, leaveOpen: true);
+        var head = new char[headBytes];
+        var headCount = headReader.ReadBlock(head, 0, head.Length);
+        stream.Seek(-393_216, SeekOrigin.End);
+        using var tailReader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false);
+        return new string(head, 0, headCount) + Environment.NewLine + tailReader.ReadToEnd();
+    }
+
+    private static string GetAntigravityGuiConversationId(string transcriptPath)
+    {
+        var logs = Directory.GetParent(transcriptPath);
+        var systemGenerated = logs?.Parent;
+        var brain = systemGenerated?.Parent;
+        return brain?.Name ?? Path.GetFileNameWithoutExtension(transcriptPath);
+    }
+
+    private static AntigravityGuiTranscriptInfo ParseAntigravityGuiTranscript(string text)
+    {
+        var prompt = "";
+        var step = "";
+        var summary = "";
+        var model = "";
+        var state = TranscriptState.Unknown;
+        var hasConversation = false;
+        var subagents = 0;
+        DateTimeOffset? started = null;
+        DateTimeOffset? activity = null;
+
+        foreach (var line in text.Split('\n'))
+        {
+            if (string.IsNullOrWhiteSpace(line))
+                continue;
+            try
+            {
+                using var document = JsonDocument.Parse(line);
+                var root = document.RootElement;
+                var type = FirstString(root, "type");
+                var timestamp = FirstTimestamp(root, "created_at", "createdAt", "timestamp", "time");
+                if (timestamp is { } parsedTimestamp)
+                {
+                    started ??= parsedTimestamp;
+                    activity = activity is { } previous
+                        ? Max(previous, parsedTimestamp)
+                        : parsedTimestamp;
+                }
+
+                if (root.TryGetProperty("status", out var statusNode)
+                    && statusNode.ValueKind == JsonValueKind.String)
+                {
+                    var statusText = statusNode.GetString() ?? "";
+                    if (statusText.Contains("error", StringComparison.OrdinalIgnoreCase)
+                        || statusText.Contains("fail", StringComparison.OrdinalIgnoreCase))
+                        state = TranscriptState.Failed;
+                    else if (statusText.Contains("wait", StringComparison.OrdinalIgnoreCase)
+                        || statusText.Contains("pending", StringComparison.OrdinalIgnoreCase))
+                        state = TranscriptState.Waiting;
+                }
+
+                switch (type.ToUpperInvariant())
+                {
+                    case "USER_INPUT":
+                        var content = root.TryGetProperty("content", out var contentNode)
+                            ? ExtractAntigravityGuiContent(contentNode)
+                            : "";
+                        if (content.Length > 0)
+                            prompt = content;
+                        hasConversation = true;
+                        if (state is TranscriptState.Unknown or TranscriptState.Finished)
+                            state = TranscriptState.Action;
+                        step = "Thinking";
+                        break;
+
+                    case "PLANNER_RESPONSE":
+                        hasConversation = true;
+                        if (root.TryGetProperty("tool_calls", out var toolCalls)
+                            && toolCalls.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var call in toolCalls.EnumerateArray().Reverse())
+                            {
+                                var name = FirstString(call, "name");
+                                if (name.Length == 0)
+                                    continue;
+                                var args = call.TryGetProperty("args", out var argsNode)
+                                    ? argsNode
+                                    : default;
+                                var toolSummary = FirstString(args, "toolSummary", "toolAction");
+                                var action = string.IsNullOrWhiteSpace(toolSummary)
+                                    ? DescribeAntigravityGuiAction(name, JsonText(args))
+                                    : Clean(toolSummary);
+                                var waiting = name.Contains("permission", StringComparison.OrdinalIgnoreCase)
+                                    || name.Contains("question", StringComparison.OrdinalIgnoreCase)
+                                    || name.Contains("approval", StringComparison.OrdinalIgnoreCase)
+                                    || name.Equals("ask_permission", StringComparison.OrdinalIgnoreCase)
+                                    || name.Equals("ask_question", StringComparison.OrdinalIgnoreCase);
+                                state = waiting ? TranscriptState.Waiting : TranscriptState.Action;
+                                step = waiting ? "Waiting for input" : action;
+                                if (name.Contains("subagent", StringComparison.OrdinalIgnoreCase)
+                                    || name.Equals("invoke_subagent", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    if (args.ValueKind == JsonValueKind.Object
+                                        && args.TryGetProperty("Subagents", out var subagentNodes)
+                                        && subagentNodes.ValueKind == JsonValueKind.Array)
+                                        subagents += subagentNodes.GetArrayLength();
+                                    else
+                                        subagents++;
+                                }
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            var thinking = FirstString(root, "thinking");
+                            if (thinking.Length > 0)
+                                summary = Clean(thinking);
+                            if (state == TranscriptState.Unknown)
+                                state = TranscriptState.Action;
+                            if (step.Length == 0)
+                                step = "Thinking";
+                        }
+                        model = FirstNonEmpty(model, FirstString(root, "model", "model_id", "modelId"));
+                        break;
+
+                    case "ERROR_MESSAGE":
+                        hasConversation = true;
+                        state = TranscriptState.Failed;
+                        step = "Failed";
+                        break;
+
+                    case "RUN_COMMAND":
+                    case "COMMAND_STATUS":
+                        hasConversation = true;
+                        state = TranscriptState.Action;
+                        step = "Running command";
+                        break;
+
+                    case "VIEW_FILE":
+                    case "LIST_DIRECTORY":
+                    case "GREP_SEARCH":
+                    case "FIND_BY_NAME":
+                        hasConversation = true;
+                        state = TranscriptState.Action;
+                        step = "Inspected files";
+                        break;
+
+                    case "CODE_ACTION":
+                    case "WRITE_TO_FILE":
+                    case "REPLACE_FILE_CONTENT":
+                    case "MULTI_REPLACE_FILE_CONTENT":
+                        hasConversation = true;
+                        state = TranscriptState.Action;
+                        step = "Edited code";
+                        break;
+                }
+            }
+            catch (JsonException) { }
+        }
+
+        return new AntigravityGuiTranscriptInfo(prompt, step, summary, model, started, activity,
+            state, hasConversation, subagents);
+    }
+
+    internal static AgentActivityScanner.TranscriptState ParseAntigravityGuiStateForTesting(string text)
+        => ParseAntigravityGuiTranscript(text).State;
+
+    private static string ExtractAntigravityGuiContent(JsonElement value)
+    {
+        if (value.ValueKind == JsonValueKind.String)
+            return Clean(value.GetString());
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var name in new[] { "text", "message", "content", "prompt" })
+            {
+                if (value.TryGetProperty(name, out var nested))
+                {
+                    var text = ExtractAntigravityGuiContent(nested);
+                    if (text.Length > 0)
+                        return text;
+                }
+            }
+        }
+        if (value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var part in value.EnumerateArray().Reverse())
+            {
+                var text = ExtractAntigravityGuiContent(part);
+                if (text.Length > 0)
+                    return text;
+            }
+        }
+        return "";
+    }
+
+    private static string DescribeAntigravityGuiAction(string name, string details)
+    {
+        if (name is "run_command" or "command_status")
+            return DescribeAction("shell_command", details);
+        if (name.Contains("write", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("replace", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("edit", StringComparison.OrdinalIgnoreCase))
+            return "Edited code";
+        if (name.Contains("read", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("view", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("grep", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("search", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("list", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("find", StringComparison.OrdinalIgnoreCase))
+            return "Inspected files";
+        if (name.Contains("subagent", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("task", StringComparison.OrdinalIgnoreCase))
+            return "Running subagent";
+        return $"Running {Clean(name)}";
     }
 
     private static IReadOnlyList<AntigravityStepRow> ReadAntigravitySteps(string path)
@@ -1763,4 +2082,8 @@ internal sealed class AgentActivityScanner
         public IEnumerable<byte[]?> Blobs => new[]
             { Payload, RenderInfo, TaskDetails, Metadata, ErrorDetails, Permissions };
     }
+    private sealed record AntigravityGuiTranscriptInfo(
+        string Prompt, string Step, string Summary, string Model,
+        DateTimeOffset? StartedAt, DateTimeOffset? LastActivity,
+        TranscriptState State, bool HasConversation, int SubagentCount);
 }

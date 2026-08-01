@@ -298,6 +298,37 @@ public sealed class AgentActivityTests
     }
 
     [Fact]
+    public void AntigravityGuiTranscript_ExtractsPromptAndToolAction()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"taskbarquota-antigravity-gui-{Guid.NewGuid():N}",
+            ".system_generated", "logs");
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "transcript.jsonl");
+        try
+        {
+            var now = DateTimeOffset.UtcNow.ToString("O");
+            File.WriteAllText(path, $$$"""
+                {"step_index":0,"source":"user","type":"USER_INPUT","status":"SUCCESS","created_at":"{{{now}}}","content":"Refactor Antigravity GUI activity tracking"}
+                {"step_index":1,"source":"agent","type":"PLANNER_RESPONSE","status":"SUCCESS","created_at":"{{{now}}}","tool_calls":[{"name":"grep_search","args":{"Query":"activation","toolAction":"Searching for activation","toolSummary":"Grep for activation"}}]}
+                {"step_index":2,"source":"tool","type":"GREP_SEARCH","status":"SUCCESS","created_at":"{{{now}}}","content":"matches"}
+                """);
+
+            var item = Assert.Single(AgentActivityScanner.ReadAntigravityGuiForTesting(path));
+
+            Assert.Equal(ProviderId.Antigravity, item.Provider);
+            Assert.Equal("Refactor Antigravity GUI activity tracking", item.Title);
+            Assert.Equal("Refactor Antigravity GUI activity tracking", item.Detail);
+            Assert.Equal("Inspected files", item.Step);
+            Assert.Equal(AgentActivityStatus.Working, item.Status);
+        }
+        finally
+        {
+            if (Directory.Exists(Path.GetDirectoryName(path)!))
+                Directory.Delete(Path.GetDirectoryName(path)!, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ActivityTitle_IsSummarizedFromLatestPrompt()
     {
         var title = AgentActivityScanner.SummarizeTitleForTesting(
