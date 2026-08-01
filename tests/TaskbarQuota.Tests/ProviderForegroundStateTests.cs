@@ -9,7 +9,7 @@ namespace TaskbarQuota.Tests;
 /// </summary>
 public class ProviderForegroundStateTests
 {
-    private static readonly TimeSpan HideDelay = TimeSpan.FromMilliseconds(1200);
+    private static readonly TimeSpan HideDelay = TimeSpan.FromMilliseconds(120);
     private static readonly DateTime Now = new(2026, 7, 28, 12, 0, 0, DateTimeKind.Utc);
 
     private static (bool Active, DateTime UnfocusedSinceUtc) Resolve(
