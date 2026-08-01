@@ -194,6 +194,21 @@ namespace TaskbarQuota.Views
                 stack.Children.Add(new TextBlock { Text = "Cookie header", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
                 stack.Children.Add(new TextBlock { Text = "Leave blank to keep auto-detection.", Opacity = 0.6, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
                 stack.Children.Add(tb);
+
+                if (vm.Id is ProviderId.OpenCode or ProviderId.OpenCodeGo)
+                {
+                    var workspace = new TextBox
+                    {
+                        Text = vm.WorkspaceId,
+                        MinWidth = 280,
+                        PlaceholderText = "wrk_... or workspace URL",
+                        AcceptsReturn = false,
+                    };
+                    workspace.TextChanged += (_, _) => vm.WorkspaceId = workspace.Text;
+                    stack.Children.Add(new TextBlock { Text = "Workspace ID (optional)", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+                    stack.Children.Add(new TextBlock { Text = "Overrides workspace auto-detection.", Opacity = 0.6, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
+                    stack.Children.Add(workspace);
+                }
             }
 
             var saveBtn = new Button { Content = "Save & Refresh", Style = (Style)Application.Current.Resources["AccentButtonStyle"], Margin = new Thickness(0, 4, 0, 0) };
@@ -311,10 +326,10 @@ namespace TaskbarQuota.Views
                 "Paste a cursor.com Cookie header to override browser detection.",
                 CredentialKind.Cookie),
             ProviderId.OpenCode => new ProviderCredentialViewModel(id, "OpenCode",
-                "Paste an opencode.ai Cookie header to override browser detection.",
+                "Paste an opencode.ai Cookie header and optionally select a workspace.",
                 CredentialKind.Cookie),
             ProviderId.OpenCodeGo => new ProviderCredentialViewModel(id, "OpenCode Go",
-                "Paste an opencode.ai Cookie header to override browser detection.",
+                "Paste an opencode.ai Cookie header and optionally select a workspace.",
                 CredentialKind.Cookie),
             ProviderId.Kimi => new ProviderCredentialViewModel(id, "Kimi Code",
                 "Paste your Kimi Code API key (KIMI_CODE_API_KEY) to fetch Coding Plan usage without CLI login.",

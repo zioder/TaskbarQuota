@@ -129,4 +129,16 @@ public class OpenCodeGoProviderTests
         var html = "<html><head><meta http-equiv=\"refresh\" content=\"0;url=/auth/authorize?redirect=/workspace/wrk_123/go\"></head></html>";
         Assert.True(OpenCodeProvider.LooksSignedOut(html));
     }
+
+    [Fact]
+    public void GoPagePayload_ParsesCurrentCodexBarStyleEmbeddedUsage()
+    {
+        var html = "<script>window.__data={rollingUsage:{usagePercent:37.5,resetInSec:7200}," +
+                   "weeklyUsage:{usagePercent:51,resetInSec:172800}," +
+                   "monthlyUsage:{usagePercent:12,resetInSec:1209600}}</script>";
+
+        Assert.Equal(37.5, OpenCodeProvider.ExtractWindow(html, 300, "rollingUsage")!.UsedPercent, 1);
+        Assert.Equal(51, OpenCodeProvider.ExtractWindow(html, 10080, "weeklyUsage")!.UsedPercent, 1);
+        Assert.Equal(12, OpenCodeProvider.ExtractWindow(html, 43200, "monthlyUsage")!.UsedPercent, 1);
+    }
 }

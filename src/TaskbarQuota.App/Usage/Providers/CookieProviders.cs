@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -35,7 +37,7 @@ namespace TaskbarQuota.Usage.Providers
     {
         private const string ServerUrl = "https://opencode.ai/_server";
         private const string WorkspacesServerId = "def39973159c7f0483d8793a822b8dbb10d067e12c65455fcb4608459ba0234f";
-        private const string SubscriptionServerId = "7abeebee372f304e050aaaf92be863f4a86490e382f8c79db68fd94040d691b4";
+        private const string BillingServerId = "c83b78a614689c38ebee981f9b39a8b377716db85c1fd7dbab604adc02d3313d";
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
         private static readonly Regex WorkspaceRe = new(@"wrk_[A-Za-z0-9_-]+", RegexOptions.Compiled);
 
@@ -55,12 +57,10 @@ namespace TaskbarQuota.Usage.Providers
         {
             var cookie = CookieHelper.Resolve(Id, "opencode.ai");
 
-            string wsText = await GetText($"{ServerUrl}?id={WorkspacesServerId}", WorkspacesServerId, "https://opencode.ai", cookie, ct).ConfigureAwait(false);
-            var ws = WorkspaceRe.Match(wsText);
-            if (!ws.Success) throw new ProviderException(ProviderErrorKind.Parse, "OpenCode: no workspace id found.");
-            string workspaceId = ws.Value;
+            string workspaceId = NormalizeWorkspaceId(CredentialStore.Instance.WorkspaceId(Id))
+                ?? await FetchWorkspaceId(cookie, ct, "OpenCode").ConfigureAwait(false);
 
-            var texts = new List<string> { wsText };
+            var texts = new List<string>();
             var pageTasks = new[]
             {
                 $"https://opencode.ai/workspace/{workspaceId}",
@@ -74,9 +74,14 @@ namespace TaskbarQuota.Usage.Providers
                 if (!string.IsNullOrEmpty(text))
                     texts.Add(text);
 
+            var billingText = await TryGetBillingText(workspaceId, cookie, ct).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(billingText))
+                texts.Add(billingText);
+
             var combined = string.Join("\n", texts);
             var monthlyUsage = FindMoneyValue(combined, "monthlyUsage", "monthly_usage", "currentUsage", "usage");
-            var balance = FindMoneyValue(combined, "balance", "currentBalance", "current_balance");
+            var balance = ParseBillingBalance(combined)
+                ?? FindMoneyValue(combined, "zenBalance", "currentBalance", "current_balance", "balance");
             var monthlyLimit = FindMoneyValue(combined, "monthlyLimit", "monthly_limit");
 
             if (monthlyUsage is null && balance is null)
@@ -97,9 +102,92 @@ namespace TaskbarQuota.Usage.Providers
             return new ProviderFetchResult(usage, "web");
         }
 
-        private static async Task<string> GetText(string url, string serverId, string referer, string cookie, CancellationToken ct)
+        internal static string? NormalizeWorkspaceId(string? raw)
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            var match = WorkspaceRe.Match(raw.Trim());
+            return match.Success ? match.Value : null;
+        }
+
+        internal static IReadOnlyList<string> ParseWorkspaceIds(string text)
+        {
+            var results = new List<string>();
+            foreach (Match match in WorkspaceRe.Matches(text))
+                if (!results.Contains(match.Value, StringComparer.Ordinal))
+                    results.Add(match.Value);
+            return results;
+        }
+
+        internal static async Task<string> FetchWorkspaceId(string cookie, CancellationToken ct, string providerName)
+        {
+            var text = await GetText($"{ServerUrl}?id={WorkspacesServerId}", WorkspacesServerId,
+                "https://opencode.ai", cookie, ct).ConfigureAwait(false);
+            var ids = ParseWorkspaceIds(text);
+            if (ids.Count > 0) return ids[0];
+
+            text = await GetText(ServerUrl, WorkspacesServerId, "https://opencode.ai", cookie, ct,
+                HttpMethod.Post, "[]").ConfigureAwait(false);
+            ids = ParseWorkspaceIds(text);
+            if (ids.Count > 0) return ids[0];
+            throw new ProviderException(ProviderErrorKind.Parse, $"{providerName}: no workspace id found.");
+        }
+
+        private static async Task<string?> TryGetBillingText(string workspaceId, string cookie, CancellationToken ct)
+        {
+            try
+            {
+                var args = JsonSerializer.Serialize(new[] { workspaceId });
+                return await GetText($"{ServerUrl}?id={BillingServerId}&args={Uri.EscapeDataString(args)}",
+                    BillingServerId, WorkspacePageUrl(workspaceId), cookie, ct).ConfigureAwait(false);
+            }
+            catch { return null; }
+        }
+
+        internal static double? ParseBillingBalance(string text)
+        {
+            using var doc = TryJson(text);
+            if (doc != null && TryFindBillingBalance(doc.RootElement, out var raw))
+                return raw / 100_000_000d;
+
+            if (!Regex.IsMatch(text, "(?:\\\"customerID\\\"|customerID)\\s*:\\s*(?:\\$R\\[\\d+\\]\\s*=\\s*)?\\\"[^\\\"]+\\\""))
+                return null;
+            var match = Regex.Match(text, "(?:\\\"balance\\\"|balance)\\s*:\\s*(?:\\$R\\[\\d+\\]\\s*=\\s*)?(-?[0-9]+(?:\\.[0-9]+)?)");
+            return match.Success && double.TryParse(match.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out raw)
+                ? raw / 100_000_000d
+                : null;
+        }
+
+        private static bool TryFindBillingBalance(JsonElement element, out double balance)
+        {
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                if (element.TryGetProperty("customerID", out var customer) && customer.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrEmpty(customer.GetString()) && element.TryGetProperty("balance", out var value)
+                    && TryJsonDouble(value, out balance))
+                    return true;
+                foreach (var property in element.EnumerateObject())
+                    if (TryFindBillingBalance(property.Value, out balance)) return true;
+            }
+            else if (element.ValueKind == JsonValueKind.Array)
+                foreach (var item in element.EnumerateArray())
+                    if (TryFindBillingBalance(item, out balance)) return true;
+            balance = 0;
+            return false;
+        }
+
+        private static bool TryJsonDouble(JsonElement value, out double result)
+        {
+            if (value.ValueKind == JsonValueKind.Number) return value.TryGetDouble(out result);
+            if (value.ValueKind == JsonValueKind.String)
+                return double.TryParse(value.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out result);
+            result = 0;
+            return false;
+        }
+
+        private static async Task<string> GetText(string url, string serverId, string referer, string cookie,
+            CancellationToken ct, HttpMethod? method = null, string? body = null)
+        {
+            using var req = new HttpRequestMessage(method ?? HttpMethod.Get, url);
             req.Headers.TryAddWithoutValidation("Cookie", cookie);
             req.Headers.TryAddWithoutValidation("X-Server-Id", serverId);
             req.Headers.TryAddWithoutValidation("X-Server-Instance", $"server-fn:{Guid.NewGuid()}");
@@ -107,6 +195,8 @@ namespace TaskbarQuota.Usage.Providers
             req.Headers.TryAddWithoutValidation("Origin", "https://opencode.ai");
             req.Headers.TryAddWithoutValidation("Referer", referer);
             req.Headers.TryAddWithoutValidation("Accept", "text/javascript, application/json;q=0.9, */*;q=0.8");
+            if (body != null)
+                req.Content = new StringContent(body, Encoding.UTF8, "application/json");
             using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
             if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
                 throw new ProviderException(ProviderErrorKind.AuthRequired, "OpenCode cookies expired.");
@@ -349,11 +439,7 @@ namespace TaskbarQuota.Usage.Providers
     /// <summary>OpenCode Go subscription usage from the workspace /go page: rolling, weekly and monthly windows.</summary>
     public sealed class OpenCodeGoProvider : IUsageProvider
     {
-        private const string ServerUrl = "https://opencode.ai/_server";
-        private const string WorkspacesServerId = "def39973159c7f0483d8793a822b8dbb10d067e12c65455fcb4608459ba0234f";
-        private const string LiteSubscriptionServerId = "c7389bd0e731f80f49593e5ee53835475f4e28594dd6bd83eb229bab753498cd";
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
-        private static readonly Regex WorkspaceRe = new(@"wrk_[A-Za-z0-9_-]+", RegexOptions.Compiled);
 
         public ProviderId Id => ProviderId.OpenCodeGo;
         public string DisplayName => "OpenCode Go";
@@ -366,16 +452,14 @@ namespace TaskbarQuota.Usage.Providers
             var cookie = CredentialStore.Instance.ManualCookieHeader(Id)
                 ?? CredentialStore.Instance.ManualCookieHeader(ProviderId.OpenCode)
                 ?? CookieHelper.Resolve(Id, "opencode.ai");
-            string wsText = await GetText($"{ServerUrl}?id={WorkspacesServerId}", "https://opencode.ai", cookie, ct).ConfigureAwait(false);
-            var ws = WorkspaceRe.Match(wsText);
-            if (!ws.Success) throw new ProviderException(ProviderErrorKind.Parse, "OpenCode Go: no workspace id found.");
+            string workspaceId = OpenCodeProvider.NormalizeWorkspaceId(CredentialStore.Instance.WorkspaceId(Id))
+                ?? OpenCodeProvider.NormalizeWorkspaceId(CredentialStore.Instance.WorkspaceId(ProviderId.OpenCode))
+                ?? await OpenCodeProvider.FetchWorkspaceId(cookie, ct, "OpenCode Go").ConfigureAwait(false);
 
-            string usageText = await GetText(
-                $"{ServerUrl}?id={LiteSubscriptionServerId}&args={ServerStringArg(ws.Value)}",
-                $"https://opencode.ai/workspace/{ws.Value}/go",
+            string usageText = await GetPageText(
+                OpenCodeProvider.WorkspacePageUrl(workspaceId, "go"),
                 cookie,
-                ct,
-                LiteSubscriptionServerId).ConfigureAwait(false);
+                ct).ConfigureAwait(false);
             if (OpenCodeProvider.LooksSignedOut(usageText)) throw new ProviderException(ProviderErrorKind.AuthRequired, "OpenCode Go cookies expired.");
 
             var rolling = OpenCodeProvider.ExtractWindow(usageText, 300, "rollingUsage", "rolling_usage", "rolling")
@@ -388,43 +472,18 @@ namespace TaskbarQuota.Usage.Providers
                 Secondary = weekly,
                 Monthly = monthly,
                 LoginMethod = "Go",
-                UsageDashboardUrl = OpenCodeProvider.WorkspacePageUrl(ws.Value, "go"),
+                UsageDashboardUrl = OpenCodeProvider.WorkspacePageUrl(workspaceId, "go"),
             };
 
             return new ProviderFetchResult(usage, "opencode");
         }
 
-        private static string ServerStringArg(string value)
-        {
-            var payload = new
-            {
-                t = new
-                {
-                    t = 9,
-                    i = 0,
-                    l = 1,
-                    a = new[] { new { t = 1, s = value } },
-                    o = 0,
-                },
-                f = 31,
-                m = Array.Empty<object>(),
-            };
-            return Uri.EscapeDataString(JsonSerializer.Serialize(payload));
-        }
-
-        private static async Task<string> GetText(string url, string referer, string cookie, CancellationToken ct, string serverId = WorkspacesServerId)
+        private static async Task<string> GetPageText(string url, string cookie, CancellationToken ct)
         {
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
             req.Headers.TryAddWithoutValidation("Cookie", cookie);
-            if (url.StartsWith(ServerUrl, StringComparison.OrdinalIgnoreCase))
-            {
-                req.Headers.TryAddWithoutValidation("X-Server-Id", serverId);
-                req.Headers.TryAddWithoutValidation("X-Server-Instance", $"server-fn:{Guid.NewGuid()}");
-            }
             req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-            req.Headers.TryAddWithoutValidation("Origin", "https://opencode.ai");
-            req.Headers.TryAddWithoutValidation("Referer", referer);
-            req.Headers.TryAddWithoutValidation("Accept", "text/javascript, application/json;q=0.9, */*;q=0.8");
+            req.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
             using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
             var text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden || OpenCodeProvider.LooksSignedOut(text))
