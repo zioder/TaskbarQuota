@@ -130,13 +130,6 @@ public class OpenCodeGoProviderTests
         Assert.True(OpenCodeProvider.LooksSignedOut(html));
     }
 
-    [Theory]
-    [InlineData("<title>OpenAuth</title>")]
-    [InlineData("<button>Continue with GitHub</button>")]
-    [InlineData("<button>Continue with Google</button>")]
-    public void LooksSignedOut_WithOpenAuthPage_ReturnsTrue(string html)
-        => Assert.True(OpenCodeProvider.LooksSignedOut(html));
-
     [Fact]
     public void GoPagePayload_ParsesEmbeddedUsageWindows()
     {

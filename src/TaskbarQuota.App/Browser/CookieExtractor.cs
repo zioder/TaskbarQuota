@@ -240,10 +240,8 @@ namespace TaskbarQuota.Browser
 
             foreach (var profile in EnumerateChromiumProfiles(browser.UserDataDir))
             {
-                var cookiesDb = File.Exists(Path.Combine(profile, "Network", "Cookies"))
-                    ? Path.Combine(profile, "Network", "Cookies")
-                    : Path.Combine(profile, "Cookies");
-                if (!File.Exists(cookiesDb)) continue;
+                var cookiesDb = FindChromiumCookiesDb(profile);
+                if (cookiesDb == null) continue;
 
                 foreach (var c in ReadChromiumCookies(cookiesDb, key, domain))
                     yield return c;
@@ -452,7 +450,11 @@ namespace TaskbarQuota.Browser
             }
             // Chromium's newer app-bound formats (for example v20) require browser-process
             // mediation and must not be mistaken for the legacy DPAPI format below.
-            if (enc.Length >= 3 && enc[0] == 'v' && enc[1] == '1' && enc[2] != '0' && enc[2] != '1')
+            if (enc.Length >= 3
+                && enc[0] == 'v'
+                && enc[1] >= '0' && enc[1] <= '9'
+                && enc[2] >= '0' && enc[2] <= '9'
+                && !(enc[1] == '1' && (enc[2] == '0' || enc[2] == '1')))
                 return null;
             // Legacy DPAPI-encrypted value (pre-v10)
             try { return Encoding.UTF8.GetString(ProtectedData.Unprotect(enc, null, DataProtectionScope.CurrentUser)); }

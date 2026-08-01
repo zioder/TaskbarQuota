@@ -175,8 +175,8 @@ Chromium 127 and newer use App-Bound Encryption, which a normal desktop app cann
 
 1. Open `https://opencode.ai` and open Developer Tools (`F12`).
 2. Select **Network**, reload the page, and select an OpenCode request.
-3. Use **Copy → Copy as cURL**, then copy only the value after the request's `Cookie:` header.
-4. Open TaskbarQuota's **Fix** action for **OpenCode** or **OpenCode Go** and paste that value into **Cookie header**.
+3. Use **Copy → Copy as cURL**. You may paste the full cURL command, or only the value after the request's `Cookie:` header; TaskbarQuota extracts the cookie automatically.
+4. Open TaskbarQuota's **Fix** action for **OpenCode** or **OpenCode Go** and paste it into **Cookie header**.
 5. If workspace detection also fails, paste the `wrk_...` value from the OpenCode URL (or the full workspace URL) into **Workspace ID**.
 
 Cookie headers are session credentials. Keep them private and do not paste them into issues or chat. The saved manual value is stored locally in `%LOCALAPPDATA%\TaskbarQuota\credentials.json`.

@@ -176,6 +176,13 @@ namespace TaskbarQuota.Views
             var flyout = new Flyout { Placement = FlyoutPlacementMode.Bottom };
 
             var stack = new StackPanel { Spacing = 12, MaxWidth = 380 };
+            TextBlock Caption(string text) => new()
+            {
+                Text = text,
+                Opacity = 0.6,
+                TextWrapping = TextWrapping.Wrap,
+                Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+            };
 
             if (vm.IsApiKey)
             {
@@ -183,7 +190,7 @@ namespace TaskbarQuota.Views
                 pwd.PasswordChanged += (_, _) => vm.ApiKey = pwd.Password;
 
                 stack.Children.Add(new TextBlock { Text = "API key", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
-                stack.Children.Add(new TextBlock { Text = vm.ApiKeyHeader, Opacity = 0.6, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
+                stack.Children.Add(Caption(vm.ApiKeyHeader));
                 stack.Children.Add(pwd);
             }
             else
@@ -201,7 +208,7 @@ namespace TaskbarQuota.Views
                 tb.TextChanged += (_, _) => vm.CookieHeader = tb.Text;
 
                 stack.Children.Add(new TextBlock { Text = "Cookie header", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
-                stack.Children.Add(new TextBlock { Text = "Leave blank to keep auto-detection.", Opacity = 0.6, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
+                stack.Children.Add(Caption("Leave blank to keep auto-detection."));
                 stack.Children.Add(tb);
 
                 if (isOpenCode)
@@ -211,34 +218,10 @@ namespace TaskbarQuota.Views
                         Text = "Chromium 127+ manual setup",
                         FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
                     });
-                    stack.Children.Add(new TextBlock
-                    {
-                        Text = "Chrome, Edge, and Brave 127+ protect cookies with App-Bound Encryption, so TaskbarQuota may not be able to read them automatically.",
-                        Opacity = 0.6,
-                        TextWrapping = TextWrapping.Wrap,
-                        Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-                    });
-                    stack.Children.Add(new TextBlock
-                    {
-                        Text = "1. Open opencode.ai in the browser where you are signed in. Press F12, choose Network, and reload the page.",
-                        Opacity = 0.6,
-                        TextWrapping = TextWrapping.Wrap,
-                        Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-                    });
-                    stack.Children.Add(new TextBlock
-                    {
-                        Text = "2. Click an opencode.ai request, right-click it, then choose Copy → Copy as cURL.",
-                        Opacity = 0.6,
-                        TextWrapping = TextWrapping.Wrap,
-                        Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-                    });
-                    stack.Children.Add(new TextBlock
-                    {
-                        Text = "3. Paste either the full copied cURL command or only the text after Cookie:. TaskbarQuota extracts the cookie automatically; it should include auth=... or __Host-auth=....",
-                        Opacity = 0.6,
-                        TextWrapping = TextWrapping.Wrap,
-                        Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-                    });
+                    stack.Children.Add(Caption("Chrome, Edge, and Brave 127+ protect cookies with App-Bound Encryption, so TaskbarQuota may not be able to read them automatically."));
+                    stack.Children.Add(Caption("1. Open opencode.ai in the browser where you are signed in. Press F12, choose Network, and reload the page."));
+                    stack.Children.Add(Caption("2. Click an opencode.ai request, right-click it, then choose Copy → Copy as cURL."));
+                    stack.Children.Add(Caption("3. Paste either the full copied cURL command or only the text after Cookie:. TaskbarQuota extracts the cookie automatically; it should include auth=... or __Host-auth=...."));
 
                     var workspace = new TextBox
                     {
@@ -249,22 +232,10 @@ namespace TaskbarQuota.Views
                     };
                     workspace.TextChanged += (_, _) => vm.WorkspaceId = workspace.Text;
                     stack.Children.Add(new TextBlock { Text = "Workspace ID (optional; usually auto-detected)", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
-                    stack.Children.Add(new TextBlock
-                    {
-                        Text = "Only fill this when detection fails or you have multiple workspaces. Copy the wrk_... part from the OpenCode workspace URL; a full workspace URL also works.",
-                        Opacity = 0.6,
-                        TextWrapping = TextWrapping.Wrap,
-                        Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-                    });
+                    stack.Children.Add(Caption("Only fill this when detection fails or you have multiple workspaces. Copy the wrk_... part from the OpenCode workspace URL; a full workspace URL also works."));
                     stack.Children.Add(workspace);
 
-                    stack.Children.Add(new TextBlock
-                    {
-                        Text = "Cookie headers are session credentials. Keep them private.",
-                        Opacity = 0.6,
-                        TextWrapping = TextWrapping.Wrap,
-                        Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
-                    });
+                    stack.Children.Add(Caption("Cookie headers are session credentials. Keep them private."));
                 }
             }
 
@@ -277,7 +248,14 @@ namespace TaskbarQuota.Views
             };
             stack.Children.Add(saveBtn);
 
-            flyout.Content = stack;
+            var maxFlyoutHeight = Math.Min(600, Math.Max(120, (button.XamlRoot?.Size.Height ?? 800) - 40));
+            flyout.Content = new ScrollViewer
+            {
+                Content = stack,
+                MaxHeight = maxFlyoutHeight,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            };
             flyout.ShowAt(button);
         }
 
@@ -383,10 +361,10 @@ namespace TaskbarQuota.Views
                 "Paste a cursor.com Cookie header to override browser detection.",
                 CredentialKind.Cookie),
             ProviderId.OpenCode => new ProviderCredentialViewModel(id, "OpenCode",
-                "Paste an opencode.ai Cookie header and optionally select a workspace.",
+                "Paste an opencode.ai Cookie header and optionally enter a Workspace ID (wrk_...).",
                 CredentialKind.Cookie),
             ProviderId.OpenCodeGo => new ProviderCredentialViewModel(id, "OpenCode Go",
-                "Paste an opencode.ai Cookie header and optionally select a workspace.",
+                "Paste an opencode.ai Cookie header and optionally enter a Workspace ID (wrk_...).",
                 CredentialKind.Cookie),
             ProviderId.Kimi => new ProviderCredentialViewModel(id, "Kimi Code",
                 "Paste your Kimi Code API key (KIMI_CODE_API_KEY) to fetch Coding Plan usage without CLI login.",

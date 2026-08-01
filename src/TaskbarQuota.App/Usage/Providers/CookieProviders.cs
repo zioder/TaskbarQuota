@@ -10,6 +10,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using TaskbarQuota.Browser;
+using TaskbarQuota.Diagnostics;
 
 namespace TaskbarQuota.Usage.Providers
 {
@@ -85,6 +86,31 @@ namespace TaskbarQuota.Usage.Providers
                 "Encryption; paste the opencode.ai Cookie header and, if needed, the workspace ID in Fix.");
         }
 
+        internal static async Task<ProviderFetchResult> FetchWithCandidatesAsync(
+            ProviderId id,
+            string expirationMessage,
+            Func<string, CancellationToken, Task<ProviderFetchResult>> fetch,
+            CancellationToken ct,
+            params string[] domains)
+        {
+            var candidates = ResolveOpenCodeCandidates(id, domains);
+            ProviderException? lastError = null;
+
+            foreach (var candidate in candidates)
+            {
+                try
+                {
+                    return await fetch(candidate.Header, ct).ConfigureAwait(false);
+                }
+                catch (ProviderException ex) when (!candidate.IsManual)
+                {
+                    lastError = ex;
+                }
+            }
+
+            throw lastError ?? new ProviderException(ProviderErrorKind.AuthRequired, expirationMessage);
+        }
+
         private static bool IsGecko(string browserName)
             => browserName is "Zen" or "Firefox" or "Waterfox" or "LibreWolf" or "Floorp";
 
@@ -155,27 +181,14 @@ namespace TaskbarQuota.Usage.Providers
         public string WeeklyLabel => "Balance";
         public BillingKind Billing => BillingKind.Api;
 
-        public async Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
-        {
-            var candidates = CookieHelper.ResolveOpenCodeCandidates(Id, "opencode.ai", "app.opencode.ai");
-            ProviderException? lastError = null;
-
-            foreach (var candidate in candidates)
-            {
-                try
-                {
-                    return await FetchUsageAsync(candidate.Header, ct).ConfigureAwait(false);
-                }
-                catch (ProviderException ex) when (!candidate.IsManual)
-                {
-                    // A readable browser cookie can still be stale. Try the next complete
-                    // profile before surfacing the final error.
-                    lastError = ex;
-                }
-            }
-
-            throw lastError ?? new ProviderException(ProviderErrorKind.AuthRequired, "OpenCode cookies expired.");
-        }
+        public Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
+            => CookieHelper.FetchWithCandidatesAsync(
+                Id,
+                "OpenCode cookies expired.",
+                (cookie, token) => FetchUsageAsync(cookie, token),
+                ct,
+                "opencode.ai",
+                "app.opencode.ai");
 
         private async Task<ProviderFetchResult> FetchUsageAsync(string cookie, CancellationToken ct)
         {
@@ -261,14 +274,23 @@ namespace TaskbarQuota.Usage.Providers
             if (text != null)
             {
                 var getIds = ParseWorkspaceIds(text);
-                if (getIds.Count > 0) return getIds[0];
+                if (getIds.Count > 0) return SelectWorkspaceId(providerName, "GET", getIds);
             }
 
             text = await GetText(ServerUrl, WorkspacesServerId, "https://opencode.ai", cookie, ct,
                 HttpMethod.Post, "[]").ConfigureAwait(false);
             var ids = ParseWorkspaceIds(text);
-            if (ids.Count > 0) return ids[0];
+            if (ids.Count > 0) return SelectWorkspaceId(providerName, "POST", ids);
             throw new ProviderException(ProviderErrorKind.Parse, $"{providerName}: no workspace id found.");
+        }
+
+        private static string SelectWorkspaceId(string providerName, string transport, IReadOnlyList<string> ids)
+        {
+            if (ids.Count > 1)
+                Log.Debug($"{providerName}: {transport} workspace lookup found {ids.Count} workspaces " +
+                          $"[{string.Join(", ", ids)}]; selecting {ids[0]}. " +
+                          "Use the Workspace ID override in Fix if this is not the intended workspace.");
+            return ids[0];
         }
 
         private static async Task<string?> TryGetBillingText(string workspaceId, string cookie, CancellationToken ct)
@@ -380,9 +402,8 @@ namespace TaskbarQuota.Usage.Providers
             var lower = text.ToLowerInvariant();
             return lower.Contains("auth/authorize")
                 || lower.Contains("\"signin\"")
-                || lower.Contains("please sign in")
-                || lower.Contains("sign in")
-                || lower.Contains("openauth")
+                || lower.Contains("please sign in to continue")
+                || lower.Contains("<title>openauth</title>")
                 || lower.Contains("continue with github")
                 || lower.Contains("continue with google")
                 || (lower.Contains("actor of type") && lower.Contains("not associated with an account"));
@@ -601,25 +622,14 @@ namespace TaskbarQuota.Usage.Providers
         public string WeeklyLabel => "Weekly";
         public BillingKind Billing => BillingKind.Subscription;
 
-        public async Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
-        {
-            var candidates = CookieHelper.ResolveOpenCodeCandidates(Id, "opencode.ai", "app.opencode.ai");
-            ProviderException? lastError = null;
-
-            foreach (var candidate in candidates)
-            {
-                try
-                {
-                    return await FetchUsageAsync(candidate.Header, ct).ConfigureAwait(false);
-                }
-                catch (ProviderException ex) when (!candidate.IsManual)
-                {
-                    lastError = ex;
-                }
-            }
-
-            throw lastError ?? new ProviderException(ProviderErrorKind.AuthRequired, "OpenCode Go cookies expired.");
-        }
+        public Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
+            => CookieHelper.FetchWithCandidatesAsync(
+                Id,
+                "OpenCode Go cookies expired.",
+                (cookie, token) => FetchUsageAsync(cookie, token),
+                ct,
+                "opencode.ai",
+                "app.opencode.ai");
 
         private async Task<ProviderFetchResult> FetchUsageAsync(string cookie, CancellationToken ct)
         {
