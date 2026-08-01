@@ -30,6 +30,7 @@ namespace TaskbarQuota
         // fetch for one that is still running — a slow or offline endpoint would otherwise accumulate
         // concurrent requests and could publish an older snapshot out of order.
         private readonly HashSet<ProviderId> _widgetRefreshInFlight = new();
+        private readonly object _openCodeModelStateLock = new();
         private Timer? _timer;
         // Synara persists provider switches through a 300 ms-debounced localStorage writer, and Chromium
         // then flushes that to its on-disk LevelDB on its own (variable, sometimes >1 s) cadence. The
@@ -67,6 +68,8 @@ namespace TaskbarQuota
         private bool? _lastHasDetectedTool;
         private DateTime _lastPresenceProbeAt = DateTime.MinValue;
         private ProviderSource _activeProviderSource = ProviderSource.Unknown;
+        private ProviderId? _lastObservedOpenCodeProvider;
+        private bool _hasObservedOpenCodeProvider;
         // Focus-follows-provider state, only consulted when WidgetSettingsService.HideWhenProviderUnfocused
         // is on. Starts true so the widget shows from launch and only ever hides after a detect that
         // actually saw an unrelated foreground app.
@@ -634,8 +637,12 @@ namespace TaskbarQuota
 
             if (!ShouldReactToOpenCodeModelChange(foreground))
             {
-                if (modelProvider is ProviderId backgroundProvider)
-                    await RefreshProviderCacheSilentlyAsync(backgroundProvider).ConfigureAwait(false);
+                if (modelProvider is ProviderId backgroundProvider
+                    && ShouldRefreshOpenCodeProvider(backgroundProvider))
+                {
+                    if (!await RefreshProviderCacheSilentlyAsync(backgroundProvider).ConfigureAwait(false))
+                        ForgetOpenCodeProviderObservation(backgroundProvider);
+                }
                 return;
             }
 
@@ -643,11 +650,20 @@ namespace TaskbarQuota
             if (!IsOpenCodeProvider(target))
                 return;
 
+            // OpenCode rewrites its model/state files while the user types. The file event only matters
+            // when it changes the quota surface (Zen vs Go); republishing the same provider forces a
+            // network fetch and restarts the taskbar widget's refresh animation on every keystroke.
+            if (!ShouldRefreshOpenCodeProvider(target))
+                return;
+
             await _gate.WaitAsync().ConfigureAwait(false);
             try
             {
                 if (!ShouldReactToOpenCodeModelChange(_detector.Detect()))
+                {
+                    ForgetOpenCodeProviderObservation(target);
                     return;
+                }
 
                 var previous = _lastActive;
                 _lastActive = target;
@@ -669,6 +685,7 @@ namespace TaskbarQuota
             }
             catch (Exception ex)
             {
+                ForgetOpenCodeProviderObservation(target);
                 Diagnostics.Log.Error(ex, "OpenCode model switch failed");
                 return;
             }
@@ -681,11 +698,16 @@ namespace TaskbarQuota
             {
                 var fresh = (await _service.FetchAsync(target, force: true).ConfigureAwait(false))
                     .WithSource(SourceFor(target));
+                if (!fresh.Ok)
+                    ForgetOpenCodeProviderObservation(target);
                 await _gate.WaitAsync().ConfigureAwait(false);
                 try
                 {
                     if (!ShouldReactToOpenCodeModelChange(_detector.Detect()) || _lastActive != target)
+                    {
+                        ForgetOpenCodeProviderObservation(target);
                         return;
+                    }
 
                     if (target != _lastLogged)
                     {
@@ -706,6 +728,7 @@ namespace TaskbarQuota
             }
             catch (Exception ex)
             {
+                ForgetOpenCodeProviderObservation(target);
                 Diagnostics.Log.Error(ex, "OpenCode model switch refresh failed");
             }
         }
@@ -715,6 +738,37 @@ namespace TaskbarQuota
 
         internal static bool IsOpenCodeProvider(ProviderId provider)
             => provider is ProviderId.OpenCode or ProviderId.OpenCodeGo;
+
+        internal bool ShouldRefreshOpenCodeProvider(ProviderId provider)
+        {
+            lock (_openCodeModelStateLock)
+            {
+                if (!ShouldRefreshOpenCodeProvider(_lastObservedOpenCodeProvider, _hasObservedOpenCodeProvider, provider))
+                    return false;
+
+                _hasObservedOpenCodeProvider = true;
+                _lastObservedOpenCodeProvider = provider;
+                return true;
+            }
+        }
+
+        private void ForgetOpenCodeProviderObservation(ProviderId provider)
+        {
+            lock (_openCodeModelStateLock)
+            {
+                if (_hasObservedOpenCodeProvider && _lastObservedOpenCodeProvider == provider)
+                {
+                    _hasObservedOpenCodeProvider = false;
+                    _lastObservedOpenCodeProvider = null;
+                }
+            }
+        }
+
+        internal static bool ShouldRefreshOpenCodeProvider(
+            ProviderId? lastObservedProvider,
+            bool hasObservedProvider,
+            ProviderId provider)
+            => !hasObservedProvider || lastObservedProvider != provider;
 
         private void OnClineProviderStateChanged() => _ = HandleClineProviderSwitchAsync();
 
@@ -796,15 +850,17 @@ namespace TaskbarQuota
             }
         }
 
-        private async Task RefreshProviderCacheSilentlyAsync(ProviderId provider)
+        private async Task<bool> RefreshProviderCacheSilentlyAsync(ProviderId provider)
         {
             try
             {
-                await _service.FetchAsync(provider, force: true).ConfigureAwait(false);
+                var result = await _service.FetchAsync(provider, force: true).ConfigureAwait(false);
+                return result.Ok;
             }
             catch (Exception ex)
             {
                 Diagnostics.Log.Warning(ex, $"Background refresh for {provider} failed");
+                return false;
             }
         }
 
