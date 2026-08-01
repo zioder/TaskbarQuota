@@ -211,7 +211,7 @@ TaskBarManager → WidgetSummary (taskbar) + Dashboard + Flyout
 ```
 
 1. **Detection** — `ActiveAppDetector` maps the foreground process (or CLI child of a known terminal) to a `ProviderId`.
-2. **Fetch** — the matching `IUsageProvider` loads tokens from CLI config files, environment variables, TaskbarQuota credentials, Cursor's local database, or `CookieExtractor` (Chromium / Firefox profiles, copied to `%TEMP%` for locked DBs).
+2. **Fetch** — the matching `IUsageProvider` loads tokens from CLI config files, environment variables, TaskbarQuota credentials, Cursor's local database, or `CookieExtractor` (Chromium / Firefox profiles, opened directly with a read-only SQLite connection).
 3. **Normalize** — results become a `UsageSnapshot` with `RateWindow` rows and optional `CostSnapshot`.
 4. **Display** — `UsageCoordinator` raises `StateChanged`; the taskbar widget and dashboard apply the snapshot. Fetches are cached so providers are not hammered on every tick.
 
