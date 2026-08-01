@@ -33,6 +33,8 @@ namespace TaskbarQuota.ActiveApp
 
         private static readonly TimeSpan CacheTtl = TimeSpan.FromMilliseconds(350);
 
+        private readonly object _cacheGate = new();
+        private readonly object _automationGate = new();
         private IUIAutomation? _automation;
         private IntPtr _cachedHwnd;
         private string? _cachedUrl;
@@ -44,6 +46,24 @@ namespace TaskbarQuota.ActiveApp
 
         internal ProviderId? DetectProvider(IntPtr hwnd, string? processName, string? windowTitle = null)
             => Detect(hwnd, processName, windowTitle)?.Provider;
+
+        /// <summary>
+        /// Resolves a browser provider from the short-lived URL cache only. This path is used by
+        /// foreground hooks and must never start a UI Automation scan.
+        /// </summary>
+        internal ProviderId? DetectCachedProvider(IntPtr hwnd, string? processName)
+        {
+            if (!IsBrowserProcessName(processName) || hwnd == IntPtr.Zero)
+                return null;
+
+            lock (_cacheGate)
+            {
+                if (hwnd != _cachedHwnd || DateTime.UtcNow - _cachedAtUtc >= CacheTtl)
+                    return null;
+
+                return TryResolveProviderFromUrl(_cachedUrl);
+            }
+        }
 
         internal BrowserProviderDetection? Detect(IntPtr hwnd, string? processName, string? windowTitle = null)
         {
@@ -65,14 +85,20 @@ namespace TaskbarQuota.ActiveApp
             if (hwnd == IntPtr.Zero)
                 return null;
 
-            var now = DateTime.UtcNow;
-            if (hwnd == _cachedHwnd && now - _cachedAtUtc < CacheTtl)
-                return _cachedUrl;
+            lock (_cacheGate)
+            {
+                var now = DateTime.UtcNow;
+                if (hwnd == _cachedHwnd && now - _cachedAtUtc < CacheTtl)
+                    return _cachedUrl;
+            }
 
             var url = TryReadActiveTabUrlCore(hwnd);
-            _cachedHwnd = hwnd;
-            _cachedUrl = url;
-            _cachedAtUtc = now;
+            lock (_cacheGate)
+            {
+                _cachedHwnd = hwnd;
+                _cachedUrl = url;
+                _cachedAtUtc = DateTime.UtcNow;
+            }
             return url;
         }
 
@@ -129,22 +155,25 @@ namespace TaskbarQuota.ActiveApp
 
         private string? TryReadActiveTabUrlCore(IntPtr hwnd)
         {
-            try
+            lock (_automationGate)
             {
-                _automation ??= new CUIAutomation();
-                var root = _automation.ElementFromHandle(hwnd);
-                if (root is null)
-                    return null;
+                try
+                {
+                    _automation ??= new CUIAutomation();
+                    var root = _automation.ElementFromHandle(hwnd);
+                    if (root is null)
+                        return null;
 
-                if (TryFindUrlInEdits(root) is { } editUrl)
-                    return editUrl;
-            }
-            catch (Exception ex)
-            {
-                Diagnostics.Log.Debug($"[browser] URL UIA read failed: {ex.Message}");
-            }
+                    if (TryFindUrlInEdits(root) is { } editUrl)
+                        return editUrl;
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.Log.Debug($"[browser] URL UIA read failed: {ex.Message}");
+                }
 
-            return null;
+                return null;
+            }
         }
 
         private string? TryFindUrlInEdits(IUIAutomationElement root)

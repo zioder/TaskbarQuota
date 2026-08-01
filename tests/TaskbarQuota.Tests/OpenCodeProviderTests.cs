@@ -41,6 +41,40 @@ public class OpenCodeProviderTests
             OpenCodeProvider.WorkspacePageUrl("wrk_abc123", "/usage"));
     }
 
+    [Theory]
+    [InlineData("wrk_abc123", "wrk_abc123")]
+    [InlineData("https://opencode.ai/workspace/wrk_abc123/go", "wrk_abc123")]
+    [InlineData("  wrk_team-123  ", "wrk_team-123")]
+    [InlineData("not-a-workspace", null)]
+    public void NormalizeWorkspaceId_AcceptsIdsAndWorkspaceUrls(string input, string? expected)
+        => Assert.Equal(expected, OpenCodeProvider.NormalizeWorkspaceId(input));
+
+    [Fact]
+    public void ParseWorkspaceIds_DeduplicatesStructuredAndJsonOccurrences()
+    {
+        var ids = OpenCodeProvider.ParseWorkspaceIds(
+            "id: \"wrk_first\", data: { workspace: \"wrk_second\", again: \"wrk_first\" }");
+
+        Assert.Equal(new[] { "wrk_first", "wrk_second" }, ids);
+    }
+
+    [Fact]
+    public void ParseBillingBalance_ConvertsRawBillingUnitsToUsd()
+    {
+        var balance = OpenCodeProvider.ParseBillingBalance(
+            "{\"customerID\":\"cus_123\",\"balance\":4250000000}");
+
+        Assert.Equal(42.5, balance);
+    }
+
+    [Fact]
+    public void ParseBillingBalance_IgnoresUnscopedBalanceFields()
+    {
+        var balance = OpenCodeProvider.ParseBillingBalance("{\"balance\":4250000000}");
+
+        Assert.Null(balance);
+    }
+
     [Fact]
     public void LooksSignedOut_WithNormalContent_ReturnsFalse()
     {
