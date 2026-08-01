@@ -90,14 +90,21 @@ namespace TaskbarQuota.Taskbar
                 || !User32.GetWindowRect(hwndReBar, out RECT rebarScreenRect)
                 || !User32.GetWindowRect(hwndTaskSwitcher, out RECT currentScreenRect))
             {
+                // Keep the baseline and applied rectangles when a transient native read fails so
+                // the next restore attempt can still put the task switcher back.
+                return;
+            }
+
+            if (!RectsEqual(currentScreenRect, appliedScreenRect))
+            {
+                // Another component changed the task switcher after we applied our reservation;
+                // do not overwrite that external layout.
                 taskSwitcherState.Reset();
                 return;
             }
 
-            if (RectsEqual(currentScreenRect, appliedScreenRect))
-                TrySetWindowRect(ToScreenRect(baselineClientRect, rebarScreenRect), rebarScreenRect);
-
-            taskSwitcherState.Reset();
+            if (TrySetWindowRect(ToScreenRect(baselineClientRect, rebarScreenRect), rebarScreenRect))
+                taskSwitcherState.Reset();
         }
 
         internal static bool TryComputeRightPlacement(
