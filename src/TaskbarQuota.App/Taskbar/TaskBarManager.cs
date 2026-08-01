@@ -45,9 +45,11 @@ namespace TaskbarQuota.Taskbar
                 UsageCoordinator.Instance.ActiveProviderChanged += OnActiveProviderChanged;
                 UsageCoordinator.Instance.ActiveToolPresenceChanged += OnActiveToolPresenceChanged;
                 UsageCoordinator.Instance.ProviderForegroundChanged += OnProviderForegroundChanged;
-                // Lets the coordinator's focus tracker treat "our flyout is open" as neutral instead of as
-                // the user having left the provider app.
-                UsageCoordinator.Instance.IsOwnUiEngaged = () => _flyout?.IsShown == true;
+                // Lets the coordinator's focus tracker treat our flyout and an active widget drag as neutral
+                // instead of as the user having left the provider app. Otherwise the opt-in hide-on-unfocus
+                // path can hide the widget during the drag and restore its old position.
+                UsageCoordinator.Instance.IsOwnUiEngaged = () =>
+                    _flyout?.IsShown == true || TaskBarWidget.IsAnyUserRepositioning;
                 WidgetSettingsService.Changed += OnWidgetSettingsChanged;
                 App.Quitting += OnQuitting;
                 // Installed from the UI thread on purpose: WINEVENT_OUTOFCONTEXT callbacks arrive through
