@@ -6,6 +6,19 @@ namespace TaskbarQuota.Tests;
 
 public class OpenCodeProviderTests
 {
+    [Theory]
+    [InlineData("auth=abc; other=value", "auth=abc; other=value")]
+    [InlineData("Cookie: auth=abc; other=value", "auth=abc; other=value")]
+    [InlineData("curl 'https://opencode.ai/workspace/wrk_abc' -H 'accept: text/html' -H 'cookie: auth=abc; other=value'", "auth=abc; other=value")]
+    [InlineData("curl.exe \"https://opencode.ai\" --header=\"Cookie: __Host-auth=abc; other=value\"", "__Host-auth=abc; other=value")]
+    [InlineData("curl https://opencode.ai --cookie 'auth=abc; other=value'", "auth=abc; other=value")]
+    public void NormalizeCookieHeader_AcceptsRawHeaderOrCopiedCurl(string input, string expected)
+        => Assert.Equal(expected, CookieHelper.NormalizeCookieHeader(input));
+
+    [Fact]
+    public void NormalizeCookieHeader_RejectsCurlWithoutCookies()
+        => Assert.Null(CookieHelper.NormalizeCookieHeader("curl https://opencode.ai/workspace/wrk_abc"));
+
     [Fact]
     public void LooksSignedOut_WithAuthAuthorize_ReturnsTrue()
     {
@@ -87,6 +100,13 @@ public class OpenCodeProviderTests
     {
         Assert.False(OpenCodeProvider.LooksSignedOut(""));
     }
+
+    [Theory]
+    [InlineData("<title>OpenAuth</title>")]
+    [InlineData("<button>Continue with GitHub</button>")]
+    [InlineData("<button>Continue with Google</button>")]
+    public void LooksSignedOut_WithOpenAuthPage_ReturnsTrue(string html)
+        => Assert.True(OpenCodeProvider.LooksSignedOut(html));
 
     [Fact]
     public void FindMoneyValue_WithJsonNumber_ReturnsValue()

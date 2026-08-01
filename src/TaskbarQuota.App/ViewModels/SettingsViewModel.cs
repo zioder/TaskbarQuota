@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using TaskbarQuota.Usage;
+using TaskbarQuota.Usage.Providers;
 
 namespace TaskbarQuota.ViewModels
 {
@@ -46,7 +47,6 @@ namespace TaskbarQuota.ViewModels
         private readonly ProviderId _id;
 
         public ProviderId Id => _id;
-
         public string Title { get; }
         public string Description { get; }
         public CredentialKind Kind { get; }
@@ -86,7 +86,14 @@ namespace TaskbarQuota.ViewModels
         {
             var e = CredentialStore.Instance.For(_id);
             e.ApiKey = string.IsNullOrWhiteSpace(ApiKey) ? null : ApiKey.Trim();
-            e.CookieHeader = string.IsNullOrWhiteSpace(CookieHeader) ? null : CookieHeader.Trim();
+            var cookieInput = string.IsNullOrWhiteSpace(CookieHeader) ? null : CookieHeader.Trim();
+            bool isOpenCode = _id is ProviderId.OpenCode or ProviderId.OpenCodeGo;
+            var normalizedCookie = isOpenCode
+                ? CookieHelper.NormalizeCookieHeader(cookieInput)
+                : cookieInput;
+            e.CookieHeader = isOpenCode ? normalizedCookie : cookieInput;
+            if (isOpenCode)
+                CookieHeader = normalizedCookie ?? "";
             e.WorkspaceId = string.IsNullOrWhiteSpace(WorkspaceId) ? null : WorkspaceId.Trim();
             CredentialStore.Instance.Save();
             Saved = true;
