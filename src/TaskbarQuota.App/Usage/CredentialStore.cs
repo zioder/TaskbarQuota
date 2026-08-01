@@ -25,6 +25,7 @@ namespace TaskbarQuota.Usage
         {
             public string? ApiKey { get; set; }
             public string? CookieHeader { get; set; }
+            public string? WorkspaceId { get; set; }
             public string? Extra { get; set; } // provider-specific (e.g. MiniMax group id)
         }
 
@@ -66,6 +67,12 @@ namespace TaskbarQuota.Usage
         {
             var v = For(id).CookieHeader;
             return string.IsNullOrWhiteSpace(v) ? null : v!.Trim();
+        }
+
+        public string? WorkspaceId(ProviderId id)
+        {
+            var value = For(id).WorkspaceId;
+            return string.IsNullOrWhiteSpace(value) ? null : value!.Trim();
         }
 
         public void Save()

@@ -175,7 +175,7 @@ namespace TaskbarQuota.Views
             var vm = CreateCredentialVm(id);
             var flyout = new Flyout { Placement = FlyoutPlacementMode.Bottom };
 
-            var stack = new StackPanel { Spacing = 12, MaxWidth = 340 };
+            var stack = new StackPanel { Spacing = 12, MaxWidth = 380 };
 
             if (vm.IsApiKey)
             {
@@ -188,12 +188,84 @@ namespace TaskbarQuota.Views
             }
             else
             {
-                var tb = new TextBox { Text = vm.CookieHeader, MinWidth = 280, PlaceholderText = "name1=value1; name2=value2", AcceptsReturn = false };
+                bool isOpenCode = vm.Id is ProviderId.OpenCode or ProviderId.OpenCodeGo;
+                var tb = new TextBox
+                {
+                    Text = vm.CookieHeader,
+                    MinWidth = 280,
+                    PlaceholderText = isOpenCode ? "Cookie value or full copied cURL command" : "name1=value1; name2=value2",
+                    AcceptsReturn = isOpenCode,
+                    TextWrapping = isOpenCode ? TextWrapping.Wrap : TextWrapping.NoWrap,
+                    MaxHeight = isOpenCode ? 120 : double.PositiveInfinity,
+                };
                 tb.TextChanged += (_, _) => vm.CookieHeader = tb.Text;
 
                 stack.Children.Add(new TextBlock { Text = "Cookie header", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
                 stack.Children.Add(new TextBlock { Text = "Leave blank to keep auto-detection.", Opacity = 0.6, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
                 stack.Children.Add(tb);
+
+                if (isOpenCode)
+                {
+                    stack.Children.Add(new TextBlock
+                    {
+                        Text = "Chromium 127+ manual setup",
+                        FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                    });
+                    stack.Children.Add(new TextBlock
+                    {
+                        Text = "Chrome, Edge, and Brave 127+ protect cookies with App-Bound Encryption, so TaskbarQuota may not be able to read them automatically.",
+                        Opacity = 0.6,
+                        TextWrapping = TextWrapping.Wrap,
+                        Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+                    });
+                    stack.Children.Add(new TextBlock
+                    {
+                        Text = "1. Open opencode.ai in the browser where you are signed in. Press F12, choose Network, and reload the page.",
+                        Opacity = 0.6,
+                        TextWrapping = TextWrapping.Wrap,
+                        Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+                    });
+                    stack.Children.Add(new TextBlock
+                    {
+                        Text = "2. Click an opencode.ai request, right-click it, then choose Copy → Copy as cURL.",
+                        Opacity = 0.6,
+                        TextWrapping = TextWrapping.Wrap,
+                        Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+                    });
+                    stack.Children.Add(new TextBlock
+                    {
+                        Text = "3. Paste either the full copied cURL command or only the text after Cookie:. TaskbarQuota extracts the cookie automatically; it should include auth=... or __Host-auth=....",
+                        Opacity = 0.6,
+                        TextWrapping = TextWrapping.Wrap,
+                        Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+                    });
+
+                    var workspace = new TextBox
+                    {
+                        Text = vm.WorkspaceId,
+                        MinWidth = 280,
+                        PlaceholderText = "wrk_... or workspace URL",
+                        AcceptsReturn = false,
+                    };
+                    workspace.TextChanged += (_, _) => vm.WorkspaceId = workspace.Text;
+                    stack.Children.Add(new TextBlock { Text = "Workspace ID (optional; usually auto-detected)", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+                    stack.Children.Add(new TextBlock
+                    {
+                        Text = "Only fill this when detection fails or you have multiple workspaces. Copy the wrk_... part from the OpenCode workspace URL; a full workspace URL also works.",
+                        Opacity = 0.6,
+                        TextWrapping = TextWrapping.Wrap,
+                        Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+                    });
+                    stack.Children.Add(workspace);
+
+                    stack.Children.Add(new TextBlock
+                    {
+                        Text = "Cookie headers are session credentials. Keep them private.",
+                        Opacity = 0.6,
+                        TextWrapping = TextWrapping.Wrap,
+                        Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+                    });
+                }
             }
 
             var saveBtn = new Button { Content = "Save & Refresh", Style = (Style)Application.Current.Resources["AccentButtonStyle"], Margin = new Thickness(0, 4, 0, 0) };
@@ -311,10 +383,10 @@ namespace TaskbarQuota.Views
                 "Paste a cursor.com Cookie header to override browser detection.",
                 CredentialKind.Cookie),
             ProviderId.OpenCode => new ProviderCredentialViewModel(id, "OpenCode",
-                "Paste an opencode.ai Cookie header to override browser detection.",
+                "Paste an opencode.ai Cookie header and optionally select a workspace.",
                 CredentialKind.Cookie),
             ProviderId.OpenCodeGo => new ProviderCredentialViewModel(id, "OpenCode Go",
-                "Paste an opencode.ai Cookie header to override browser detection.",
+                "Paste an opencode.ai Cookie header and optionally select a workspace.",
                 CredentialKind.Cookie),
             ProviderId.Kimi => new ProviderCredentialViewModel(id, "Kimi Code",
                 "Paste your Kimi Code API key (KIMI_CODE_API_KEY) to fetch Coding Plan usage without CLI login.",

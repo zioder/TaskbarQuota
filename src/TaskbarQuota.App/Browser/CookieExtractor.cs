@@ -27,6 +27,19 @@ namespace TaskbarQuota.Browser
         private sealed record Browser(string Name, string UserDataDir);
         private sealed record FirefoxBrowser(string Name, string ProfilesDir);
 
+        /// <summary>
+        /// Cookies collected from one browser profile. Keeping profiles separate is important:
+        /// combining cookies from different browsers can create a request made from a stale or
+        /// mixed session when one Chromium profile cannot be decrypted.
+        /// </summary>
+        internal sealed record CookieSource(
+            string BrowserName,
+            string ProfileName,
+            IReadOnlyList<(string Name, string Value)> Cookies)
+        {
+            public string Header => string.Join("; ", Cookies.Select(cookie => $"{cookie.Name}={cookie.Value}"));
+        }
+
         private static IEnumerable<Browser> ChromiumBrowsers()
         {
             string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -83,6 +96,97 @@ namespace TaskbarQuota.Browser
 
             if (jar.Count == 0) return null;
             return string.Join("; ", jar.Select(kv => $"{kv.Key}={kv.Value}"));
+        }
+
+        /// <summary>
+        /// Returns cookie jars separately for each browser profile. Unlike <see cref="GetCookieHeader"/>,
+        /// this method never combines cookies from different profiles and preserves Firefox cookie
+        /// chunks. OpenCode uses it to choose a complete, decryptable session instead of accepting
+        /// a hybrid made from stale and current browser cookies.
+        /// </summary>
+        internal static IReadOnlyList<CookieSource> GetCookieSources(params string[] domains)
+        {
+            var requestedDomains = domains
+                .Where(domain => !string.IsNullOrWhiteSpace(domain))
+                .Select(domain => domain.Trim().TrimStart('.'))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (requestedDomains.Length == 0)
+                return Array.Empty<CookieSource>();
+
+            var sources = new List<CookieSource>();
+
+            foreach (var browser in ChromiumBrowsers())
+            {
+                if (!Directory.Exists(browser.UserDataDir)) continue;
+
+                byte[] key;
+                try { key = GetEncryptionKey(Path.Combine(browser.UserDataDir, "Local State")); }
+                catch (Exception ex)
+                {
+                    Log.Debug($"{browser.Name} key error: {ex.Message}");
+                    continue;
+                }
+
+                try
+                {
+                    foreach (var profile in EnumerateChromiumProfiles(browser.UserDataDir)
+                        .Distinct(StringComparer.OrdinalIgnoreCase))
+                    {
+                        var cookiesDb = FindChromiumCookiesDb(profile);
+                        if (cookiesDb == null) continue;
+
+                        var jar = new Dictionary<string, string>(StringComparer.Ordinal);
+                        foreach (var domain in requestedDomains)
+                        {
+                            foreach (var (name, value) in ReadChromiumCookies(cookiesDb, key, domain))
+                                jar[name] = value;
+                        }
+
+                        if (jar.Count > 0)
+                        {
+                            sources.Add(new CookieSource(
+                                browser.Name,
+                                Path.GetFileName(profile),
+                                jar.Select(cookie => (cookie.Key, cookie.Value)).ToList()));
+                        }
+                    }
+                }
+                catch (Exception ex) { Log.Debug($"Cookie source scan failed for {browser.Name}: {ex.Message}"); }
+            }
+
+            foreach (var browser in FirefoxBrowsers())
+            {
+                if (!Directory.Exists(browser.ProfilesDir)) continue;
+
+                try
+                {
+                    foreach (var profile in EnumerateFirefoxProfiles(browser.ProfilesDir)
+                        .Distinct(StringComparer.OrdinalIgnoreCase))
+                    {
+                        var cookiesDb = Path.Combine(profile, "cookies.sqlite");
+                        if (!File.Exists(cookiesDb)) continue;
+
+                        var cookies = new Dictionary<string, string>(StringComparer.Ordinal);
+                        foreach (var domain in requestedDomains)
+                        {
+                            foreach (var (name, value) in ReadFirefoxCookiesRaw(cookiesDb, domain))
+                                cookies[name] = value;
+                        }
+
+                        if (cookies.Count > 0)
+                        {
+                            sources.Add(new CookieSource(
+                                browser.Name,
+                                Path.GetFileName(profile),
+                                cookies.Select(cookie => (cookie.Key, cookie.Value)).ToList()));
+                        }
+                    }
+                }
+                catch (Exception ex) { Log.Debug($"Cookie source scan failed for {browser.Name}: {ex.Message}"); }
+            }
+
+            return sources;
         }
 
         /// <summary>
@@ -144,6 +248,15 @@ namespace TaskbarQuota.Browser
                 foreach (var c in ReadChromiumCookies(cookiesDb, key, domain))
                     yield return c;
             }
+        }
+
+        private static string? FindChromiumCookiesDb(string profile)
+        {
+            var networkCookies = Path.Combine(profile, "Network", "Cookies");
+            if (File.Exists(networkCookies)) return networkCookies;
+
+            var legacyCookies = Path.Combine(profile, "Cookies");
+            return File.Exists(legacyCookies) ? legacyCookies : null;
         }
 
         private static IEnumerable<(string name, string value)> ExtractFromFirefox(FirefoxBrowser browser, string domain)
@@ -337,6 +450,10 @@ namespace TaskbarQuota.Browser
                 }
                 catch { return null; } // ABE / wrong key
             }
+            // Chromium's newer app-bound formats (for example v20) require browser-process
+            // mediation and must not be mistaken for the legacy DPAPI format below.
+            if (enc.Length >= 3 && enc[0] == 'v' && enc[1] == '1' && enc[2] != '0' && enc[2] != '1')
+                return null;
             // Legacy DPAPI-encrypted value (pre-v10)
             try { return Encoding.UTF8.GetString(ProtectedData.Unprotect(enc, null, DataProtectionScope.CurrentUser)); }
             catch { return null; }
