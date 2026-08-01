@@ -259,8 +259,9 @@ namespace TaskbarQuota
                 if (_providerForegroundActive == next)
                 {
                     // Inside the grace window: come back exactly when it expires rather than drifting to
-                    // whenever the next detect tick happens to land.
-                    if (next && unfocusedSince != DateTime.MinValue)
+                    // whenever the next detect tick happens to land. Skip re-arming when ownUiEngaged froze
+                    // the state — the next genuine foreground change will re-evaluate normally.
+                    if (!ownUiEngaged && next && unfocusedSince != DateTime.MinValue)
                         ArmUnfocusHideCheck(unfocusedSince);
                     return;
                 }
