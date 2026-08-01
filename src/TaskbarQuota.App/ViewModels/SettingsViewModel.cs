@@ -45,6 +45,8 @@ namespace TaskbarQuota.ViewModels
     {
         private readonly ProviderId _id;
 
+        public ProviderId Id => _id;
+
         public string Title { get; }
         public string Description { get; }
         public CredentialKind Kind { get; }
@@ -52,6 +54,7 @@ namespace TaskbarQuota.ViewModels
 
         [ObservableProperty] public partial string ApiKey { get; set; }
         [ObservableProperty] public partial string CookieHeader { get; set; }
+        [ObservableProperty] public partial string WorkspaceId { get; set; }
         [ObservableProperty] public partial bool Saved { get; set; }
 
         public bool IsApiKey => Kind == CredentialKind.ApiKey;
@@ -75,6 +78,7 @@ namespace TaskbarQuota.ViewModels
             var e = CredentialStore.Instance.For(id);
             ApiKey = e.ApiKey ?? "";
             CookieHeader = e.CookieHeader ?? "";
+            WorkspaceId = e.WorkspaceId ?? "";
         }
 
         [RelayCommand]
@@ -83,6 +87,7 @@ namespace TaskbarQuota.ViewModels
             var e = CredentialStore.Instance.For(_id);
             e.ApiKey = string.IsNullOrWhiteSpace(ApiKey) ? null : ApiKey.Trim();
             e.CookieHeader = string.IsNullOrWhiteSpace(CookieHeader) ? null : CookieHeader.Trim();
+            e.WorkspaceId = string.IsNullOrWhiteSpace(WorkspaceId) ? null : WorkspaceId.Trim();
             CredentialStore.Instance.Save();
             Saved = true;
         }
