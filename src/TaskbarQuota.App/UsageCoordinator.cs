@@ -486,7 +486,10 @@ namespace TaskbarQuota
             {
                 if (modelProvider is ProviderId backgroundProvider
                     && ShouldRefreshOpenCodeProvider(backgroundProvider))
-                    await RefreshProviderCacheSilentlyAsync(backgroundProvider).ConfigureAwait(false);
+                {
+                    if (!await RefreshProviderCacheSilentlyAsync(backgroundProvider).ConfigureAwait(false))
+                        ForgetOpenCodeProviderObservation(backgroundProvider);
+                }
                 return;
             }
 
@@ -504,7 +507,10 @@ namespace TaskbarQuota
             try
             {
                 if (!ShouldReactToOpenCodeModelChange(_detector.Detect()))
+                {
+                    ForgetOpenCodeProviderObservation(target);
                     return;
+                }
 
                 var previous = _lastActive;
                 _lastActive = target;
@@ -524,6 +530,7 @@ namespace TaskbarQuota
             }
             catch (Exception ex)
             {
+                ForgetOpenCodeProviderObservation(target);
                 Diagnostics.Log.Error(ex, "OpenCode model switch failed");
                 return;
             }
@@ -536,11 +543,16 @@ namespace TaskbarQuota
             {
                 var fresh = (await _service.FetchAsync(target, force: true).ConfigureAwait(false))
                     .WithSource(SourceFor(target));
+                if (!fresh.Ok)
+                    ForgetOpenCodeProviderObservation(target);
                 await _gate.WaitAsync().ConfigureAwait(false);
                 try
                 {
                     if (!ShouldReactToOpenCodeModelChange(_detector.Detect()) || _lastActive != target)
+                    {
+                        ForgetOpenCodeProviderObservation(target);
                         return;
+                    }
 
                     if (target != _lastLogged)
                     {
@@ -561,6 +573,7 @@ namespace TaskbarQuota
             }
             catch (Exception ex)
             {
+                ForgetOpenCodeProviderObservation(target);
                 Diagnostics.Log.Error(ex, "OpenCode model switch refresh failed");
             }
         }
@@ -581,6 +594,18 @@ namespace TaskbarQuota
                 _hasObservedOpenCodeProvider = true;
                 _lastObservedOpenCodeProvider = provider;
                 return true;
+            }
+        }
+
+        private void ForgetOpenCodeProviderObservation(ProviderId provider)
+        {
+            lock (_openCodeModelStateLock)
+            {
+                if (_hasObservedOpenCodeProvider && _lastObservedOpenCodeProvider == provider)
+                {
+                    _hasObservedOpenCodeProvider = false;
+                    _lastObservedOpenCodeProvider = null;
+                }
             }
         }
 
@@ -669,15 +694,17 @@ namespace TaskbarQuota
             }
         }
 
-        private async Task RefreshProviderCacheSilentlyAsync(ProviderId provider)
+        private async Task<bool> RefreshProviderCacheSilentlyAsync(ProviderId provider)
         {
             try
             {
-                await _service.FetchAsync(provider, force: true).ConfigureAwait(false);
+                var result = await _service.FetchAsync(provider, force: true).ConfigureAwait(false);
+                return result.Ok;
             }
             catch (Exception ex)
             {
                 Diagnostics.Log.Warning(ex, $"Background refresh for {provider} failed");
+                return false;
             }
         }
 
