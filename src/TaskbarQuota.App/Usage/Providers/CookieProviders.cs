@@ -120,14 +120,26 @@ namespace TaskbarQuota.Usage.Providers
 
         internal static async Task<string> FetchWorkspaceId(string cookie, CancellationToken ct, string providerName)
         {
-            var text = await GetText($"{ServerUrl}?id={WorkspacesServerId}", WorkspacesServerId,
-                "https://opencode.ai", cookie, ct).ConfigureAwait(false);
-            var ids = ParseWorkspaceIds(text);
-            if (ids.Count > 0) return ids[0];
+            try
+            {
+                var getText = await GetText($"{ServerUrl}?id={WorkspacesServerId}", WorkspacesServerId,
+                    "https://opencode.ai", cookie, ct).ConfigureAwait(false);
+                var getIds = ParseWorkspaceIds(getText);
+                if (getIds.Count > 0) return getIds[0];
+            }
+            catch (ProviderException ex) when (ex.Kind != ProviderErrorKind.AuthRequired)
+            {
+                // Solid server functions can reject GET after a deployment changes their transport.
+                // Preserve auth errors, but let API/status failures use the POST form below.
+            }
+            catch (HttpRequestException)
+            {
+                // A connection-level GET failure may still succeed through the POST route.
+            }
 
-            text = await GetText(ServerUrl, WorkspacesServerId, "https://opencode.ai", cookie, ct,
+            var text = await GetText(ServerUrl, WorkspacesServerId, "https://opencode.ai", cookie, ct,
                 HttpMethod.Post, "[]").ConfigureAwait(false);
-            ids = ParseWorkspaceIds(text);
+            var ids = ParseWorkspaceIds(text);
             if (ids.Count > 0) return ids[0];
             throw new ProviderException(ProviderErrorKind.Parse, $"{providerName}: no workspace id found.");
         }
