@@ -61,6 +61,7 @@ namespace TaskbarQuota.Taskbar
         private static readonly WndProc SharedWndProc = SharedWindowProc;
         private static bool windowClassRegistered;
         private static int windowClassUsers;
+        private static int userRepositioningCount;
 
         // Minimum horizontal recompute delta (logical px, DPI-scaled) before the resting widget is moved.
         private int RepositionDeadbandPx => (int)Math.Ceiling(2 * dpiScale);
@@ -147,7 +148,12 @@ namespace TaskbarQuota.Taskbar
         // widget snaps back to a computed lane mid-drag (issue #17 case 2).
         // isSettling covers the async snap right after release: without it a watcher poll landing mid-snap
         // would recompute a resting position from the not-yet-saved offset and yank the widget away.
-        private bool IsUserRepositioning => isDragging || isPointerTracking || isDirectDrag || isSettling;
+        // Public so the coordinator can treat the widget as our own UI while the user is moving it. Without
+        // this, the focus-following option sees the drag host become foreground, hides the widget, and the
+        // hide path restores the old position in the middle of the drag.
+        public bool IsUserRepositioning => isDragging || isPointerTracking || isDirectDrag || isSettling;
+        public static bool IsAnyUserRepositioning => Volatile.Read(ref userRepositioningCount) > 0;
+        private bool userRepositioningRegistered;
         private bool isSettling;
         private int draggingInnerOffsetX;
         // Where the drag currently sits, and the free gap it is tracking the cursor inside.
@@ -967,24 +973,10 @@ namespace TaskbarQuota.Taskbar
                 }
                 bool useDefault = offsetX == -1;
 
-                // Classic task switchers can ignore a sibling overlay when their uncombined buttons grow.
-                // For the default LTR placement, shorten only the switcher's right edge and put the widget
-                // in the resulting tray-side slot. Native Win11 lacks this hierarchy, so its path is unchanged.
-                int classicOffsetX = 0;
-                bool useClassicRightReservation = CanUseClassicRightReservation(
-                        isVisible,
-                        isPrimaryTaskbar,
-                        useDefault,
-                        hasNotificationArea,
-                        IsRtlUI)
-                    && classicTaskbarReservation.TryApplyRight(
-                        taskbarScreenRect,
-                        notificationScreenRect,
-                        WidgetHostWidth,
-                        TrayClearancePx,
-                        out classicOffsetX);
-                if (!useClassicRightReservation)
-                    classicTaskbarReservation.Restore();
+                // The widget is a left-side taskbar surface by default. Do not reserve the tray-side slot:
+                // that reservation made every fresh install land on the right and also competed with the
+                // drag solver. A saved custom position remains authoritative.
+                classicTaskbarReservation.Restore();
 
                 // The Widgets/weather pill is a XAML element the child-window scan can't see, so fetch its
                 // bounds separately (UIA, with a cached fallback) and treat it as an obstacle like any other.
@@ -1013,16 +1005,16 @@ namespace TaskbarQuota.Taskbar
 
                 // Preferred X: the saved manual position, or the side-appropriate default anchor.
                 int preferredX;
-                if (useClassicRightReservation)
-                    preferredX = classicOffsetX;
-                else if (!useDefault)
+                if (!useDefault)
                     preferredX = offsetX;
-                else if (!hasNotificationArea)
-                    preferredX = IsRtlUI ? leftBound : rightBound - WidgetHostWidth;
-                else if (isCentered)
+                else if (IsRtlUI && hasNotificationArea)
+                    preferredX = ComputeFarLeftAnchor(taskbarRect, trayNotifyRect, wbRect, taskbarScreenRect, isCentered, isWidgetsEnabled);
+                else if (IsRtlUI)
+                    preferredX = rightBound - WidgetHostWidth;
+                else if (hasNotificationArea)
                     preferredX = ComputeFarLeftAnchor(taskbarRect, trayNotifyRect, wbRect, taskbarScreenRect, isCentered, isWidgetsEnabled);
                 else
-                    preferredX = IsRtlUI ? leftBound : rightBound - WidgetHostWidth;
+                    preferredX = leftBound;
 
                 // Every taskbar button (app icons + system buttons) is an obstacle, so the widget can never rest
                 // on top of the app cluster — same set for resting and dragging (issue #17).
@@ -1035,25 +1027,16 @@ namespace TaskbarQuota.Taskbar
                 // it may occupy. That is the budget the tile-fit math trims against.
                 UpdateAvailableWidth(gaps);
 
-                if (useClassicRightReservation)
+                int? placed = PlaceInFittingGap(preferredX, gaps, WidgetHostWidth);
+                if (placed is not { } fitX)
                 {
-                    // The shortened classic switcher owns the button layout. Its reserved slot is therefore
-                    // authoritative even if UI Automation briefly reports stale child-button rectangles.
-                    offsetX = preferredX;
+                    if (currentOffsetX != int.MinValue)
+                        return;
+                    offsetX = Math.Clamp(preferredX, leftBound, Math.Max(leftBound, rightBound - WidgetHostWidth));
                 }
                 else
                 {
-                    int? placed = PlaceInFittingGap(preferredX, gaps, WidgetHostWidth);
-                    if (placed is not { } fitX)
-                    {
-                        if (currentOffsetX != int.MinValue)
-                            return;
-                        offsetX = Math.Max(leftBound, rightBound - WidgetHostWidth);
-                    }
-                    else
-                    {
-                        offsetX = fitX;
-                    }
+                    offsetX = fitX;
                 }
 
                 offsetX = ClampToTaskbarMonitor(
@@ -1107,21 +1090,10 @@ namespace TaskbarQuota.Taskbar
             => currentOffsetX == int.MinValue
             || Math.Abs((long)currentOffsetX - offsetX) >= deadbandPx;
 
-        internal static bool CanUseClassicRightReservation(
-            bool isVisible,
-            bool isPrimaryTaskbar,
-            bool useDefault,
-            bool hasNotificationArea,
-            bool isRtlUi)
-            => isVisible
-                && isPrimaryTaskbar
-                && useDefault
-                && hasNotificationArea
-                && !isRtlUi;
-
         public void StartDragging()
         {
             if (isDragging || appWindow is null || hostContent is null || summaryPanel is null) return;
+            BeginUserRepositioning();
             isDragging = true;
             SetVisible(true);
             classicTaskbarReservation.Restore();
@@ -1140,7 +1112,12 @@ namespace TaskbarQuota.Taskbar
 
         public void EndDragging(bool revert)
         {
-            if (!isDragging || appWindow is null || hostContent is null || summaryPanel is null) return;
+            if (!isDragging || appWindow is null || hostContent is null || summaryPanel is null)
+            {
+                if (!isDragging && !isPointerTracking && !isDirectDrag)
+                    EndUserRepositioning();
+                return;
+            }
             isDragging = false;
             hostContent.ReleasePointerCaptures();
             hostContent.KeyUp -= Content_KeyUp;
@@ -1154,6 +1131,7 @@ namespace TaskbarQuota.Taskbar
                 activeDragGap = null;
                 appWindow.Move(new PointInt32(currentOffsetX, currentOffsetY));
                 QueuePositionUpdate(TaskbarChangeReason.None);
+                EndUserRepositioning();
                 return;
             }
             _ = SnapToValidPositionAsync(dragPreviewX ?? appWindow.Position.X);
@@ -1190,6 +1168,7 @@ namespace TaskbarQuota.Taskbar
         private void WidgetSummary_PointerPressed(object sender, PointerRoutedEventArgs e)
         {
             if (appWindow is null || sender is not WidgetSummary summary) return;
+            BeginUserRepositioning();
             isPointerTracking = true;
             isDirectDrag = false;
             PrimeObstacleCacheForDrag();
@@ -1221,8 +1200,9 @@ namespace TaskbarQuota.Taskbar
 
         private void WidgetSummary_PointerReleased(object sender, PointerRoutedEventArgs e)
         {
+            bool wasDirectDrag = isDirectDrag;
             (sender as WidgetSummary)?.ReleasePointerCaptures();
-            if (isDirectDrag && appWindow is not null)
+            if (wasDirectDrag && appWindow is not null)
             {
                 _ = SnapToValidPositionAsync(dragPreviewX ?? appWindow.Position.X);
                 SuppressTileClicks();
@@ -1230,6 +1210,8 @@ namespace TaskbarQuota.Taskbar
             }
             isPointerTracking = false;
             isDirectDrag = false;
+            if (!wasDirectDrag)
+                EndUserRepositioning();
         }
 
         private void WidgetSummary_PointerCanceled(object sender, PointerRoutedEventArgs e)
@@ -1240,6 +1222,25 @@ namespace TaskbarQuota.Taskbar
             (sender as WidgetSummary)?.ReleasePointerCaptures();
             if (wasDirectDrag)
                 QueuePositionUpdate(TaskbarChangeReason.None);
+            EndUserRepositioning();
+        }
+
+        private void BeginUserRepositioning()
+        {
+            if (userRepositioningRegistered)
+                return;
+
+            userRepositioningRegistered = true;
+            Interlocked.Increment(ref userRepositioningCount);
+        }
+
+        private void EndUserRepositioning()
+        {
+            if (!userRepositioningRegistered)
+                return;
+
+            userRepositioningRegistered = false;
+            Interlocked.Decrement(ref userRepositioningCount);
         }
 
         private void SetTilesHitTestVisible(bool visible)
@@ -1457,7 +1458,11 @@ namespace TaskbarQuota.Taskbar
         /// </summary>
         private async Task SnapToValidPositionAsync(int droppedX)
         {
-            if (appWindow is null) return;
+            if (appWindow is null)
+            {
+                EndUserRepositioning();
+                return;
+            }
 
             isSettling = true;
             try
@@ -1506,6 +1511,8 @@ namespace TaskbarQuota.Taskbar
             finally
             {
                 isSettling = false;
+                if (!isDragging && !isPointerTracking && !isDirectDrag)
+                    EndUserRepositioning();
             }
         }
 
@@ -1980,8 +1987,9 @@ namespace TaskbarQuota.Taskbar
                 if (!int.TryParse(File.ReadAllText(positionPath), NumberStyles.Integer, CultureInfo.InvariantCulture, out int offset))
                     return -1;
 
-                // A saved offset of 0 lands under the Start button on LTR taskbars and looks "missing".
-                return offset == 0 ? -1 : offset;
+                // Zero is a valid left-edge position. It used to be treated as the default sentinel, which
+                // made a drag released at the far-left edge snap back to the right on the next refresh.
+                return offset;
             }
             catch (Exception ex)
             {
@@ -2103,6 +2111,7 @@ namespace TaskbarQuota.Taskbar
                 return;
 
             disposedValue = true;
+            EndUserRepositioning();
             initialized = false;
             isVisible = false;
             positionUpdateCancellation.Cancel();
