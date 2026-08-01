@@ -274,10 +274,13 @@ namespace TaskbarQuota.Taskbar
         /// </summary>
         private static UsageResult? HydrateResult(UsageCoordinator coordinator, ProviderId provider)
         {
-            if (coordinator.LastState is { } last && last.Id == provider)
-                return last;
             if (coordinator.Service.TryGetCached(provider, out var cached))
                 return cached;
+            // A failed refresh is cached deliberately. Prefer that current failure over LastState,
+            // which may still contain the previous successful snapshot and would resurrect stale quota
+            // values when the widget is recreated (especially after cookie/auth failures).
+            if (coordinator.LastState is { } last && last.Id == provider)
+                return last;
             if (coordinator.Service.TryGetLastSuccessfulLiveResult(provider, out var lastSuccess))
                 return lastSuccess;
             if (coordinator.Service.Get(provider) is { } usageProvider)

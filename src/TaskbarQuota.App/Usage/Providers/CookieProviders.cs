@@ -38,6 +38,13 @@ namespace TaskbarQuota.Usage.Providers
                 var h = CookieExtractor.GetCookieHeader(d);
                 if (!string.IsNullOrEmpty(h)) return h!;
             }
+
+            if (id is ProviderId.OpenCode or ProviderId.OpenCodeGo)
+            {
+                throw new ProviderException(ProviderErrorKind.AuthRequired,
+                    $"No {id switch { ProviderId.OpenCode => "OpenCode", _ => "OpenCode Go" }} cookies detected. Manual cookie insertion is needed. Paste the opencode.ai Cookie header in Fix.");
+            }
+
             throw new ProviderException(ProviderErrorKind.AuthRequired,
                 $"No cookies found for {string.Join("/", domains)}. Sign in via Edge/Chrome or paste a cookie header in credentials.json.");
         }
