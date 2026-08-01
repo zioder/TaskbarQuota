@@ -1007,6 +1007,8 @@ namespace TaskbarQuota.Taskbar
                 int preferredX;
                 if (!useDefault)
                     preferredX = offsetX;
+                else if (IsRtlUI && hasNotificationArea)
+                    preferredX = ComputeFarLeftAnchor(taskbarRect, trayNotifyRect, wbRect, taskbarScreenRect, isCentered, isWidgetsEnabled);
                 else if (IsRtlUI)
                     preferredX = rightBound - WidgetHostWidth;
                 else if (hasNotificationArea)
@@ -1112,7 +1114,8 @@ namespace TaskbarQuota.Taskbar
         {
             if (!isDragging || appWindow is null || hostContent is null || summaryPanel is null)
             {
-                EndUserRepositioning();
+                if (!isDragging && !isPointerTracking && !isDirectDrag)
+                    EndUserRepositioning();
                 return;
             }
             isDragging = false;
@@ -1508,7 +1511,8 @@ namespace TaskbarQuota.Taskbar
             finally
             {
                 isSettling = false;
-                EndUserRepositioning();
+                if (!isDragging && !isPointerTracking && !isDirectDrag)
+                    EndUserRepositioning();
             }
         }
 
