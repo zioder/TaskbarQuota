@@ -247,7 +247,13 @@ namespace TaskbarQuota.Usage.Providers
         internal static bool LooksSignedOut(string text)
         {
             var lower = text.ToLowerInvariant();
-            return lower.Contains("auth/authorize") || lower.Contains("\"signin\"") || lower.Contains("please sign in") || lower.Contains("sign in");
+            return lower.Contains("auth/authorize")
+                || lower.Contains("\"signin\"")
+                || lower.Contains("please sign in")
+                || lower.Contains("sign in")
+                || lower.Contains("openauth")
+                || lower.Contains("continue with github")
+                || lower.Contains("continue with google");
         }
 
         internal static double? FindMoneyValue(string text, params string[] keys)
@@ -459,7 +465,7 @@ namespace TaskbarQuota.Usage.Providers
 
         public ProviderId Id => ProviderId.OpenCodeGo;
         public string DisplayName => "OpenCode Go";
-        public string SessionLabel => "Session";
+        public string SessionLabel => "Rolling";
         public string WeeklyLabel => "Weekly";
         public BillingKind Billing => BillingKind.Subscription;
 

@@ -21,10 +21,10 @@ public class OpenCodeGoProviderTests
     }
 
     [Fact]
-    public void Provider_HasCorrectSessionLabel()
+    public void Provider_HasCorrectRollingLabel()
     {
         var provider = new OpenCodeGoProvider();
-        Assert.Equal("Session", provider.SessionLabel);
+        Assert.Equal("Rolling", provider.SessionLabel);
     }
 
     [Fact]
@@ -129,6 +129,13 @@ public class OpenCodeGoProviderTests
         var html = "<html><head><meta http-equiv=\"refresh\" content=\"0;url=/auth/authorize?redirect=/workspace/wrk_123/go\"></head></html>";
         Assert.True(OpenCodeProvider.LooksSignedOut(html));
     }
+
+    [Theory]
+    [InlineData("<title>OpenAuth</title>")]
+    [InlineData("<button>Continue with GitHub</button>")]
+    [InlineData("<button>Continue with Google</button>")]
+    public void LooksSignedOut_WithOpenAuthPage_ReturnsTrue(string html)
+        => Assert.True(OpenCodeProvider.LooksSignedOut(html));
 
     [Fact]
     public void GoPagePayload_ParsesCurrentCodexBarStyleEmbeddedUsage()
