@@ -47,7 +47,7 @@ public class ProviderForegroundStateTests
     [Fact]
     public void StillInsideTheGracePeriodKeepsTheTile()
     {
-        var since = Now.AddMilliseconds(-500);
+        var since = Now.AddMilliseconds(-50);
         var result = Resolve(providerForeground: false, unfocusedSince: since);
 
         Assert.True(result.Active);
@@ -57,7 +57,7 @@ public class ProviderForegroundStateTests
     [Fact]
     public void PastTheGracePeriodHidesTheTile()
     {
-        var since = Now.AddMilliseconds(-1500);
+        var since = Now.AddMilliseconds(-150);
         var result = Resolve(providerForeground: false, unfocusedSince: since);
 
         Assert.False(result.Active);
