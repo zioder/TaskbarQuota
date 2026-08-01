@@ -306,57 +306,90 @@ namespace TaskbarQuota.Browser
         private static List<(string name, string value)> ReadChromiumCookies(string cookiesDb, byte[] key, string domain)
         {
             var results = new List<(string, string)>();
-            try
+            for (int attempt = 0; attempt < 2; attempt++)
             {
-                // Read the live browser database without copying it to %TEMP%; the copy operation
-                // created TaskbarQuota_* SQLite/journal files and could race the browser's writes.
-                using var conn = OpenReadOnlyConnection(cookiesDb);
-                conn.Open();
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText =
-                    "SELECT name, encrypted_value, host_key FROM cookies " +
-                    "WHERE host_key = $exact OR host_key = $subdomain OR host_key LIKE $suffix";
-                cmd.Parameters.AddWithValue("$exact", domain);
-                cmd.Parameters.AddWithValue("$subdomain", "." + domain);
-                cmd.Parameters.AddWithValue("$suffix", "%." + domain);
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read())
+                try
                 {
-                    string name = reader.GetString(0);
-                    byte[] enc = (byte[])reader[1];
-                    var val = DecryptCookie(enc, key);
-                    if (val != null) results.Add((name, val));
+                    // Read the live browser database without copying it to %TEMP%; the copy operation
+                    // created TaskbarQuota_* SQLite/journal files and could race the browser's writes.
+                    // SQLite permits a read-only connection while the browser owns the write connection.
+                    using var conn = OpenReadOnlyConnection(cookiesDb);
+                    conn.Open();
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText =
+                        "SELECT name, encrypted_value, host_key FROM cookies " +
+                        "WHERE host_key = $exact OR host_key = $subdomain OR host_key LIKE $suffix";
+                    cmd.Parameters.AddWithValue("$exact", domain);
+                    cmd.Parameters.AddWithValue("$subdomain", "." + domain);
+                    cmd.Parameters.AddWithValue("$suffix", "%." + domain);
+                    using var reader = cmd.ExecuteReader();
+                    while (reader.Read())
+                    {
+                        string name = reader.GetString(0);
+                        byte[] enc = (byte[])reader[1];
+                        var val = DecryptCookie(enc, key);
+                        if (val != null) results.Add((name, val));
+                    }
+                    return results;
+                }
+                catch (Exception ex) when (attempt == 0 && IsTransientSqliteLock(ex))
+                {
+                    System.Threading.Thread.Sleep(50);
+                }
+                catch (Exception ex)
+                {
+                    Log.Debug($"chromium cookie db read failed: {ex.Message}");
+                    break;
                 }
             }
-            catch (Exception ex) { Log.Debug($"chromium cookie db read failed: {ex.Message}"); }
             return results;
         }
 
         private static List<(string name, string value)> ReadFirefoxCookiesRaw(string cookiesDb, string domain)
         {
             var raw = new List<(string name, string value)>();
-            try
+            for (int attempt = 0; attempt < 2; attempt++)
             {
-                using var conn = OpenReadOnlyConnection(cookiesDb);
-                conn.Open();
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText =
-                    "SELECT name, value, host FROM moz_cookies " +
-                    "WHERE host = $exact OR host = $subdomain OR host LIKE $suffix";
-                cmd.Parameters.AddWithValue("$exact", domain);
-                cmd.Parameters.AddWithValue("$subdomain", "." + domain);
-                cmd.Parameters.AddWithValue("$suffix", "%." + domain);
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read())
+                try
                 {
-                    string name = reader.GetString(0);
-                    string value = reader.IsDBNull(1) ? "" : reader.GetString(1);
-                    if (!string.IsNullOrEmpty(name))
-                        raw.Add((name, value));
+                    // Use the browser's database in read-only mode; never create a temp SQLite copy.
+                    using var conn = OpenReadOnlyConnection(cookiesDb);
+                    conn.Open();
+                    using var cmd = conn.CreateCommand();
+                    cmd.CommandText =
+                        "SELECT name, value, host FROM moz_cookies " +
+                        "WHERE host = $exact OR host = $subdomain OR host LIKE $suffix";
+                    cmd.Parameters.AddWithValue("$exact", domain);
+                    cmd.Parameters.AddWithValue("$subdomain", "." + domain);
+                    cmd.Parameters.AddWithValue("$suffix", "%." + domain);
+                    using var reader = cmd.ExecuteReader();
+                    while (reader.Read())
+                    {
+                        string name = reader.GetString(0);
+                        string value = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                        if (!string.IsNullOrEmpty(name))
+                            raw.Add((name, value));
+                    }
+                    return raw;
+                }
+                catch (Exception ex) when (attempt == 0 && IsTransientSqliteLock(ex))
+                {
+                    System.Threading.Thread.Sleep(50);
+                }
+                catch (Exception ex)
+                {
+                    Log.Debug($"firefox cookie db read failed: {ex.Message}");
+                    break;
                 }
             }
-            catch (Exception ex) { Log.Debug($"firefox cookie db read failed: {ex.Message}"); }
             return raw;
+        }
+
+        private static bool IsTransientSqliteLock(Exception ex)
+        {
+            var message = ex.Message;
+            return message.Contains("locked", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("busy", StringComparison.OrdinalIgnoreCase);
         }
 
         private static List<(string name, string value)> ReadFirefoxCookies(string cookiesDb, string domain)
