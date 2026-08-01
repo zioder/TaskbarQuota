@@ -187,8 +187,9 @@ namespace TaskbarQuota.Usage.Providers
                 "OpenCode cookies expired.",
                 (cookie, token) => FetchUsageAsync(cookie, token),
                 ct,
-                "opencode.ai",
-                "app.opencode.ai");
+                // Every request is sent to opencode.ai. Do not merge cookies scoped only to the
+                // app subdomain into that request's Cookie header.
+                "opencode.ai");
 
         private async Task<ProviderFetchResult> FetchUsageAsync(string cookie, CancellationToken ct)
         {
@@ -628,8 +629,7 @@ namespace TaskbarQuota.Usage.Providers
                 "OpenCode Go cookies expired.",
                 (cookie, token) => FetchUsageAsync(cookie, token),
                 ct,
-                "opencode.ai",
-                "app.opencode.ai");
+                "opencode.ai");
 
         private async Task<ProviderFetchResult> FetchUsageAsync(string cookie, CancellationToken ct)
         {

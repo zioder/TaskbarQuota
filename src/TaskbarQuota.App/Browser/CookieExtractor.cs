@@ -306,18 +306,19 @@ namespace TaskbarQuota.Browser
         private static List<(string name, string value)> ReadChromiumCookies(string cookiesDb, byte[] key, string domain)
         {
             var results = new List<(string, string)>();
-            // Browser keeps the DB locked; copy to temp first.
-            string temp = Path.Combine(Path.GetTempPath(), $"TaskbarQuota_cookies_{Guid.NewGuid():N}.db");
             try
             {
-                CopyPossiblyLockedFile(cookiesDb, temp);
-                using var conn = new SqliteConnection($"Data Source={temp};Mode=ReadOnly;Cache=Private");
+                // Read the live browser database without copying it to %TEMP%; the copy operation
+                // created TaskbarQuota_* SQLite/journal files and could race the browser's writes.
+                using var conn = OpenReadOnlyConnection(cookiesDb);
                 conn.Open();
                 using var cmd = conn.CreateCommand();
                 cmd.CommandText =
-                    "SELECT name, encrypted_value, host_key FROM cookies WHERE host_key LIKE $a OR host_key LIKE $b";
-                cmd.Parameters.AddWithValue("$a", "%" + domain);
-                cmd.Parameters.AddWithValue("$b", "." + domain);
+                    "SELECT name, encrypted_value, host_key FROM cookies " +
+                    "WHERE host_key = $exact OR host_key = $subdomain OR host_key LIKE $suffix";
+                cmd.Parameters.AddWithValue("$exact", domain);
+                cmd.Parameters.AddWithValue("$subdomain", "." + domain);
+                cmd.Parameters.AddWithValue("$suffix", "%." + domain);
                 using var reader = cmd.ExecuteReader();
                 while (reader.Read())
                 {
@@ -328,25 +329,23 @@ namespace TaskbarQuota.Browser
                 }
             }
             catch (Exception ex) { Log.Debug($"chromium cookie db read failed: {ex.Message}"); }
-            finally { try { File.Delete(temp); } catch { } }
             return results;
         }
 
         private static List<(string name, string value)> ReadFirefoxCookiesRaw(string cookiesDb, string domain)
         {
             var raw = new List<(string name, string value)>();
-            string temp = Path.Combine(Path.GetTempPath(), $"TaskbarQuota_ff_cookies_{Guid.NewGuid():N}.db");
             try
             {
-                CopyPossiblyLockedFile(cookiesDb, temp);
-                using var conn = new SqliteConnection($"Data Source={temp};Mode=ReadOnly;Cache=Private");
+                using var conn = OpenReadOnlyConnection(cookiesDb);
                 conn.Open();
                 using var cmd = conn.CreateCommand();
                 cmd.CommandText =
-                    "SELECT name, value, host FROM moz_cookies WHERE host LIKE $a OR host LIKE $b OR host LIKE $c";
-                cmd.Parameters.AddWithValue("$a", domain);
-                cmd.Parameters.AddWithValue("$b", "." + domain);
-                cmd.Parameters.AddWithValue("$c", "%" + domain);
+                    "SELECT name, value, host FROM moz_cookies " +
+                    "WHERE host = $exact OR host = $subdomain OR host LIKE $suffix";
+                cmd.Parameters.AddWithValue("$exact", domain);
+                cmd.Parameters.AddWithValue("$subdomain", "." + domain);
+                cmd.Parameters.AddWithValue("$suffix", "%." + domain);
                 using var reader = cmd.ExecuteReader();
                 while (reader.Read())
                 {
@@ -357,7 +356,6 @@ namespace TaskbarQuota.Browser
                 }
             }
             catch (Exception ex) { Log.Debug($"firefox cookie db read failed: {ex.Message}"); }
-            finally { try { File.Delete(temp); } catch { } }
             return raw;
         }
 
@@ -411,11 +409,15 @@ namespace TaskbarQuota.Browser
             return results;
         }
 
-        private static void CopyPossiblyLockedFile(string source, string destination)
+        private static SqliteConnection OpenReadOnlyConnection(string databasePath)
         {
-            using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using var output = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None);
-            input.CopyTo(output);
+            return new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = databasePath,
+                Mode = SqliteOpenMode.ReadOnly,
+                Pooling = false,
+                DefaultTimeout = 1,
+            }.ToString());
         }
 
         private static byte[] GetEncryptionKey(string localStatePath)
