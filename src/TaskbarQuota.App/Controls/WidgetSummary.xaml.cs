@@ -228,6 +228,20 @@ namespace TaskbarQuota.Controls
                     return;
                 }
 
+                // OpenCode auth failures are not quota data. Render a neutral cookie status instead of
+                // the generic warning bar, which can be mistaken for a stale usage value.
+                if (result.Id is ProviderId.OpenCode or ProviderId.OpenCodeGo
+                    && result.ErrorKind == ProviderErrorKind.AuthRequired)
+                {
+                    _rows = new() { new WidgetUsageRow("Cookies", 0, "needed", HasBar: false) };
+                    RenderRows();
+                    AnimateRender(isFirstReveal, providerSwitch: providerChanged);
+                    var opencodeSourceText = result.Source.IsKnown ? $" {result.Source.ShortViaText}" : "";
+                    ToolTipService.SetToolTip(this,
+                        $"{widgetName}{opencodeSourceText}: {result.Error ?? "No cookies detected. Manual cookie insertion is needed."}");
+                    return;
+                }
+
                 _rows = new()
                 {
                     new WidgetUsageRow(CompactLabel(result.Provider?.SessionLabel ?? "Usage"), 0, "--"),
