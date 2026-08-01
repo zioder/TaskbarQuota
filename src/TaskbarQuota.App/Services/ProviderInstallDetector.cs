@@ -65,7 +65,10 @@ internal static class ProviderInstallDetector
         ProviderId.OpenCode or ProviderId.OpenCodeGo => IsCliAvailable("opencode")
             || !string.IsNullOrWhiteSpace(CredentialStore.Instance.For(ProviderId.OpenCode).CookieHeader),
         ProviderId.Cline or ProviderId.ClinePass => IsCliAvailable("cline") || File.Exists(ClineProvidersPath()),
-        _ => true,
+        ProviderId.Zai => IsZaiConfiguredOrInstalled(),
+        ProviderId.Kimi => IsKimiCodeInstalled()
+            || HasKimiCredentials(),
+        _ => false,
     };
 
     /// <summary>Fast path for the UI thread before <see cref="WarmCliCache"/> finishes — never spawns processes.</summary>
@@ -87,7 +90,11 @@ internal static class ProviderInstallDetector
             !string.IsNullOrWhiteSpace(CredentialStore.Instance.For(ProviderId.OpenCode).CookieHeader)
             || HasCachedCli("opencode"),
         ProviderId.Cline or ProviderId.ClinePass => File.Exists(ClineProvidersPath()) || HasCachedCli("cline"),
-        _ => true,
+        ProviderId.Zai => IsZaiConfiguredOrInstalled(),
+        ProviderId.Kimi => IsKimiCodeInstalledWithoutCli()
+            || HasCachedCli("kimi")
+            || HasKimiCredentials(),
+        _ => false,
     };
 
     private static bool HasCachedCli(string name)
@@ -292,12 +299,14 @@ internal static class ProviderInstallDetector
     }
 
     private static bool IsKimiCodeInstalled()
+        => IsKimiCodeInstalledWithoutCli() || IsCliAvailable("kimi");
+
+    private static bool IsKimiCodeInstalledWithoutCli()
     {
         var kimiBin = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".kimi-code", "bin", "kimi.exe");
-        return File.Exists(kimiBin)
-            || IsCliAvailable("kimi");
+        return File.Exists(kimiBin);
     }
 
     private static bool IsZCodeInstalled()
@@ -306,6 +315,31 @@ internal static class ProviderInstallDetector
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Programs", "ZCode");
         return File.Exists(Path.Combine(localPrograms, "ZCode.exe"));
+    }
+
+    private static bool IsZaiConfiguredOrInstalled()
+        => IsZCodeInstalled()
+        || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("Z_AI_API_KEY"))
+        || !string.IsNullOrWhiteSpace(CredentialStore.Instance.ApiKey(ProviderId.Zai, "Z_AI_API_KEY"))
+        || File.Exists(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".zcode", "v2", "config.json"));
+
+    private static bool HasKimiCredentials()
+    {
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KIMI_CODE_API_KEY"))
+            || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("KIMI_AUTH_TOKEN"))
+            || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("kimi_auth_token"))
+            || !string.IsNullOrWhiteSpace(CredentialStore.Instance.ApiKey(ProviderId.Kimi, "KIMI_CODE_API_KEY"))
+            || !string.IsNullOrWhiteSpace(CredentialStore.Instance.For(ProviderId.Kimi).Extra))
+        {
+            return true;
+        }
+
+        var home = Environment.GetEnvironmentVariable("KIMI_CODE_HOME")?.Trim();
+        if (string.IsNullOrWhiteSpace(home))
+            home = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".kimi-code");
+        return File.Exists(Path.Combine(home, "credentials", "kimi-code.json"));
     }
 
     private static bool IsDesktopAppInstalled(string appFolderName)

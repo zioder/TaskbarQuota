@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using TaskbarQuota.ActiveApp;
+using TaskbarQuota.Taskbar;
 using TaskbarQuota.Usage;
 
 namespace TaskbarQuota.Tests;
@@ -122,5 +124,93 @@ public class WidgetDisplayProvidersTests
             fallback: ProviderId.Codex);
 
         Assert.Empty(result);
+    }
+
+    [Fact]
+    public void DisplayProviderSelectionUsesEligibleRecentThenPersistedProvider()
+    {
+        var fromRecent = UsageCoordinator.SelectWidgetDisplayProvider(
+            active: ProviderId.Codex,
+            recent: new[] { ProviderId.Claude },
+            persisted: ProviderId.Cursor,
+            ordered: Enum.GetValues<ProviderId>(),
+            isVisible: _ => true,
+            isAvailable: provider => provider is ProviderId.Claude or ProviderId.Cursor);
+        var fromPersisted = UsageCoordinator.SelectWidgetDisplayProvider(
+            active: ProviderId.Codex,
+            recent: Array.Empty<ProviderId>(),
+            persisted: ProviderId.Cursor,
+            ordered: Enum.GetValues<ProviderId>(),
+            isVisible: _ => true,
+            isAvailable: provider => provider == ProviderId.Cursor);
+
+        Assert.Equal(ProviderId.Claude, fromRecent);
+        Assert.Equal(ProviderId.Cursor, fromPersisted);
+    }
+
+    [Fact]
+    public void DisplayProviderSelectionReturnsNullWhenNoProviderIsEligible()
+    {
+        var result = UsageCoordinator.SelectWidgetDisplayProvider(
+            active: ProviderId.Codex,
+            recent: new[] { ProviderId.Claude },
+            persisted: ProviderId.Cursor,
+            ordered: Enum.GetValues<ProviderId>(),
+            isVisible: _ => true,
+            isAvailable: _ => false);
+
+        Assert.Null(result);
+    }
+
+    [Theory]
+    [InlineData(ProviderSourceKind.DesktopApp, true, false, false)]
+    [InlineData(ProviderSourceKind.HostApp, true, false, false)]
+    [InlineData(ProviderSourceKind.Cli, false, true, false)]
+    [InlineData(ProviderSourceKind.Browser, false, false, true)]
+    public void SupportedSurfaceStateSeparatesForegroundCategory(
+        ProviderSourceKind sourceKind,
+        bool desktopActive,
+        bool cliActive,
+        bool browserActive)
+    {
+        var state = UsageCoordinator.ComputeSupportedSurfaces(
+            new SupportedToolPresence(false, false),
+            ProviderId.Claude,
+            new ProviderSource(sourceKind));
+
+        Assert.Equal(desktopActive, state.DesktopAppActive);
+        Assert.Equal(cliActive, state.CliAgentActive);
+        Assert.Equal(browserActive, state.BrowserTabActive);
+    }
+
+    [Fact]
+    public void SupportedSurfaceStateKeepsBackgroundCliSeparateFromForeground()
+    {
+        var state = UsageCoordinator.ComputeSupportedSurfaces(
+            new SupportedToolPresence(false, true),
+            detected: null,
+            ProviderSource.Unknown);
+
+        Assert.True(state.CliAgentPresent);
+        Assert.False(state.CliAgentActive);
+        Assert.False(state.BrowserTabActive);
+    }
+
+    [Fact]
+    public void SupportedSurfaceStateCarriesBackgroundDesktopAgentSeparately()
+    {
+        var state = UsageCoordinator.ComputeSupportedSurfaces(
+            new SupportedToolPresence(
+                DesktopAppPresent: true,
+                CliAgentPresent: false,
+                BackgroundAgentRunning: true),
+            detected: null,
+            ProviderSource.Unknown);
+
+        Assert.True(state.DesktopAppPresent);
+        Assert.True(state.BackgroundAgentRunning);
+        Assert.False(state.DesktopAppActive);
+        Assert.False(state.CliAgentPresent);
+        Assert.False(state.CliAgentActive);
     }
 }

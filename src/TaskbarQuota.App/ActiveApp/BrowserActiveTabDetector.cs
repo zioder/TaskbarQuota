@@ -33,47 +33,56 @@ namespace TaskbarQuota.ActiveApp
 
         private static readonly TimeSpan CacheTtl = TimeSpan.FromMilliseconds(350);
 
+        private readonly object _cacheGate = new();
+        private readonly object _automationGate = new();
         private IUIAutomation? _automation;
         private IntPtr _cachedHwnd;
-        private string? _cachedUrl;
+        private ProviderId? _cachedProvider;
         private DateTime _cachedAtUtc = DateTime.MinValue;
 
         internal static bool IsBrowserProcessName(string? processName)
             => !string.IsNullOrWhiteSpace(processName)
             && BrowserProcesses.Contains(NormalizeProcessName(processName));
 
-        internal ProviderId? DetectProvider(IntPtr hwnd, string? processName, string? windowTitle = null)
-            => Detect(hwnd, processName, windowTitle)?.Provider;
+        internal ProviderId? DetectProvider(IntPtr hwnd, string? processName)
+            => Detect(hwnd, processName)?.Provider;
 
-        internal BrowserProviderDetection? Detect(IntPtr hwnd, string? processName, string? windowTitle = null)
+        internal BrowserProviderDetection? Detect(IntPtr hwnd, string? processName)
         {
             if (!IsBrowserProcessName(processName))
                 return null;
 
-            var url = TryReadActiveTabUrl(hwnd);
-            var provider = TryResolveProviderFromUrl(url)
-                ?? TryResolveProviderFromUrl(FirefoxSessionStoreReader.TryReadSelectedTabUrl(processName))
-                ?? TryResolveProviderFromTitle(windowTitle);
+            var provider = DetectActiveProvider(hwnd)
+                ?? TryResolveProviderFromUrl(
+                    FirefoxSessionStoreReader.TryReadSelectedTabUrl(processName));
 
             return provider is { } p
                 ? new BrowserProviderDetection(p, ResolveBrowserSource(processName))
                 : null;
         }
 
-        internal string? TryReadActiveTabUrl(IntPtr hwnd)
+        private ProviderId? DetectActiveProvider(IntPtr hwnd)
         {
             if (hwnd == IntPtr.Zero)
                 return null;
 
-            var now = DateTime.UtcNow;
-            if (hwnd == _cachedHwnd && now - _cachedAtUtc < CacheTtl)
-                return _cachedUrl;
+            lock (_cacheGate)
+            {
+                var now = DateTime.UtcNow;
+                if (hwnd == _cachedHwnd && now - _cachedAtUtc < CacheTtl)
+                    return _cachedProvider;
+            }
 
-            var url = TryReadActiveTabUrlCore(hwnd);
-            _cachedHwnd = hwnd;
-            _cachedUrl = url;
-            _cachedAtUtc = now;
-            return url;
+            // Cache only the provider classification. URLs may contain private paths, conversation IDs,
+            // or query text and are not needed after the active-tab decision has been made.
+            var provider = TryResolveProviderFromUrl(TryReadActiveTabUrlCore(hwnd));
+            lock (_cacheGate)
+            {
+                _cachedHwnd = hwnd;
+                _cachedProvider = provider;
+                _cachedAtUtc = DateTime.UtcNow;
+            }
+            return provider;
         }
 
         internal static ProviderId? TryResolveProviderFromUrl(string? rawUrl)
@@ -95,17 +104,8 @@ namespace TaskbarQuota.ActiveApp
             return null;
         }
 
-        internal static ProviderId? TryResolveProviderFromTitle(string? windowTitle)
-        {
-            if (string.IsNullOrWhiteSpace(windowTitle))
-                return null;
-
-            var title = windowTitle.ToLowerInvariant();
-            if (title.Contains("claude", StringComparison.Ordinal))
-                return ProviderId.Claude;
-
-            return null;
-        }
+        // Window titles can contain private prompt/project text and are intentionally never used as
+        // provider evidence. Only the foreground browser's active address-bar URL is classified.
 
         internal static ProviderSource ResolveBrowserSource(string? processName)
         {
@@ -129,22 +129,25 @@ namespace TaskbarQuota.ActiveApp
 
         private string? TryReadActiveTabUrlCore(IntPtr hwnd)
         {
-            try
+            lock (_automationGate)
             {
-                _automation ??= new CUIAutomation();
-                var root = _automation.ElementFromHandle(hwnd);
-                if (root is null)
-                    return null;
+                try
+                {
+                    _automation ??= new CUIAutomation();
+                    var root = _automation.ElementFromHandle(hwnd);
+                    if (root is null)
+                        return null;
 
-                if (TryFindUrlInEdits(root) is { } editUrl)
-                    return editUrl;
-            }
-            catch (Exception ex)
-            {
-                Diagnostics.Log.Debug($"[browser] URL UIA read failed: {ex.Message}");
-            }
+                    if (TryFindUrlInEdits(root) is { } editUrl)
+                        return editUrl;
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.Log.Debug($"[browser] URL UIA read failed: {ex.Message}");
+                }
 
-            return null;
+                return null;
+            }
         }
 
         private string? TryFindUrlInEdits(IUIAutomationElement root)

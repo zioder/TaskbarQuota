@@ -18,6 +18,7 @@ using TaskbarQuota.Controls;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Interop;
 using TaskbarQuota.Usage;
+using Anim = Microsoft.UI.Xaml.Media.Animation;
 
 namespace TaskbarQuota.Taskbar
 {
@@ -121,6 +122,9 @@ namespace TaskbarQuota.Taskbar
         private bool loggedMissingPanel;
         private DesktopWindowXamlSource? host;
         private Microsoft.UI.Xaml.FrameworkElement? hostContent;
+        private const int HostFadeMilliseconds = 100;
+        private Anim.Storyboard? hostFadeStoryboard;
+        private int hostFadeGeneration;
         private int WidgetHostWidth;
         private int currentOffsetX = int.MinValue;
         private int currentOffsetY = 0;
@@ -274,12 +278,28 @@ namespace TaskbarQuota.Taskbar
         private void InjectIntoTaskbar()
         {
             Log.Information("Injecting widget into taskbar");
+            ApplyTaskbarChildStyle();
             int attempts = 0;
             while (attempts++ <= 3)
             {
                 var previousParent = User32.SetParent(hwnd, hwndShell);
                 if (previousParent != IntPtr.Zero || IsParentedToTaskbar())
                 {
+                    // SetWindowLong caches some style-dependent frame state. Notify USER32 after the
+                    // reparent so Explorer composes this as a real child instead of a top-level popup whose
+                    // owner happens to be the taskbar.
+                    User32.SetWindowPos(
+                        hwnd,
+                        IntPtr.Zero,
+                        0,
+                        0,
+                        0,
+                        0,
+                        User32.SWP_NOMOVE
+                            | User32.SWP_NOSIZE
+                            | User32.SWP_NOZORDER
+                            | User32.SWP_NOACTIVATE
+                            | User32.SWP_FRAMECHANGED);
                     Log.Information("Widget injected successfully");
                     return;
                 }
@@ -287,6 +307,31 @@ namespace TaskbarQuota.Taskbar
             Dispose();
             throw new InvalidOperationException("Could not inject the widget into the taskbar.");
         }
+
+        private void ApplyTaskbarChildStyle()
+        {
+            Marshal.SetLastPInvokeError(0);
+            uint current = User32.GetWindowLong(hwnd, User32.GWL_STYLE);
+            int readError = Marshal.GetLastPInvokeError();
+            if (IsGetWindowLongFailure(current, readError))
+                throw new Win32Exception(readError, "Could not read the taskbar widget host style.");
+
+            uint childStyle = ConvertToTaskbarChildStyle(current);
+            if (childStyle == current)
+                return;
+
+            Marshal.SetLastPInvokeError(0);
+            uint previous = User32.SetWindowLong(hwnd, User32.GWL_STYLE, childStyle);
+            int error = Marshal.GetLastPInvokeError();
+            if (previous == 0 && error != 0)
+                throw new Win32Exception(error, "Could not convert the taskbar widget host to WS_CHILD.");
+        }
+
+        internal static uint ConvertToTaskbarChildStyle(uint style)
+            => (style & ~(uint)WindowStyles.WS_POPUP) | (uint)WindowStyles.WS_CHILD;
+
+        internal static bool IsGetWindowLongFailure(uint style, int error)
+            => style == 0 && error != 0;
 
         private bool IsParentedToTaskbar()
             => User32.GetAncestor(hwnd, GetAncestorFlags.GA_PARENT) == hwndShell;
@@ -309,17 +354,119 @@ namespace TaskbarQuota.Taskbar
                 return;
 
             isVisible = visible;
+            hostFadeGeneration++;
             if (visible)
             {
                 QueuePositionUpdate(TaskbarChangeReason.None);
-                appWindow.Show(false);
+                if (!User32.IsWindowVisible(hwnd))
+                {
+                    if (hostContent is { } hiddenContent)
+                        hiddenContent.Opacity = 0;
+                    if (!TrySetNativeVisibility(true))
+                    {
+                        isVisible = User32.IsWindowVisible(hwnd);
+                        return;
+                    }
+                }
+
+                AnimateHostOpacity(1);
+                return;
             }
-            else
+
+            if (isDragging)
+                EndDragging(revert: true);
+
+            if (hostContent is null)
             {
-                if (isDragging)
-                    EndDragging(revert: true);
-                appWindow.Hide();
+                if (!TrySetNativeVisibility(false))
+                    isVisible = User32.IsWindowVisible(hwnd);
+                return;
             }
+
+            int generation = hostFadeGeneration;
+            AnimateHostOpacity(0, () =>
+            {
+                if (generation != hostFadeGeneration || destroyed || appWindow is null)
+                    return;
+
+                if (!TrySetNativeVisibility(false))
+                    isVisible = User32.IsWindowVisible(hwnd);
+            });
+        }
+
+        private bool TrySetNativeVisibility(bool visible)
+        {
+            // AppWindow represents a top-level HWND, but this host becomes a WS_CHILD before visibility
+            // starts changing. Keep show/hide on USER32 once reparented so WinAppSDK does not queue a
+            // top-level AppWindow operation for the taskbar child.
+            Marshal.SetLastPInvokeError(0);
+            bool succeeded = User32.SetWindowPos(
+                hwnd,
+                IntPtr.Zero,
+                0,
+                0,
+                0,
+                0,
+                NativeVisibilityFlags(visible));
+            if (!succeeded)
+            {
+                int error = Marshal.GetLastPInvokeError();
+                Log.Warning(
+                    $"Failed to {(visible ? "show" : "hide")} taskbar child window " +
+                    $"taskbar=0x{hwndShell.ToInt64():X}, win32Error={error}");
+            }
+
+            return succeeded;
+        }
+
+        internal static uint NativeVisibilityFlags(bool visible)
+            => User32.SWP_NOMOVE
+                | User32.SWP_NOSIZE
+                | User32.SWP_NOZORDER
+                | User32.SWP_NOACTIVATE
+                | (visible ? User32.SWP_SHOWWINDOW : User32.SWP_HIDEWINDOW);
+
+        private void AnimateHostOpacity(double to, Action? completed = null)
+        {
+            if (hostContent is not { } content)
+            {
+                completed?.Invoke();
+                return;
+            }
+
+            // Read the animated value before stopping. If a show interrupts a hide, the new fade resumes
+            // from the frame currently on screen instead of jumping through fully transparent.
+            double from = content.Opacity;
+            hostFadeStoryboard?.Stop();
+            hostFadeStoryboard = null;
+            content.Opacity = to;
+
+            if (Math.Abs(from - to) < 0.01)
+            {
+                completed?.Invoke();
+                return;
+            }
+
+            var animation = new Anim.DoubleAnimation
+            {
+                From = from,
+                To = to,
+                Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(HostFadeMilliseconds)),
+                EasingFunction = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut },
+            };
+            Anim.Storyboard.SetTarget(animation, content);
+            Anim.Storyboard.SetTargetProperty(animation, "Opacity");
+
+            var storyboard = new Anim.Storyboard();
+            storyboard.Children.Add(animation);
+            storyboard.Completed += (_, _) =>
+            {
+                if (ReferenceEquals(hostFadeStoryboard, storyboard))
+                    hostFadeStoryboard = null;
+                completed?.Invoke();
+            };
+            hostFadeStoryboard = storyboard;
+            storyboard.Begin();
         }
 
         public void Destroy() => appWindow?.Destroy();
@@ -1964,8 +2111,11 @@ namespace TaskbarQuota.Taskbar
             disposedValue = true;
             initialized = false;
             isVisible = false;
+            hostFadeGeneration++;
+            try { hostFadeStoryboard?.Stop(); } catch { }
+            hostFadeStoryboard = null;
             positionUpdateCancellation.Cancel();
-            try { appWindow?.Hide(); } catch { }
+            try { TrySetNativeVisibility(false); } catch { }
             foreach (var tile in tiles)
             {
                 if (tile is null)

@@ -82,6 +82,38 @@
             <StackPanel x:Name="ProviderSettingsPanel" Spacing="4"/>
 
             <TextBlock Text="Behavior" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,2"/>
+            <tk:SettingsCard Header="Widget visibility"
+                             Description="Choose when the taskbar widget appears. TaskbarQuota keeps running while the widget is hidden.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE8A7;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <StackPanel MinWidth="300" MaxWidth="420" Spacing="6">
+                    <ComboBox x:Name="WidgetVisibilityCombo"
+                              HorizontalAlignment="Stretch"
+                              SelectionChanged="OnWidgetVisibilityModeChanged">
+                        <ComboBoxItem Content="Always show" Tag="AlwaysShow"/>
+                        <ComboBoxItem Content="Show while any supported AI tool is open" Tag="ShowWhileOpen"/>
+                        <ComboBoxItem Content="Show only while a supported AI tool is in use" Tag="ShowWhileInUse"/>
+                    </ComboBox>
+                    <TextBlock x:Name="WidgetVisibilityDescription"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Opacity="0.75"
+                               TextWrapping="Wrap"/>
+                </StackPanel>
+            </tk:SettingsCard>
+
+            <tk:SettingsCard x:Name="BackgroundAgentVisibilityCard"
+                             Header="Keep visible while an agent is running in the background"
+                             Description="Keep the widget visible while a supported CLI agent is still running or Codex Desktop reports a task in progress, even when its window or terminal is not focused."
+                             Visibility="Collapsed">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE756;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <ToggleSwitch x:Name="BackgroundAgentVisibilityToggle"
+                              AutomationProperties.Name="Keep visible while an agent is running in the background"
+                              Toggled="OnBackgroundAgentVisibilityToggled"/>
+            </tk:SettingsCard>
+
             <tk:SettingsCard Header="Open at startup" Description="Start TaskbarQuota with Windows and show only the taskbar widget.">
                 <tk:SettingsCard.HeaderIcon>
                     <FontIcon Glyph="&#xE7F4;"/>

@@ -142,17 +142,10 @@ public class ActiveAppDetectorTests : IDisposable
     [InlineData("https://grok.com/chat/123", null)]
     [InlineData("https://aistudio.google.com/usage", null)]
     [InlineData("https://gemini.google.com/app", null)]
+    [InlineData("https://example.com/projects/codex-private-prompt", null)]
     [InlineData("https://example.com/", null)]
     public void BrowserActiveTabDetector_TryResolveProviderFromUrl_MapsChatSurfaces(string url, ProviderId? expected)
         => Assert.Equal(expected, BrowserActiveTabDetector.TryResolveProviderFromUrl(url));
-
-    [Theory]
-    [InlineData("ChatGPT — Zen Browser", null)]
-    [InlineData("Claude — Zen Browser", ProviderId.Claude)]
-    [InlineData("Grok — Zen Browser", null)]
-    [InlineData("Git clone checkout error — Zen Browser", null)]
-    public void BrowserActiveTabDetector_TryResolveProviderFromTitle_MapsKnownChatTitles(string title, ProviderId? expected)
-        => Assert.Equal(expected, BrowserActiveTabDetector.TryResolveProviderFromTitle(title));
 
     [Theory]
     [InlineData("chrome", "Chrome")]
@@ -222,6 +215,123 @@ public class ActiveAppDetectorTests : IDisposable
     {
         var result = ActiveAppDetector.TryDetectCliProvider(processName, commandLine);
         Assert.Equal(expected, result);
+    }
+
+    [Theory]
+    [InlineData("gh.exe", "gh auth status")]
+    [InlineData("gh.exe", "gh pr view 123")]
+    [InlineData("node.exe", @"node C:\src\codex\scripts\status.js")]
+    [InlineData("node.exe", @"node C:\src\claude\index.js")]
+    [InlineData("node.exe", @"node C:\src\opencode\tools\build.js")]
+    [InlineData("node.exe", @"node C:\src\cursor-agent\index.js")]
+    [InlineData("node.exe", @"node C:\src\github-copilot\index.js")]
+    [InlineData("cmd.exe", "cmd.exe /c echo codex")]
+    public void TryDetectCliProvider_GenericCommandsAndProjectPaths_ReturnNull(string processName, string commandLine)
+    {
+        Assert.Null(ActiveAppDetector.TryDetectCliProvider(processName, commandLine));
+    }
+
+    [Theory]
+    [InlineData("gh.exe", "gh copilot suggest", ProviderId.Copilot)]
+    [InlineData("gh.exe", @"C:\Tools\gh.exe copilot explain", ProviderId.Copilot)]
+    [InlineData("gh.exe", "\"C:\\Program Files\\GitHub CLI\\gh.exe\" copilot suggest", ProviderId.Copilot)]
+    [InlineData("cmd.exe", @"cmd.exe /c C:\Tools\codex.cmd", ProviderId.Codex)]
+    public void TryDetectCliProvider_ExplicitCommandSignatures_ReturnProvider(
+        string processName,
+        string commandLine,
+        ProviderId expected)
+    {
+        Assert.Equal(expected, ActiveAppDetector.TryDetectCliProvider(processName, commandLine));
+    }
+
+    [Theory]
+    [InlineData(4L, 4L, true)]
+    [InlineData(5L, 4L, false)]
+    public void IsCurrentCliPresenceProbeResult_RejectsStaleSnapshots(
+        long currentVersion,
+        long completedVersion,
+        bool expected)
+        => Assert.Equal(
+            expected,
+            ActiveAppDetector.IsCurrentCliPresenceProbeResult(
+                currentVersion,
+                completedVersion));
+
+    [Fact]
+    public void TryBeginSingleProbe_AllowsOnlyOneProbeUntilReleased()
+    {
+        int inFlight = 0;
+
+        Assert.True(ActiveAppDetector.TryBeginSingleProbe(ref inFlight));
+        Assert.False(ActiveAppDetector.TryBeginSingleProbe(ref inFlight));
+
+        System.Threading.Interlocked.Exchange(ref inFlight, 0);
+        Assert.True(ActiveAppDetector.TryBeginSingleProbe(ref inFlight));
+    }
+
+    [Fact]
+    public void HasTerminalRelationship_RequiresShellOrTerminalAncestry()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [30] = 20,
+            [20] = 10,
+            [10] = 0,
+            [40] = 1,
+        };
+        var names = new Dictionary<int, string>
+        {
+            [30] = "node",
+            [20] = "pwsh",
+            [10] = "windowsterminal",
+            [40] = "node",
+            [1] = "explorer",
+        };
+
+        Assert.True(ActiveAppDetector.HasTerminalRelationship(30, 20, parents, names));
+        Assert.False(ActiveAppDetector.HasTerminalRelationship(40, 1, parents, names));
+    }
+
+    [Fact]
+    public void HasTerminalRelationship_DoesNotTreatCodexDesktopHelperAsItsOwnTerminal()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [30] = 20,
+            [20] = 10,
+            [10] = 1,
+            [1] = 0,
+        };
+        var names = new Dictionary<int, string>
+        {
+            [30] = "node",
+            [20] = "codex",
+            [10] = "chatgpt",
+            [1] = "explorer",
+        };
+
+        Assert.False(ActiveAppDetector.HasTerminalRelationship(20, 10, parents, names));
+        Assert.False(ActiveAppDetector.HasTerminalRelationship(30, 20, parents, names));
+    }
+
+    [Fact]
+    public void HasTerminalRelationship_AllowsCodexCliUnderAShell()
+    {
+        var parents = new Dictionary<int, int>
+        {
+            [30] = 20,
+            [20] = 10,
+            [10] = 0,
+        };
+        var names = new Dictionary<int, string>
+        {
+            [30] = "node",
+            [20] = "codex",
+            [10] = "pwsh",
+        };
+
+        Assert.True(ActiveAppDetector.HasTerminalRelationship(20, 10, parents, names));
+        Assert.True(ActiveAppDetector.HasTerminalRelationship(30, 20, parents, names));
     }
 
     [Fact]
@@ -1069,5 +1179,44 @@ public class ActiveAppDetectorTests : IDisposable
             allCandidates, foregroundTree, foregroundIsWindowsTerminal: true,
             sessionRootPid: 148228, parents, "? Replace mistake detector with FastConformer streaming model");
         Assert.Equal(ProviderId.Claude, unrelatedTitle);
+    }
+
+    [Fact]
+    public void BackgroundAgentPresenceRefreshesImmediatelyWhenCodexLosesForeground()
+    {
+        var now = new DateTime(2026, 7, 28, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.True(ActiveAppDetector.ShouldRefreshBackgroundAgentPresence(
+            now,
+            cacheAt: now.AddMilliseconds(-100),
+            retryUntil: DateTime.MinValue,
+            codexDesktopLostForeground: true));
+    }
+
+    [Fact]
+    public void BackgroundAgentPresenceRetriesTransitionMissesWithoutPollingSteadyIdleState()
+    {
+        var now = new DateTime(2026, 7, 28, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.False(ActiveAppDetector.ShouldRefreshBackgroundAgentPresence(
+            now,
+            cacheAt: now.AddMilliseconds(-499),
+            retryUntil: now.AddSeconds(2),
+            codexDesktopLostForeground: false));
+        Assert.True(ActiveAppDetector.ShouldRefreshBackgroundAgentPresence(
+            now,
+            cacheAt: now.AddMilliseconds(-500),
+            retryUntil: now.AddSeconds(2),
+            codexDesktopLostForeground: false));
+        Assert.False(ActiveAppDetector.ShouldRefreshBackgroundAgentPresence(
+            now,
+            cacheAt: now.AddSeconds(-2),
+            retryUntil: DateTime.MinValue,
+            codexDesktopLostForeground: false));
+        Assert.True(ActiveAppDetector.ShouldRefreshBackgroundAgentPresence(
+            now,
+            cacheAt: now.AddSeconds(-5),
+            retryUntil: DateTime.MinValue,
+            codexDesktopLostForeground: false));
     }
 }

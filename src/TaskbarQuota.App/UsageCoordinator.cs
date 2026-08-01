@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using TaskbarQuota.ActiveApp;
+using TaskbarQuota.Taskbar;
 using TaskbarQuota.Usage;
 
 namespace TaskbarQuota
@@ -65,7 +66,7 @@ namespace TaskbarQuota
         private DateTime _uiaHoldUntilUtc = DateTime.MinValue;
         private static readonly TimeSpan UiaReconcileWindow = TimeSpan.FromSeconds(10);
         private bool? _lastHasDetectedTool;
-        private DateTime _lastPresenceProbeAt = DateTime.MinValue;
+        private SupportedSurfaceState _supportedSurfaces = SupportedSurfaceState.None;
         private ProviderSource _activeProviderSource = ProviderSource.Unknown;
 
         public UsageService Service => _service;
@@ -80,19 +81,39 @@ namespace TaskbarQuota
         /// (the old code hard-coded <see cref="ProviderId.Codex"/> as the fallback). See issue #7.
         /// </summary>
         public ProviderId? WidgetDisplayProvider
+            => SelectWidgetDisplayProvider(
+                _lastActive,
+                RecentProviders,
+                WidgetSettingsService.LastWidgetProvider,
+                Enum.GetValues<ProviderId>(),
+                WidgetSettingsService.IsProviderVisible,
+                IsProviderAvailable);
+
+        internal static ProviderId? SelectWidgetDisplayProvider(
+            ProviderId? active,
+            IReadOnlyList<ProviderId> recent,
+            ProviderId? persisted,
+            IReadOnlyList<ProviderId> ordered,
+            Func<ProviderId, bool> isVisible,
+            Func<ProviderId, bool> isAvailable)
         {
-            get
-            {
-                if (_lastActive is { } active && WidgetSettingsService.IsProviderVisible(active))
-                    return active;
-                foreach (var p in RecentProviders)
-                    if (WidgetSettingsService.IsProviderVisible(p) && IsProviderAvailable(p))
-                        return p;
-                foreach (ProviderId p in Enum.GetValues<ProviderId>())
-                    if (WidgetSettingsService.IsProviderVisible(p) && IsProviderAvailable(p))
-                        return p;
-                return null;
-            }
+            static bool Eligible(
+                ProviderId provider,
+                Func<ProviderId, bool> visible,
+                Func<ProviderId, bool> available)
+                => visible(provider) && available(provider);
+
+            if (active is { } activeProvider && Eligible(activeProvider, isVisible, isAvailable))
+                return activeProvider;
+            foreach (var provider in recent)
+                if (Eligible(provider, isVisible, isAvailable))
+                    return provider;
+            if (persisted is { } persistedProvider && Eligible(persistedProvider, isVisible, isAvailable))
+                return persistedProvider;
+            foreach (var provider in ordered)
+                if (Eligible(provider, isVisible, isAvailable))
+                    return provider;
+            return null;
         }
 
         /// <summary>
@@ -113,8 +134,8 @@ namespace TaskbarQuota
         /// </summary>
         public IReadOnlyList<ProviderId> WidgetDisplayProviders
             => ComputeWidgetDisplayProviders(
-                _lastActive,
-                IsActiveToolPresent,
+                ActiveWidgetProvider ?? WidgetDisplayProvider,
+                present: true,
                 RecentProviders,
                 Enum.GetValues<ProviderId>(),
                 WidgetSettingsService.IsProviderPinned,
@@ -137,7 +158,7 @@ namespace TaskbarQuota
 
             // The active provider leads even when it is itself pinned — it is the one the user is looking
             // at right now, so it gets the stable leftmost slot and the pinned tiles trail it.
-            if (present && active is { } a && isVisible(a))
+            if (present && active is { } a && isVisible(a) && isAvailable(a))
                 result.Add(a);
 
             var recentIndex = new Dictionary<ProviderId, int>();
@@ -172,7 +193,14 @@ namespace TaskbarQuota
         public ActiveApp.SynaraStateReader.SynaraSelection? ActiveSynaraHost { get; private set; }
         /// <summary>Last usage snapshot pushed to listeners; used to hydrate the taskbar widget if it was created late.</summary>
         public UsageResult? LastState { get; private set; }
-        public bool IsActiveToolPresent => _lastHasDetectedTool ?? _detector.HasAnyKnownToolRunning();
+        public bool IsActiveToolPresent => _lastHasDetectedTool ?? false;
+        internal SupportedSurfaceState SupportedSurfaces => _supportedSurfaces;
+        internal ProviderId? ActiveWidgetProvider =>
+            _supportedSurfaces.DesktopAppActive
+            || _supportedSurfaces.CliAgentActive
+            || _supportedSurfaces.BrowserTabActive
+                ? _lastActive
+                : null;
         public IReadOnlyList<ProviderId> RecentProviders
         {
             get
@@ -185,6 +213,7 @@ namespace TaskbarQuota
         public event Action<UsageResult>? StateChanged;
         public event Action<bool>? ActiveToolPresenceChanged;
         public event Action<ProviderId?>? ActiveProviderChanged;
+        internal event Action<SupportedSurfaceState>? SupportedSurfacesChanged;
 
         public void Start()
         {
@@ -348,7 +377,10 @@ namespace TaskbarQuota
                 var hostChanged = !SameSynaraSelection(previousHost, host);
                 _lastActive = provider;
                 if (providerChanged)
+                {
                     PromoteRecentProvider(provider);
+                    WidgetSettingsService.RememberLastWidgetProvider(provider);
+                }
 
                 if (_lastHasDetectedTool != true)
                 {
@@ -500,6 +532,7 @@ namespace TaskbarQuota
                 _lastActive = target;
                 _activeProviderSource = foregroundSource;
                 PromoteRecentProvider(target);
+                WidgetSettingsService.RememberLastWidgetProvider(target);
 
                 if (previous != target)
                     ActiveProviderChanged?.Invoke(target);
@@ -600,6 +633,7 @@ namespace TaskbarQuota
                 _lastActive = target;
                 _activeProviderSource = _detector.ActiveSource;
                 PromoteRecentProvider(target);
+                WidgetSettingsService.RememberLastWidgetProvider(target);
 
                 if (previous != target)
                     ActiveProviderChanged?.Invoke(target);
@@ -767,11 +801,15 @@ namespace TaskbarQuota
             ProviderId? detected;
             ProviderSource detectedSource;
             SynaraStateReader.SynaraSelection? detectedSynaraHost;
+            SupportedToolPresence detectedPresence;
             try
             {
                 detected = _detector.Detect();
                 detectedSource = _detector.ActiveSource;
                 detectedSynaraHost = _detector.ActiveSynaraHost;
+                bool codexDesktopForeground = detected == ProviderId.Codex
+                    && detectedSource.Kind == ProviderSourceKind.DesktopApp;
+                detectedPresence = _detector.GetSupportedToolPresence(codexDesktopForeground);
             }
             catch (Exception ex)
             {
@@ -817,7 +855,12 @@ namespace TaskbarQuota
                     ClearSynaraHold();
                 }
 
-                var hasDetectedTool = detected != null || ShouldAssumeToolStillRunning() || ProbeToolPresence();
+                var surfaces = ComputeSupportedSurfaces(detectedPresence, detected, detectedSource);
+                UpdateSupportedSurfaces(surfaces);
+
+                var hasDetectedTool = surfaces.DesktopAppPresent
+                    || surfaces.CliAgentPresent
+                    || surfaces.BrowserTabActive;
                 if (!hasDetectedTool)
                 {
                     if (_lastHasDetectedTool != false)
@@ -830,34 +873,37 @@ namespace TaskbarQuota
                         ClearSynaraHold(force: true);
                         ActiveToolPresenceChanged?.Invoke(false);
                     }
-                    return;
                 }
-
-                ProviderId? previousActive = _lastActive;
-                if (detected is ProviderId p)
+                else
                 {
-                    _lastActive = p;
-                    _activeProviderSource = detectedSource;
-                    PromoteRecentProvider(p);
-                    if (previousActive != p)
+                    ProviderId? previousActive = _lastActive;
+                    if (detected is ProviderId p)
                     {
-                        ActiveProviderChanged?.Invoke(p);
-                        PublishImmediateState(p);
+                        _lastActive = p;
+                        _activeProviderSource = detectedSource;
+                        PromoteRecentProvider(p);
+                        WidgetSettingsService.RememberLastWidgetProvider(p);
+                        if (previousActive != p)
+                        {
+                            ActiveProviderChanged?.Invoke(p);
+                            PublishImmediateState(p);
+                        }
+                    }
+
+                    if (_lastHasDetectedTool != true)
+                    {
+                        _lastHasDetectedTool = true;
+                        ActiveToolPresenceChanged?.Invoke(true);
                     }
                 }
 
-                if (detected is null && _lastActive is null)
+                var widgetDisplayProvider = WidgetDisplayProvider;
+                if (detected is null && _lastActive is null && widgetDisplayProvider is null)
                     return;
-
-                if (_lastHasDetectedTool != true)
-                {
-                    _lastHasDetectedTool = true;
-                    ActiveToolPresenceChanged?.Invoke(true);
-                }
 
                 // Last-active fallback: nothing detected and never had one -> show the first enabled
                 // provider (never a hidden default), but do not make the fallback sticky as the active one.
-                target = _lastActive ?? WidgetDisplayProvider ?? ProviderId.Codex;
+                target = _lastActive ?? widgetDisplayProvider ?? ProviderId.Codex;
             }
             catch (Exception ex)
             {
@@ -931,7 +977,7 @@ namespace TaskbarQuota
         }
 
         private ProviderSource SourceFor(ProviderId provider)
-            => _lastActive == provider ? _activeProviderSource : ProviderSource.Unknown;
+            => ActiveWidgetProvider == provider ? _activeProviderSource : ProviderSource.Unknown;
 
         private static ProviderSource SynaraSource(HostApp host)
             => new(
@@ -984,13 +1030,31 @@ namespace TaskbarQuota
             _synaraHoldUntilUtc = DateTime.MinValue;
         }
 
-        private bool ShouldAssumeToolStillRunning()
-            => _lastHasDetectedTool == true && DateTime.UtcNow - _lastPresenceProbeAt < TimeSpan.FromSeconds(15);
-
-        private bool ProbeToolPresence()
+        private void UpdateSupportedSurfaces(SupportedSurfaceState surfaces)
         {
-            _lastPresenceProbeAt = DateTime.UtcNow;
-            return _detector.HasAnyKnownToolRunning();
+            if (_supportedSurfaces == surfaces)
+                return;
+
+            _supportedSurfaces = surfaces;
+            SupportedSurfacesChanged?.Invoke(surfaces);
+        }
+
+        internal static SupportedSurfaceState ComputeSupportedSurfaces(
+            SupportedToolPresence presence,
+            ProviderId? detected,
+            ProviderSource source)
+        {
+            bool desktopActive = detected is not null
+                && source.Kind is ProviderSourceKind.DesktopApp or ProviderSourceKind.HostApp;
+            bool cliActive = detected is not null && source.Kind == ProviderSourceKind.Cli;
+            bool browserActive = detected is not null && source.Kind == ProviderSourceKind.Browser;
+            return new(
+                presence.DesktopAppPresent || desktopActive,
+                desktopActive,
+                presence.CliAgentPresent || cliActive,
+                cliActive,
+                browserActive,
+                presence.BackgroundAgentRunning);
         }
 
         internal static IReadOnlyList<UsageResult> SortByRecentActivity(

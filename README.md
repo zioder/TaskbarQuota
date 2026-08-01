@@ -3,7 +3,7 @@
 <h1 align="center">TaskbarQuota</h1>
 
 <p align="center">
-  A native <b>Windows</b> taskbar companion that <b>automatically detects which AI tool you are using</b> — the focused desktop app <i>or</i> the agent running in your terminal — and shows live usage for <em>that</em> provider only.<br/>
+  A native <b>Windows</b> taskbar companion that <b>automatically detects supported AI tools</b> — desktop apps, terminal agents, or a supported active browser tab — and shows live provider usage.<br/>
   Sessions, rate windows, cost or balance; compact widget beside the tray; full dashboard on demand; no cloud backend.
 </p>
 
@@ -38,20 +38,22 @@ On first launch after upgrading from the internal **WinCheck** codename, setting
 
 ## Automatically follows your active tool
 
-TaskbarQuota answers one question: **“What am I using right now, and how much quota is left?”** It distinguishes two cases:
+TaskbarQuota answers one question: **“What am I using right now, and how much quota is left?”** It distinguishes three cases:
 
 | You are working in… | How TaskbarQuota decides |
 | ------------------- | ------------------------ |
 | **A desktop AI app** (Cursor, Antigravity, Codex, Claude, VS Code with Copilot, …) | The **foreground window** is matched to a provider. |
-| **A terminal** (Windows Terminal, PowerShell, Warp, WezTerm, …) | The focused shell is detected, then running processes are scanned for CLI agents (`claude`, `codex`, `cursor-agent`, `opencode`, `gh copilot`, …). The **most recently started** matching agent wins. |
+| **A terminal** (Windows Terminal, PowerShell, WezTerm, …) | The focused shell is detected, then its process session is scanned for CLI agents (`claude`, `codex`, `cursor-agent`, `opencode`, `gh copilot`, …). The best session match wins. |
+| **A browser** | The foreground browser's active-tab URL is inspected. In the current implementation, `claude.ai` maps to Claude; background tabs and window titles do not count. |
 
-When you alt-tab from Cursor into a PowerShell session running Claude Code, the widget retargets to **Claude** within about half a second. When you leave all supported tools, the widget can fade until you return to one. If the foreground app is unrelated (browser, Slack, …), TaskbarQuota keeps showing the **last active** provider so the taskbar still has context.
+When you alt-tab from Cursor into a PowerShell session running Claude Code, the active provider retargets to **Claude** within about half a second. Visibility is configured independently: the widget can stay visible, follow any open supported tool, or require active use. The last relevant eligible provider is remembered for the next time the widget appears.
 
 **Examples**
 
 - Cursor IDE focused → **Cursor** usage  
 - Windows Terminal + `claude` in the command line → **Claude** usage  
 - VS Code focused → **GitHub Copilot** usage  
+- Foreground browser with `claude.ai` as the active tab → **Claude** usage
 - OpenCode model switch (Zen vs Go) → provider updates without restarting TaskbarQuota  
 - Cline surface switch (Usage-Billing vs ClinePass) → provider updates without restarting TaskbarQuota  
 
@@ -65,7 +67,7 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 
 ### What's new in 1.1.0
 
-- **Pinned providers** — providers can be pinned so their quota stays on the taskbar no matter which tool is in the foreground. The active provider takes the leftmost slot and pinned ones trail it, up to 3 tiles and only while they fit the measured taskbar space. (#32)
+- **Pinned providers** — providers can be pinned so their quota remains in the widget whenever the widget is visible. The active provider takes the leftmost slot and pinned ones trail it, up to 3 tiles and only while they fit the measured taskbar space. Pinning does not override the global visibility policy. (#32)
 - **Single instance** — launching TaskbarQuota again activates the running app instead of spawning a second widget, with a fallback to a normal launch if the activation redirect fails. (#30)
 - **Drag fixed in both directions** — off-band obstacles (the Widgets flyout, overflow popups, hidden sibling windows) no longer erase the free gap left of the icon cluster, so the widget drags left as well as right. (#33)
 - **Reposition deadband fix** — the deadband no longer overflows before the widget's first placement. (#31)
@@ -101,7 +103,7 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 
 ### What's new in 1.0.15
 
-- **Browser tab detection** — TaskbarQuota reads the active browser tab to attribute usage to the provider you're actually using (ChatGPT, Claude, Gemini, and more), instead of folding web chats into coding-client providers.
+- **Browser tab detection** — TaskbarQuota can classify supported sites from the foreground browser's active tab. The current visibility path recognizes `claude.ai`; it does not inspect background tabs or infer from window titles.
 - **Login with Claude** — a cookie-free one-click sign-in for Claude usage that survives Chrome's App-Bound Encryption, with an automatic fallback to `claude.ai` browser cookies when no CLI is present.
 - **Detection source in the UI** — the dashboard and widget now show how each provider was detected (browser, desktop app, terminal, or host app), plus a dismissible onboarding panel.
 - **Multi-monitor widget confinement** — on setups where one taskbar spans displays, the widget stays on the monitor hosting the notification area instead of straddling the seam.
@@ -133,19 +135,23 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 - **Follows taskbar layout** — recenters when the taskbar moves, centers, or when Widgets / tray geometry changes.
 - **Draggable placement** — drag to reposition; offset is saved under `%LOCALAPPDATA%\TaskbarQuota\`.
 - **Click for flyout** — quick provider strip and settings shortcut above the widget.
-- **Fades when idle** — widget can hide when no supported AI tool process is detected; returns when you focus a supported app or terminal session.
+- **Configurable visibility** — choose **Always show**, **Show while any supported AI tool is open** (the default), or **Show only while a supported AI tool is in use**.
+- **Background agent option** — in the in-use mode, a separate setting can keep the widget visible while a supported CLI agent remains associated with a terminal session or Codex Desktop exposes a task as still running.
+- **Stable transitions** — qualifying surfaces show immediately; automatic hides wait two continuous seconds to avoid flicker. Manual tray actions and invalid-provider changes apply immediately.
+- **Tray override** — **Show widget**, **Hide widget**, and **Use automatic visibility** change only the current run; the saved policy is left intact.
 
 ### Active-tool detection (desktop app **or** terminal agent)
 
 This is the core behavior — everything else (widget, flyout, fetch cache) hangs off it.
 
-- **Desktop apps** — process name of the focused window: Cursor, Antigravity, Codex, Claude, Devin, VS Code / Insiders (Copilot), and similar.
-- **Terminal agents** — if a known terminal is focused, WMI/process scan looks at command lines for Claude Code, Codex, `cursor-agent`, OpenCode, `cline`, `gh copilot`, Grok, Devin, Antigravity CLI, and related launchers (Windows Terminal, PowerShell, `pwsh`, WezTerm, Alacritty, …).
+- **Desktop apps** — process name of the focused window: Cursor, Antigravity, Codex, Claude, Devin, VS Code / Insiders (Copilot), and similar. VS Code is intentionally an approximation: a running/focused Code process is treated as Copilot without checking editor-extension state.
+- **Terminal agents** — if a known terminal is focused, a WMI/process scan resolves supported native executables and strict launcher signatures for Claude Code, Codex, `cursor-agent`, OpenCode, `cline`, `gh copilot`, Grok, Devin, Antigravity CLI, and related launchers (Windows Terminal, PowerShell, `pwsh`, WezTerm, Alacritty, …). A generic `gh.exe`, runtime process, or project path containing a provider name is not enough.
 - **Fast switching** — coordinator polls about every **500 ms**, so changing app or shell updates the active provider quickly; usage API calls are cached for **60 seconds** so providers are not spammed.
 - **OpenCode model switch** — watches OpenCode model state to move between OpenCode Zen and OpenCode Go without restarting the app.
 - **Cline surface switch** — watches Cline provider state to move between Cline Usage-Billing and ClinePass without restarting the app.
-- **Sticky last provider** — unrelated foreground apps do not clear the widget; last detected tool stays until you focus a supported app or terminal again.
-- **Idle hide** — optional fade when no supported AI process is running; comes back when you focus a supported app or terminal session.
+- **Browser scope** — only the supported active tab of the foreground browser counts. Background tabs, Firefox session-store state, and title text are deliberately excluded from visibility decisions.
+- **Remembered provider** — the last relevant eligible provider supplies widget content after a hide or restart; it does not make an inactive surface count as active.
+- **Background-agent evidence is local and explicit** — CLI presence still means a matching process with a terminal/shell relationship, not proof that it is generating output. Codex Desktop activity uses its accessible running-task indicator rather than its persistent `codex.exe app-server`; TaskbarQuota does not read thread titles, prompts, responses, or Codex logs. WSL agents that expose no matching Windows process are not guaranteed to be detected.
 
 ### Supported providers
 
@@ -170,14 +176,15 @@ Each provider card on the dashboard shows plan name, reset times, rate windows, 
 ### Dashboard & shell
 
 - **Full dashboard** — all registered providers at once with refresh, error states, and detail cards.
-- **System tray** — Open, show widget, and Exit.
+- **System tray** — Open, visibility override submenu, widget positioning actions, and Quit.
 - **Run at startup** — optional Windows startup registration; can launch widget-only.
-- **Settings** — light / dark / system theme, widget layout (bars, percentages, or both), consumed vs remaining percentage display.
+- **Settings** — light / dark / system theme, widget layout, consumed vs remaining percentages, saved visibility policy, and the conditional background-agent option.
 
 ### Privacy
 
 - **Local-only** — no TaskbarQuota backend; usage calls go directly from your PC to each provider (or localhost for Antigravity).
 - **No telemetry** — diagnostics log to `%TEMP%\taskbarquota.log` only.
+- **Detection data is minimized** — visibility logs contain policy, surface category, reason, and provider transitions; browser URLs, window titles, and command lines are not logged or persisted by the visibility subsystem.
 - **Cookie extraction is in-memory** — browser cookies are read to build a request header for the active fetch; they are not intentionally persisted (manual credentials in `credentials.json` are plain JSON today — keep that file on your PC only).
 
 ## How it works
@@ -185,7 +192,8 @@ Each provider card on the dashboard shows plan name, reset times, rate windows, 
 ```text
 ActiveAppDetector
   ├─ foreground GUI app  → ProviderId
-  └─ focused terminal      → scan CLI processes → ProviderId
+  ├─ focused terminal     → session CLI scan → ProviderId
+  └─ foreground browser  → supported active-tab URL → ProviderId
         ↓
 UsageCoordinator (500 ms tick, picks active provider)
         ↓
@@ -193,13 +201,13 @@ UsageService (provider registry + 60 s success cache, shorter TTL on errors / 42
         ↓
 IUsageProvider implementations (HTTP / local API / SQLite / DPAPI)
         ↓
-TaskBarManager → WidgetSummary (taskbar) + Dashboard + Flyout
+WidgetVisibilityPolicy → TaskBarManager → WidgetSummary (taskbar) + Dashboard + Flyout
 ```
 
-1. **Detection** — `ActiveAppDetector` maps the foreground process (or CLI child of a known terminal) to a `ProviderId`.
+1. **Detection** — `ActiveAppDetector` separates supported surface presence from foreground activity and maps the active desktop app, terminal agent, or supported browser tab to a `ProviderId`.
 2. **Fetch** — the matching `IUsageProvider` loads tokens from CLI config files, environment variables, TaskbarQuota credentials, Cursor's local database, or `CookieExtractor` (Chromium / Firefox profiles, copied to `%TEMP%` for locked DBs).
 3. **Normalize** — results become a `UsageSnapshot` with `RateWindow` rows and optional `CostSnapshot`.
-4. **Display** — `UsageCoordinator` raises `StateChanged`; the taskbar widget and dashboard apply the snapshot. Fetches are cached so providers are not hammered on every tick.
+4. **Display** — `UsageCoordinator` keeps publishing cached/fresh state even while the native widget host is hidden. `WidgetVisibilityPolicy` decides whether the host appears; it does not stop detection, dashboard updates, or quota alerts.
 
 ### Architecture at a glance
 
