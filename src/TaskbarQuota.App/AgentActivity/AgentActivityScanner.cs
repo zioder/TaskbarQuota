@@ -6,6 +6,7 @@ using System.Linq;
 using System.Management;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using Microsoft.Data.Sqlite;
 using TaskbarQuota.ActiveApp;
@@ -37,6 +38,7 @@ internal sealed class AgentActivityScanner
         AddRecent(files, Path.Combine(_home, ".codex", "sessions"), ProviderId.Codex, cancellationToken);
         AddRecent(files, Path.Combine(_home, ".claude", "projects"), ProviderId.Claude, cancellationToken);
         AddGrokSessions(files, cancellationToken);
+        AddAntigravityDatabases(files, cancellationToken);
         AddOpenCodeDatabases(files, cancellationToken);
 
         var parsed = new List<AgentActivityItem>();
@@ -51,6 +53,11 @@ internal sealed class AgentActivityScanner
             {
                 if (TryReadGrokSession(file.Path, file.Modified, claimLive, out var grokItem))
                     parsed.Add(grokItem);
+            }
+            else if (file.Provider == ProviderId.Antigravity)
+            {
+                if (TryReadAntigravitySession(file.Path, file.Modified, claimLive, out var antigravityItem))
+                    parsed.Add(antigravityItem);
             }
             else if (file.Provider == ProviderId.OpenCode)
             {
@@ -128,6 +135,301 @@ internal sealed class AgentActivityScanner
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+    }
+
+    private void AddAntigravityDatabases(List<(ProviderId, string, DateTimeOffset)> output,
+        CancellationToken cancellationToken)
+    {
+        var root = GetAntigravityCliHome();
+        var conversations = Path.Combine(root, "conversations");
+        if (!Directory.Exists(conversations))
+            return;
+
+        try
+        {
+            foreach (var path in Directory.EnumerateFiles(conversations, "*.db", SearchOption.TopDirectoryOnly))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var modified = File.GetLastWriteTimeUtc(path);
+                var wal = path + "-wal";
+                if (File.Exists(wal))
+                {
+                    var walModified = File.GetLastWriteTimeUtc(wal);
+                    if (walModified > modified)
+                        modified = walModified;
+                }
+
+                if (DateTime.UtcNow - modified <= RecentWindow)
+                    output.Add((ProviderId.Antigravity, path,
+                        new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private static string GetAntigravityCliHome()
+    {
+        var root = Environment.GetEnvironmentVariable("ANTIGRAVITY_CLI_HOME");
+        return string.IsNullOrWhiteSpace(root)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini", "antigravity-cli")
+            : root;
+    }
+
+    private static AntigravityConversationMetadata? ReadAntigravityMetadata(string root, string id)
+    {
+        var path = Path.Combine(root, "cache", "conversation_metadata.json");
+        try
+        {
+            if (!File.Exists(path))
+                return null;
+            return ParseAntigravityMetadata(File.ReadAllText(path), id);
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+        catch (JsonException) { return null; }
+    }
+
+    private static AntigravityConversationMetadata? ParseAntigravityMetadata(string json, string id)
+    {
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("conversations", out var conversations)
+            || conversations.ValueKind != JsonValueKind.Object
+            || !conversations.TryGetProperty(id, out var entry)
+            || entry.ValueKind != JsonValueKind.Object)
+            return null;
+
+        var summary = entry.TryGetProperty("summary", out var summaryNode)
+            && summaryNode.ValueKind == JsonValueKind.Object
+            ? summaryNode
+            : entry;
+        var workspace = "";
+        if (summary.TryGetProperty("WorkspaceURIs", out var workspaceNodes)
+            && workspaceNodes.ValueKind == JsonValueKind.Array)
+        {
+            workspace = workspaceNodes.EnumerateArray()
+                .Where(value => value.ValueKind == JsonValueKind.String)
+                .Select(value => value.GetString() ?? "")
+                .Select(ToAntigravityWorkspacePath)
+                .FirstOrDefault(value => value.Length > 0) ?? "";
+        }
+
+        return new AntigravityConversationMetadata(
+            FirstString(summary, "ID", "id"),
+            Clean(FirstString(summary, "Title", "title")),
+            Clean(FirstString(summary, "Preview", "preview")),
+            workspace,
+            FirstTimestamp(summary, "UpdatedAt", "updatedAt", "updated_at"),
+            Clean(FirstString(summary, "AgentName", "agentName")));
+    }
+
+    internal static (string Title, string Preview, string Workspace)? ParseAntigravityMetadataForTesting(
+        string json, string id)
+    {
+        var metadata = ParseAntigravityMetadata(json, id);
+        return metadata is null ? null : (metadata.Title, metadata.Preview, metadata.Workspace);
+    }
+
+    private static string ToAntigravityWorkspacePath(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "";
+        if (Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.IsFile)
+            return NormalizeAntigravityPath(uri.LocalPath);
+        return NormalizeAntigravityPath(value.StartsWith("file://", StringComparison.OrdinalIgnoreCase)
+            ? Uri.UnescapeDataString(value[7..]).Replace('/', '\\')
+            : value);
+    }
+
+    private static string NormalizeAntigravityPath(string value)
+    {
+        if (value.Length >= 2 && value[1] == ':' && char.IsLetter(value[0]))
+            return char.ToUpperInvariant(value[0]) + value[1..];
+        return value;
+    }
+
+    private static bool TryReadAntigravitySession(string dbPath, DateTimeOffset modified,
+        bool claimLive, out AgentActivityItem item)
+    {
+        item = default!;
+        try
+        {
+            var id = Path.GetFileNameWithoutExtension(dbPath);
+            var metadata = ReadAntigravityMetadata(GetAntigravityCliHome(), id);
+            var rows = ReadAntigravitySteps(dbPath);
+            if (rows.Count == 0 && metadata is null)
+                return false;
+
+            var blobs = rows.SelectMany(row => row.Blobs).ToArray();
+            var toolSummary = ExtractAntigravityField(blobs, "toolSummary");
+            var toolAction = ExtractAntigravityField(blobs, "toolAction");
+            var toolName = ExtractAntigravityField(blobs, "toolName", "tool_name", "name");
+            var prompt = FirstNonEmpty(
+                metadata?.Preview ?? "",
+                ExtractAntigravityField(blobs, "prompt", "userMessage", "user_message"));
+            var model = ExtractAntigravityField(blobs, "model", "model_id", "modelId");
+            var parentId = ExtractAntigravityField(blobs,
+                "parent_conversation_id", "parentConversationId", "parent_thread_id");
+            var lastActivity = Max(modified, metadata?.UpdatedAt ?? modified);
+            var fresh = DateTimeOffset.Now - lastActivity < BusyWindow;
+            var live = claimLive && modified > DateTimeOffset.Now - RecentWindow;
+            var waiting = AntigravityContainsAny(rows.Select(row => row.Permissions),
+                "permission", "approval", "confirmation", "waiting_for_user", "request_user_input")
+                || AntigravityContainsAny(blobs,
+                    "waiting_for_user", "request_confirmation", "permission_requested", "needs_confirmation");
+            var failed = AntigravityContainsAny(rows.Select(row => row.ErrorDetails),
+                "error", "failed", "failure", "exception");
+            var state = !live
+                ? failed ? AgentActivityStatus.Failed : AgentActivityStatus.Completed
+                : waiting
+                    ? AgentActivityStatus.Waiting
+                    : fresh ? AgentActivityStatus.Working : AgentActivityStatus.Idle;
+
+            var action = FirstNonEmpty(Clean(toolSummary), Clean(toolAction));
+            var step = state == AgentActivityStatus.Completed
+                ? "Completed"
+                : state == AgentActivityStatus.Failed
+                    ? "Failed"
+                    : state == AgentActivityStatus.Waiting
+                        ? "Waiting for input"
+                    : state == AgentActivityStatus.Idle
+                        ? "Waiting for the next prompt"
+                    : action.Length > 0
+                        ? action
+                        : DescribeAntigravityAction(toolName, ExtractAntigravityField(blobs, "command", "input"));
+            var title = FirstNonEmpty(
+                metadata?.Title ?? "",
+                metadata?.Preview ?? "",
+                SummarizeTitle(prompt) ?? "",
+                metadata?.AgentName ?? "",
+                "Antigravity");
+            item = new AgentActivityItem(
+                $"antigravity:{id}", ProviderId.Antigravity, Trim(Clean(title), 72), step, state,
+                metadata?.UpdatedAt ?? modified, lastActivity,
+                SubagentCount: rows.Count(row => row.HasSubtrajectory),
+                Detail: prompt,
+                Model: Clean(model),
+                ThreadId: id,
+                ParentThreadId: Clean(parentId));
+            return true;
+        }
+        catch (SqliteException) { return false; }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (InvalidOperationException) { return false; }
+        catch (JsonException) { return false; }
+    }
+
+    internal static IReadOnlyList<AgentActivityItem> ReadAntigravityForTesting(string dbPath,
+        bool claimLive = true)
+    {
+        var modified = File.GetLastWriteTimeUtc(dbPath);
+        return TryReadAntigravitySession(dbPath,
+            new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime(), claimLive,
+            out var item)
+            ? new[] { item }
+            : Array.Empty<AgentActivityItem>();
+    }
+
+    private static IReadOnlyList<AntigravityStepRow> ReadAntigravitySteps(string path)
+    {
+        var rows = new List<AntigravityStepRow>();
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadOnly,
+            Cache = SqliteCacheMode.Shared,
+            Pooling = false,
+        }.ToString();
+        using var connection = new SqliteConnection(connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT idx, step_type, status, has_subtrajectory,
+                   metadata, error_details, permissions, task_details,
+                   render_info, step_payload
+            FROM steps
+            ORDER BY idx DESC
+            LIMIT 80;
+            """;
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            rows.Add(new AntigravityStepRow(
+                reader.GetInt32(0),
+                reader.GetInt32(1),
+                reader.GetInt32(2),
+                !reader.IsDBNull(3) && reader.GetBoolean(3),
+                ReadAntigravityBlob(reader, 4),
+                ReadAntigravityBlob(reader, 5),
+                ReadAntigravityBlob(reader, 6),
+                ReadAntigravityBlob(reader, 7),
+                ReadAntigravityBlob(reader, 8),
+                ReadAntigravityBlob(reader, 9)));
+        }
+        return rows;
+    }
+
+    private static byte[]? ReadAntigravityBlob(SqliteDataReader reader, int ordinal)
+        => reader.IsDBNull(ordinal) ? null : reader.GetFieldValue<byte[]>(ordinal);
+
+    private static string ExtractAntigravityField(IEnumerable<byte[]?> blobs, params string[] names)
+    {
+        foreach (var blob in blobs)
+        {
+            if (blob is null || blob.Length == 0)
+                continue;
+            var text = Encoding.UTF8.GetString(blob);
+            foreach (var name in names)
+            {
+                var pattern = $"\\\"{Regex.Escape(name)}\\\"\\s*:\\s*\\\"(?<value>(?:\\\\.|[^\\\"\\\\])*)\\\"";
+                var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase | RegexOptions.Singleline);
+                if (!match.Success)
+                    continue;
+                var raw = match.Groups["value"].Value;
+                try
+                {
+                    return Clean(JsonSerializer.Deserialize<string>($"\\\"{raw}\\\"") ?? raw);
+                }
+                catch (JsonException)
+                {
+                    return Clean(raw);
+                }
+            }
+        }
+        return "";
+    }
+
+    private static bool AntigravityContainsAny(IEnumerable<byte[]?> blobs, params string[] markers)
+    {
+        foreach (var blob in blobs)
+        {
+            if (blob is null || blob.Length == 0)
+                continue;
+            var text = Encoding.UTF8.GetString(blob);
+            if (markers.Any(marker => text.Contains(marker, StringComparison.OrdinalIgnoreCase)))
+                return true;
+        }
+        return false;
+    }
+
+    private static string DescribeAntigravityAction(string name, string details)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return "Thinking";
+        var normalized = name.ToLowerInvariant();
+        if (normalized.Contains("shell") || normalized.Contains("terminal")
+            || normalized.Contains("command") || normalized is "bash" or "cmd" or "powershell")
+            return DescribeAction("shell_command", details);
+        if (normalized.Contains("edit") || normalized.Contains("write") || normalized.Contains("patch"))
+            return "Edited code";
+        if (normalized.Contains("read") || normalized.Contains("search") || normalized.Contains("grep")
+            || normalized.Contains("glob") || normalized.Contains("list"))
+            return "Inspected files";
+        if (normalized.Contains("agent") || normalized.Contains("subagent"))
+            return "Running subagent";
+        return $"Running {Clean(name)}";
     }
 
     private void AddOpenCodeDatabases(List<(ProviderId, string, DateTimeOffset)> output,
@@ -1451,4 +1753,14 @@ internal sealed class AgentActivityScanner
         string MessageId, string Type, DateTimeOffset ActivityAt, string Tool, string Status, string Input, string Text);
     private sealed record OpenCodeTail(
         string Step, string Summary, string Prompt, DateTimeOffset? LastActivity, TranscriptState State);
+    private sealed record AntigravityConversationMetadata(
+        string Id, string Title, string Preview, string Workspace, DateTimeOffset? UpdatedAt, string AgentName);
+    private sealed record AntigravityStepRow(
+        int Index, int StepType, int Status, bool HasSubtrajectory,
+        byte[]? Metadata, byte[]? ErrorDetails, byte[]? Permissions,
+        byte[]? TaskDetails, byte[]? RenderInfo, byte[]? Payload)
+    {
+        public IEnumerable<byte[]?> Blobs => new[]
+            { Payload, RenderInfo, TaskDetails, Metadata, ErrorDetails, Permissions };
+    }
 }

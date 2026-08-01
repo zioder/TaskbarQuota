@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Text;
 using Microsoft.Data.Sqlite;
 using TaskbarQuota.AgentActivity;
 using TaskbarQuota.Usage;
@@ -212,6 +213,87 @@ public sealed class AgentActivityTests
         {
             if (Directory.Exists(directory))
                 Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void AntigravityMetadata_ExtractsPreviewAndWorkspace()
+    {
+        var metadata = $$"""
+            {
+              "conversations": {
+                "agy-1": {
+                  "summary": {
+                    "ID": "agy-1",
+                    "Title": "",
+                    "Preview": "Refactor Antigravity activity tracking",
+                    "WorkspaceURIs": ["file:///c:/work/TaskbarQuota"]
+                  }
+                }
+              }
+            }
+            """;
+
+        var parsed = AgentActivityScanner.ParseAntigravityMetadataForTesting(metadata, "agy-1");
+
+        Assert.NotNull(parsed);
+        Assert.Equal("Refactor Antigravity activity tracking", parsed!.Value.Preview);
+        Assert.Equal("C:\\work\\TaskbarQuota", parsed.Value.Workspace);
+    }
+
+    [Fact]
+    public void AntigravityDatabase_ExtractsPromptModelToolAndSubagent()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"taskbarquota-antigravity-{Guid.NewGuid():N}.db");
+        try
+        {
+            using (var connection = new SqliteConnection($"Data Source={path}"))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    CREATE TABLE steps (
+                        idx INTEGER PRIMARY KEY,
+                        step_type INTEGER NOT NULL DEFAULT 0,
+                        status INTEGER NOT NULL DEFAULT 0,
+                        has_subtrajectory NUMERIC NOT NULL DEFAULT false,
+                        metadata BLOB,
+                        error_details BLOB,
+                        permissions BLOB,
+                        task_details BLOB,
+                        render_info BLOB,
+                        step_payload BLOB,
+                        step_format INTEGER NOT NULL DEFAULT 0
+                    );
+                    """;
+                command.ExecuteNonQuery();
+
+                command.Parameters.Clear();
+                command.CommandText = """
+                    INSERT INTO steps (idx, step_type, status, has_subtrajectory, step_payload)
+                    VALUES (1, 5, 3, 1, $payload);
+                    """;
+                command.Parameters.AddWithValue("$payload", Encoding.UTF8.GetBytes("""
+                    {"prompt":"Refactor Antigravity activity tracking","model":"gemini-3","toolName":"grep_search","toolSummary":"Grep for activation","toolAction":"Searching for activation"}
+                    """));
+                command.ExecuteNonQuery();
+            }
+
+            var item = Assert.Single(AgentActivityScanner.ReadAntigravityForTesting(path));
+
+            Assert.Equal(ProviderId.Antigravity, item.Provider);
+            Assert.Equal("Refactor Antigravity activity tracking", item.Title);
+            Assert.Equal("Refactor Antigravity activity tracking", item.Detail);
+            Assert.Equal("gemini-3", item.Model);
+            Assert.Equal("Grep for activation", item.Step);
+            Assert.Equal(1, item.SubagentCount);
+            Assert.Equal(AgentActivityStatus.Working, item.Status);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(path))
+                File.Delete(path);
         }
     }
 
