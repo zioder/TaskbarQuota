@@ -10,6 +10,7 @@ internal static class AgentActivityVisuals
     {
         AgentActivityStatus.Working => StatusGradient(Color.FromArgb(255, 82, 196, 255), Color.FromArgb(255, 45, 94, 232)),
         AgentActivityStatus.Waiting => StatusGradient(Color.FromArgb(255, 255, 202, 92), Color.FromArgb(255, 224, 141, 33)),
+        AgentActivityStatus.Idle => StatusGradient(Color.FromArgb(255, 174, 184, 198), Color.FromArgb(255, 92, 105, 126)),
         AgentActivityStatus.Completed => StatusGradient(Color.FromArgb(255, 100, 222, 130), Color.FromArgb(255, 20, 142, 73)),
         AgentActivityStatus.Failed => StatusGradient(Color.FromArgb(255, 255, 130, 130), Color.FromArgb(255, 207, 55, 62)),
         _ => fallback,

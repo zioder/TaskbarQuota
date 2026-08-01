@@ -233,6 +233,9 @@ namespace TaskbarQuota
 
             foreach (var item in snapshot.Items)
             {
+                var statusBrush = AgentActivityVisuals.StatusBrush(
+                    item.Status,
+                    (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"]);
                 var card = new Border
                 {
                     Padding = new Thickness(12, 8, 12, 8),
@@ -250,8 +253,8 @@ namespace TaskbarQuota
                 var metadata = string.IsNullOrWhiteSpace(item.Model)
                     ? $"{ActivityProviderLabel(item)} · {item.StatusText}"
                     : $"{ActivityProviderLabel(item)} · {item.Model} · {item.StatusText}";
-                text.Children.Add(new TextBlock { Text = metadata, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
-                text.Children.Add(new TextBlock { Text = item.Step, TextTrimming = TextTrimming.CharacterEllipsis, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
+                text.Children.Add(new TextBlock { Text = metadata, Foreground = statusBrush, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
+                text.Children.Add(new TextBlock { Text = item.Step, Foreground = statusBrush, TextTrimming = TextTrimming.CharacterEllipsis, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
                 if (item.SubagentCount > 0)
                     text.Children.Add(new TextBlock { Text = $"▸ {item.SubagentCount} subagents", Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
                 Grid.SetColumn(text, 1);
@@ -305,13 +308,7 @@ namespace TaskbarQuota
                 CornerRadius = new CornerRadius(3),
                 HorizontalAlignment = HorizontalAlignment.Left,
                 VerticalAlignment = VerticalAlignment.Bottom,
-                Background = new SolidColorBrush(item.Status switch
-                {
-                    AgentActivityStatus.Failed => Colors.Red,
-                    AgentActivityStatus.Waiting => Colors.Orange,
-                    AgentActivityStatus.Completed => Colors.LimeGreen,
-                    _ => Colors.DodgerBlue,
-                }),
+                Background = foreground,
             };
             visual.Children.Add(dot);
 

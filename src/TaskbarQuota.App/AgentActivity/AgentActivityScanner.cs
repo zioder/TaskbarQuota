@@ -47,7 +47,7 @@ internal sealed class AgentActivityScanner
                 parsed.Add(item);
         }
 
-        return GroupCodex(parsed)
+        return GroupSessions(parsed)
             .Where(item => item.IsLive || DateTimeOffset.Now - item.UpdatedAt < RecentWindow)
             .OrderByDescending(item => item.IsLive)
             .ThenByDescending(item => item.UpdatedAt)
@@ -89,37 +89,50 @@ internal sealed class AgentActivityScanner
             var text = reader.ReadToEnd();
             var info = ParseTail(provider, text);
             var session = provider == ProviderId.Codex ? ReadSessionMetadata(path) : default;
+            ClaudeSessionContext? claude = provider == ProviderId.Claude
+                ? ReadClaudeSessionContext(path, info.ThreadId)
+                : null;
             bool freshAgentEvent = info.LastActivity is { } activity && DateTimeOffset.Now - activity < BusyWindow;
-            // One desktop provider process can host several concurrent threads. A fresh reasoning/tool
-            // event is therefore also a liveness signal, not just the process-count claim.
-            bool live = (claimLive || (info.State == TranscriptState.Action && freshAgentEvent))
-                && modified > DateTimeOffset.Now - RecentWindow;
+            // One desktop provider process can host several concurrent threads. The process claim marks
+            // the session live; transcript timestamps then distinguish working from quiet/idle.
+            bool live = claimLive && modified > DateTimeOffset.Now - RecentWindow;
             bool busy = live && freshAgentEvent;
-            // A desktop process can stay alive after the agent's final response. The transcript is the
-            // authority for completion, mirroring agent-notch's event-based state model.
-            var status = info.State == TranscriptState.Finished || !live
+            // Process liveness is authoritative: a quiet live process is idle, not completed. This is the
+            // same busy/idle/done model used by agent-notch and avoids treating Claude's interactive shell
+            // as finished merely because its last assistant turn ended.
+            var status = !live
                 ? AgentActivityStatus.Completed
-                : AgentActivityStatus.Working;
-            // The user's initial prompt is intentionally not mirrored into the taskbar or activity panel.
-            // It is often long and belongs to the provider conversation, not the compact activity signal.
-            var threadId = session.ThreadId ?? info.ThreadId;
-            var title = provider == ProviderId.Codex ? _threadNames.GetName(threadId) ?? provider.ToString() : provider.ToString();
+                : info.State == TranscriptState.Waiting
+                    ? AgentActivityStatus.Waiting
+                    : freshAgentEvent ? AgentActivityStatus.Working : AgentActivityStatus.Idle;
+            string? threadId = session.ThreadId ?? info.ThreadId;
+            if (provider == ProviderId.Claude && string.IsNullOrWhiteSpace(threadId))
+                threadId = claude?.ThreadId;
+
+            var title = provider == ProviderId.Codex
+                ? _threadNames.GetName(threadId) ?? SummarizeTitle(info.Prompt) ?? provider.ToString()
+                : SummarizeTitle(info.Prompt) ?? claude?.ProjectTitle ?? provider.ToString();
             // A reasoning summary is useful while the agent is working, but becomes stale and misleading
             // once a final response has landed. Completion is deliberately a stable, unambiguous state.
             var step = status == AgentActivityStatus.Completed
                 ? "Completed"
+                : status == AgentActivityStatus.Waiting
+                    ? string.IsNullOrWhiteSpace(info.Step) ? "Waiting for input" : info.Step
+                : status == AgentActivityStatus.Idle ? "Waiting for the next prompt"
                 : info.State == TranscriptState.Action && !string.IsNullOrWhiteSpace(info.Step)
                     ? info.Step
-                    : !string.IsNullOrWhiteSpace(info.Summary) ? info.Summary
+                : !string.IsNullOrWhiteSpace(info.Summary) ? info.Summary
                     : string.IsNullOrWhiteSpace(info.Step) ? (busy ? "Working" : "Thinking") : info.Step;
             item = new AgentActivityItem(
                 path, provider, title, step, status,
                 info.StartedAt ?? modified, info.LastActivity ?? modified,
                 SubagentCount: 0,
-                Detail: null,
+                Detail: info.Prompt,
                 Model: info.Model,
                 ThreadId: threadId,
-                ParentThreadId: session.ParentThreadId ?? info.ParentThreadId,
+                ParentThreadId: provider == ProviderId.Claude
+                    ? claude?.ParentThreadId ?? info.ParentThreadId
+                    : session.ParentThreadId ?? info.ParentThreadId,
                 Host: session.Host);
             return true;
         }
@@ -162,7 +175,7 @@ internal sealed class AgentActivityScanner
 
     private static TailInfo ParseTail(ProviderId provider, string text)
     {
-        string step = "", summary = "", model = "", threadId = "", parentId = "";
+        string step = "", summary = "", model = "", threadId = "", parentId = "", prompt = "";
         DateTimeOffset? started = null, activity = null;
         var state = TranscriptState.Unknown;
         foreach (var line in text.Split('\n').Reverse())
@@ -180,13 +193,22 @@ internal sealed class AgentActivityScanner
                     if (activity is null && IsConversationEvent(root, provider)) activity = parsedTime;
                 }
 
+                if (provider == ProviderId.Claude)
+                    ParseClaudeEvent(root, ref step, ref summary, ref model, ref threadId,
+                        ref parentId, ref prompt, ref state);
+
                 if (root.TryGetProperty("payload", out var payload) && payload.ValueKind == JsonValueKind.Object)
                 {
-                    if (threadId.Length == 0 && payload.TryGetProperty("id", out var id)) threadId = id.GetString() ?? "";
-                    if (parentId.Length == 0 && payload.TryGetProperty("parent_thread_id", out var parent)) parentId = parent.GetString() ?? "";
-                    if (model.Length == 0 && payload.TryGetProperty("model", out var modelNode)) model = modelNode.GetString() ?? "";
+                    if (parentId.Length == 0 && payload.TryGetProperty("parent_thread_id", out var parent)) parentId = JsonText(parent);
+                    if (model.Length == 0 && payload.TryGetProperty("model", out var modelNode)) model = JsonText(modelNode);
 
                     var type = payload.TryGetProperty("type", out var typeNode) ? typeNode.GetString() : null;
+                    // Tool-call and message ids are not thread ids. Codex's session_meta entry is the
+                    // authoritative source; the caller also reads it from the transcript header.
+                    if (threadId.Length == 0 && type == "session_meta" && payload.TryGetProperty("id", out var id))
+                        threadId = JsonText(id);
+                    if (prompt.Length == 0 && type is "user_message")
+                        prompt = ExtractPayloadText(payload);
                     if (summary.Length == 0 && type is "agent_reasoning" && payload.TryGetProperty("text", out var summaryText))
                         summary = Clean(summaryText.GetString());
                     if (summary.Length == 0 && type is "reasoning" && payload.TryGetProperty("summary", out var reasoningSummary))
@@ -214,7 +236,7 @@ internal sealed class AgentActivityScanner
                         if (IsAction(name))
                         {
                             state = state == TranscriptState.Unknown ? TranscriptState.Action : state;
-                            step = DescribeAction(name!, payload);
+                            step = DescribeAction(name!, GetPayloadDetails(payload));
                         }
                     }
                     if (step.Length == 0 && type is "agent_reasoning" && payload.TryGetProperty("text", out var reasoning))
@@ -230,12 +252,132 @@ internal sealed class AgentActivityScanner
             }
             catch (JsonException) { }
 
-            if (state != TranscriptState.Unknown && (step.Length > 0 || summary.Length > 0)
-                && activity is not null && threadId.Length > 0)
+            if (activity is not null && (step.Length > 0 || summary.Length > 0)
+                && prompt.Length > 0 && (provider == ProviderId.Claude || threadId.Length > 0))
                 break;
         }
 
-        return new TailInfo(step, summary, model, threadId, parentId, started, activity, state);
+        return new TailInfo(step, summary, model, threadId, parentId, prompt, started, activity, state);
+    }
+
+    internal static TailInfo ParseTranscriptForTesting(ProviderId provider, string text)
+        => ParseTail(provider, text);
+
+    internal static string? SummarizeTitleForTesting(string? prompt)
+        => SummarizeTitle(prompt);
+
+    private static void ParseClaudeEvent(JsonElement root, ref string step, ref string summary,
+        ref string model, ref string threadId, ref string parentId, ref string prompt,
+        ref TranscriptState state)
+    {
+        var type = root.TryGetProperty("type", out var typeNode) ? typeNode.GetString() : null;
+        if (type is not ("user" or "assistant"))
+            return;
+
+        if (threadId.Length == 0)
+            threadId = FirstString(root, "sessionId", "session_id", "uuid");
+        if (parentId.Length == 0)
+            parentId = FirstString(root, "parentThreadId", "parent_thread_id");
+        if (!root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object)
+            return;
+
+        if (model.Length == 0)
+            model = FirstString(message, "model");
+
+        if (type == "user")
+        {
+            if (prompt.Length == 0 && message.TryGetProperty("content", out var content))
+                prompt = ExtractContentText(content);
+            if (state == TranscriptState.Unknown)
+            {
+                state = TranscriptState.Action;
+                if (step.Length == 0)
+                    step = "Thinking";
+            }
+            return;
+        }
+
+        if (!message.TryGetProperty("content", out var assistantContent))
+            return;
+
+        if (FindClaudeToolAction(assistantContent) is { } action)
+        {
+            if (step.Length == 0)
+                step = action.Step;
+            state = action.Waiting ? TranscriptState.Waiting : TranscriptState.Action;
+            return;
+        }
+
+        if (summary.Length == 0)
+            summary = ExtractContentText(assistantContent);
+    }
+
+    private static string ExtractPayloadText(JsonElement payload)
+    {
+        if (payload.TryGetProperty("message", out var message))
+        {
+            var value = message.ValueKind == JsonValueKind.Object && message.TryGetProperty("content", out var nested)
+                ? nested
+                : message;
+            var text = ExtractContentText(value);
+            if (text.Length > 0)
+                return text;
+        }
+
+        if (payload.TryGetProperty("content", out var content))
+            return ExtractContentText(content);
+        return "";
+    }
+
+    private static string ExtractContentText(JsonElement content)
+    {
+        if (content.ValueKind == JsonValueKind.String)
+            return Clean(content.GetString());
+
+        if (content.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var part in content.EnumerateArray().Reverse())
+            {
+                if (part.ValueKind != JsonValueKind.Object)
+                    continue;
+                if (part.TryGetProperty("text", out var text))
+                {
+                    var value = Clean(text.GetString());
+                    if (value.Length > 0)
+                        return value;
+                }
+            }
+        }
+
+        return "";
+    }
+
+    private static ClaudeToolAction? FindClaudeToolAction(JsonElement content)
+    {
+        if (content.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (var part in content.EnumerateArray().Reverse())
+        {
+            if (part.ValueKind != JsonValueKind.Object
+                || !part.TryGetProperty("type", out var type)
+                || type.GetString() != "tool_use")
+            {
+                continue;
+            }
+
+            var name = part.TryGetProperty("name", out var nameNode) ? nameNode.GetString() : null;
+            if (string.IsNullOrWhiteSpace(name))
+                continue;
+
+            var input = part.TryGetProperty("input", out var inputNode) ? inputNode.ToString() : "";
+            bool waiting = name.Equals("AskUserQuestion", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("ExitPlanMode", StringComparison.OrdinalIgnoreCase)
+                || name.Contains("approval", StringComparison.OrdinalIgnoreCase);
+            return new ClaudeToolAction(waiting ? "Waiting for input" : DescribeAction(name, input), waiting);
+        }
+
+        return null;
     }
 
     private static string ExtractSummary(JsonElement value)
@@ -252,13 +394,21 @@ internal sealed class AgentActivityScanner
     private static bool IsAction(string? name)
         => !string.IsNullOrWhiteSpace(name) && name is not "wait";
 
-    private static string DescribeAction(string name, JsonElement payload)
+    private static string DescribeAction(string name, string? rawDetails)
     {
-        var details = payload.TryGetProperty("arguments", out var arguments) ? arguments.GetString()
-            : payload.TryGetProperty("input", out var input) ? input.GetString() : "";
-        details ??= "";
+        var details = rawDetails ?? "";
         if (name.Equals("apply_patch", StringComparison.OrdinalIgnoreCase) || details.Contains("apply_patch", StringComparison.OrdinalIgnoreCase))
             return "Edited code";
+        if (name is "Write" or "Edit" or "MultiEdit" or "NotebookEdit")
+            return "Edited code";
+        if (name is "Read" or "Glob" or "Grep" or "LS")
+            return "Inspected files";
+        if (name is "Task" or "Agent")
+            return "Running subagent";
+        if (name is "WebFetch" or "WebSearch")
+            return "Fetching information";
+        if (name is "TodoWrite")
+            return "Updating plan";
         if (details.Contains("Get-Content", StringComparison.OrdinalIgnoreCase))
             return "Ran Get-Content";
         if (details.Contains("rg ", StringComparison.OrdinalIgnoreCase) || details.Contains("rg -", StringComparison.OrdinalIgnoreCase))
@@ -267,9 +417,78 @@ internal sealed class AgentActivityScanner
             return "Built the app";
         if (details.Contains("dotnet test", StringComparison.OrdinalIgnoreCase))
             return "Ran tests";
-        return name.Equals("shell_command", StringComparison.OrdinalIgnoreCase) || name.Equals("exec", StringComparison.OrdinalIgnoreCase)
+        return name.Equals("shell_command", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("exec", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("Bash", StringComparison.OrdinalIgnoreCase)
             ? "Running command"
             : $"Running {name}";
+    }
+
+    private static string GetPayloadDetails(JsonElement payload)
+    {
+        if (payload.TryGetProperty("arguments", out var arguments))
+            return JsonText(arguments);
+        if (payload.TryGetProperty("input", out var input))
+            return JsonText(input);
+        return "";
+    }
+
+    private static string JsonText(JsonElement value)
+        => value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : value.ToString();
+
+    private static string FirstString(JsonElement value, params string[] names)
+    {
+        foreach (var name in names)
+            if (value.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String)
+                return property.GetString() ?? "";
+        return "";
+    }
+
+    private static string? SummarizeTitle(string? prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt))
+            return null;
+
+        var firstLine = prompt
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => line.Trim().TrimStart('-', '*', '#').Trim())
+            .FirstOrDefault(line => line.Length > 0);
+        var cleaned = Clean(firstLine);
+        return cleaned.Length == 0 ? null : Trim(cleaned, 72);
+    }
+
+    private static ClaudeSessionContext ReadClaudeSessionContext(string path, string threadId)
+    {
+        try
+        {
+            var file = new FileInfo(path);
+            var directory = file.Directory;
+            DirectoryInfo? project = directory;
+            string? parent = null;
+
+            if (directory?.Name.Equals("subagents", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                var sessionDirectory = directory.Parent;
+                parent = sessionDirectory is null ? null : Path.GetFileNameWithoutExtension(sessionDirectory.Name);
+                project = sessionDirectory?.Parent;
+            }
+
+            var id = string.IsNullOrWhiteSpace(threadId)
+                ? Path.GetFileNameWithoutExtension(file.Name)
+                : threadId;
+            var projectName = project?.Name;
+            if (!string.IsNullOrWhiteSpace(projectName))
+            {
+                var parts = projectName.Split('-', StringSplitOptions.RemoveEmptyEntries);
+                projectName = parts.Length == 0 ? projectName : parts[^1];
+            }
+
+            return new ClaudeSessionContext(id, parent, projectName);
+        }
+        catch (ArgumentException)
+        {
+            return new ClaudeSessionContext(null, null, null);
+        }
     }
 
     private static bool IsConversationEvent(JsonElement root, ProviderId provider)
@@ -394,27 +613,52 @@ internal sealed class AgentActivityScanner
         return merged;
     }
 
-    private static IReadOnlyList<AgentActivityItem> GroupCodex(IReadOnlyList<AgentActivityItem> items)
+    private static IReadOnlyList<AgentActivityItem> GroupSessions(IReadOnlyList<AgentActivityItem> items)
     {
-        var codex = items.Where(item => item.Provider == ProviderId.Codex).ToArray();
-        if (codex.Length < 2) return items;
         var groups = new List<AgentActivityItem>();
         var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var root in codex.Where(item => string.IsNullOrWhiteSpace(item.ParentThreadId)))
+        foreach (var root in items.Where(item => string.IsNullOrWhiteSpace(item.ParentThreadId)))
         {
-            var children = codex.Where(item => item.ParentThreadId == root.ThreadId).ToArray();
+            if (string.IsNullOrWhiteSpace(root.ThreadId))
+            {
+                groups.Add(root);
+                used.Add(root.Id);
+                continue;
+            }
+
+            var children = items
+                .Where(item => item.Provider == root.Provider && item.ParentThreadId == root.ThreadId)
+                .ToArray();
             used.Add(root.Id);
             foreach (var child in children) used.Add(child.Id);
-            groups.Add(root with { SubagentCount = children.Length });
+            var grouped = root with { SubagentCount = children.Length };
+            var liveMember = children
+                .Append(root)
+                .Where(item => item.IsLive)
+                .OrderByDescending(item => item.UpdatedAt)
+                .FirstOrDefault();
+            if (liveMember is { } member && member.Id != root.Id)
+            {
+                grouped = grouped with
+                {
+                    Status = member.Status,
+                    Step = member.Step,
+                    UpdatedAt = member.UpdatedAt,
+                    Model = string.IsNullOrWhiteSpace(root.Model) ? member.Model : root.Model,
+                    Detail = string.IsNullOrWhiteSpace(root.Detail) ? member.Detail : root.Detail,
+                };
+            }
+            groups.Add(grouped);
         }
-        groups.AddRange(codex.Where(item => !used.Contains(item.Id)));
-        groups.AddRange(items.Where(item => item.Provider != ProviderId.Codex));
+        groups.AddRange(items.Where(item => !used.Contains(item.Id)));
         return groups;
     }
 
-    private enum TranscriptState { Unknown, Action, Finished }
+    internal enum TranscriptState { Unknown, Action, Waiting, Finished }
 
-    private sealed record TailInfo(string Step, string Summary, string Model, string ThreadId,
-        string ParentThreadId, DateTimeOffset? StartedAt, DateTimeOffset? LastActivity, TranscriptState State);
+    internal sealed record TailInfo(string Step, string Summary, string Model, string ThreadId,
+        string ParentThreadId, string Prompt, DateTimeOffset? StartedAt, DateTimeOffset? LastActivity, TranscriptState State);
+    private sealed record ClaudeToolAction(string Step, bool Waiting);
+    private sealed record ClaudeSessionContext(string? ThreadId, string? ParentThreadId, string? ProjectTitle);
     private readonly record struct SessionMetadata(string? ThreadId, string? ParentThreadId, string? Host);
 }

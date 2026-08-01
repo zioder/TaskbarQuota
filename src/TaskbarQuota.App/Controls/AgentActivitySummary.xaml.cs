@@ -52,9 +52,10 @@ public sealed partial class AgentActivitySummary : UserControl
         var providerName = ProviderDisplayName(item.Provider);
         ProviderIcon.ProviderId = item.Provider;
         ProviderIcon.Initial = providerName.Length > 0 ? providerName[0].ToString() : "?";
-        ProviderIcon.ForegroundBrush = AgentActivityVisuals.StatusBrush(
+        var statusBrush = AgentActivityVisuals.StatusBrush(
             item.Status,
             ProviderIcon.ForegroundBrush ?? (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"]);
+        ProviderIcon.ForegroundBrush = statusBrush;
         bool hasMultipleProviders = items.Select(candidate => candidate.Provider).Distinct().Count() > 1;
         ProviderIcon.Visibility = hasMultipleProviders || item.Provider != activeProvider
             ? Visibility.Visible
@@ -68,7 +69,7 @@ public sealed partial class AgentActivitySummary : UserControl
         var state = allDone ? $"{completed} / {total} completed" : SummaryText(item);
         StepText.Text = showProgress && !allDone ? $"{state} · {completed} / {total} completed" : state;
         ToolTipService.SetToolTip(this, $"{ActivityTitle(item)}: {item.Step}");
-        ApplyForeground();
+        ApplyForeground(statusBrush);
     }
 
     private void AgentActivitySummary_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
@@ -170,11 +171,13 @@ public sealed partial class AgentActivitySummary : UserControl
             ? $"{ProviderDisplayName(item.Provider)} through {item.Host}"
             : item.Title;
 
-    private void ApplyForeground()
+    private void ApplyForeground(Brush? statusBrush = null)
     {
         bool light = Interop.SystemInfos.IsSystemLightThemeUsed() == true;
         var brush = new SolidColorBrush(light ? Color.FromArgb(255, 28, 28, 28) : Colors.White);
         StepText.Foreground = brush;
         TitleText.Foreground = brush;
+        if (statusBrush is not null)
+            StepText.Foreground = statusBrush;
     }
 }

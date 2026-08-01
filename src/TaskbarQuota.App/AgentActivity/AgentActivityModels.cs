@@ -9,6 +9,7 @@ public enum AgentActivityStatus
 {
     Working,
     Waiting,
+    Idle,
     Completed,
     Failed,
 }
@@ -28,11 +29,12 @@ public sealed record AgentActivityItem(
     string? ParentThreadId = null,
     string? Host = null)
 {
-    public bool IsLive => Status is AgentActivityStatus.Working or AgentActivityStatus.Waiting;
+    public bool IsLive => Status is AgentActivityStatus.Working or AgentActivityStatus.Waiting or AgentActivityStatus.Idle;
     public string StatusText => Status switch
     {
         AgentActivityStatus.Working => "Working",
         AgentActivityStatus.Waiting => "Waiting",
+        AgentActivityStatus.Idle => "Idle",
         AgentActivityStatus.Completed => "Completed",
         AgentActivityStatus.Failed => "Failed",
         _ => "Unknown",
