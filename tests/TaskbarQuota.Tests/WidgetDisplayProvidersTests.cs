@@ -16,7 +16,6 @@ public class WidgetDisplayProvidersTests
         IReadOnlyList<ProviderId> pinned,
         IReadOnlyList<ProviderId>? recent = null,
         bool present = true,
-        ProviderId? fallback = null,
         Func<ProviderId, bool>? isVisible = null,
         Func<ProviderId, bool>? isAvailable = null)
         => UsageCoordinator.ComputeWidgetDisplayProviders(
@@ -26,8 +25,7 @@ public class WidgetDisplayProvidersTests
             Enum.GetValues<ProviderId>(),
             p => pinned.Contains(p),
             isVisible ?? (_ => true),
-            isAvailable ?? (_ => true),
-            fallback);
+            isAvailable ?? (_ => true));
 
     [Fact]
     public void ActiveProviderLeadsAndPinnedTrailInRecencyOrder()
@@ -64,14 +62,14 @@ public class WidgetDisplayProvidersTests
     }
 
     [Fact]
-    public void WithoutPinsFallsBackToTheSingleDisplayProvider()
+    public void WithoutActiveProviderOrPins_IsEmptyEvenWhenAToolIsPresent()
     {
         var result = Compute(
             active: null,
             pinned: Array.Empty<ProviderId>(),
-            fallback: ProviderId.Codex);
+            present: true);
 
-        Assert.Equal(new[] { ProviderId.Codex }, result);
+        Assert.Empty(result);
     }
 
     [Fact]
@@ -118,8 +116,7 @@ public class WidgetDisplayProvidersTests
         var result = Compute(
             active: null,
             pinned: Array.Empty<ProviderId>(),
-            present: false,
-            fallback: ProviderId.Codex);
+            present: false);
 
         Assert.Empty(result);
     }
