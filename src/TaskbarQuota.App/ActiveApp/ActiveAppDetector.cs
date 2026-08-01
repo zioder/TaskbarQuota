@@ -406,9 +406,9 @@ namespace TaskbarQuota.ActiveApp
 
             // Browser: use the cached URL only — never issue a new UIA address-bar scan here.
             if (BrowserActiveTabDetector.IsBrowserProcessName(procName))
-                return _browserTabs.DetectProvider(hwnd, procName, windowTitle: null);
-                // DetectProvider skips UIA when the cache is fresh (TTL=350ms); returns null on a cold cache,
-                // which correctly starts the grace timer — the tick will re-read and potentially cancel it.
+                return _browserTabs.DetectCachedProvider(hwnd, procName);
+                // A cold cache correctly starts the grace timer — the tick will re-read and potentially
+                // cancel it. The hook path never touches UI Automation or the detector's mutable state.
 
             // Terminal or anything else: unknown without a WMI scan. Return null and let the tick decide.
             return null;
