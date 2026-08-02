@@ -57,15 +57,10 @@ public sealed partial class AgentActivitySummary : UserControl
             item.Status,
             ProviderIcon.ForegroundBrush ?? (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"]);
         ProviderIcon.ForegroundBrush = statusBrush;
-        bool showProviderMarker = items.Select(candidate => candidate.Provider).Distinct().Count() > 1
-            || item.Provider != activeProvider
-            || items.Count > 1;
-        ProviderMarker.Visibility = showProviderMarker ? Visibility.Visible : Visibility.Collapsed;
-        AgentCountBadge.Visibility = items.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
-        AgentCountText.Text = items.Count > 9 ? "9+" : items.Count.ToString();
+        ProviderIcon.Visibility = Visibility.Visible;
         var activitySummary = ActivitySummary(items);
         AgentStatusText.Text = activitySummary;
-        ToolTipService.SetToolTip(ProviderMarker,
+        ToolTipService.SetToolTip(ProviderIcon,
             $"{items.Count} agents · {activitySummary}. Use the mouse wheel to switch agents.");
         TitleText.Text = ActivityTitle(item);
         StepText.Text = SummaryText(item);

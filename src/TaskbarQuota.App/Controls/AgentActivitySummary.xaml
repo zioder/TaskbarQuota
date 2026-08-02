@@ -13,35 +13,13 @@
             <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
 
-        <Grid x:Name="ProviderMarker"
-              Grid.Column="0"
-              Width="28"
-              Height="28"
-              VerticalAlignment="Center">
-            <controls:ProviderAvatar x:Name="ProviderIcon"
-                                     Width="24"
-                                     Height="24"
-                                     VerticalAlignment="Center"
-                                     HorizontalAlignment="Center"
-                                     ForegroundBrush="{ThemeResource TextFillColorPrimaryBrush}"
-                                     AutomationProperties.Name="Activity provider"/>
-            <Border x:Name="AgentCountBadge"
-                    Width="15"
-                    Height="15"
-                    HorizontalAlignment="Right"
-                    VerticalAlignment="Top"
-                    Margin="0,-1,-2,0"
-                    Background="{ThemeResource AccentFillColorDefaultBrush}"
-                    CornerRadius="8"
-                    Visibility="Collapsed">
-                <TextBlock x:Name="AgentCountText"
-                           FontSize="9"
-                           FontWeight="SemiBold"
-                           TextAlignment="Center"
-                           VerticalAlignment="Center"
-                           Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"/>
-            </Border>
-        </Grid>
+        <controls:ProviderAvatar x:Name="ProviderIcon"
+                                 Grid.Column="0"
+                                 Width="24"
+                                 Height="24"
+                                 VerticalAlignment="Center"
+                                 ForegroundBrush="{ThemeResource TextFillColorPrimaryBrush}"
+                                 AutomationProperties.Name="Activity provider"/>
 
         <StackPanel Grid.Column="1" VerticalAlignment="Center">
             <Grid ColumnSpacing="8">
