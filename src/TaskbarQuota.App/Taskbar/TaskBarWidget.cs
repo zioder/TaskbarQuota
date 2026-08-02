@@ -522,6 +522,11 @@ namespace TaskbarQuota.Taskbar
         /// </summary>
         public void SetDisplayProviders(IReadOnlyList<ProviderId> providers, ProviderId? activeProvider)
         {
+            // A stale reconciliation callback must never bind the same provider into two slots. The
+            // coordinator normally guarantees uniqueness, but normalizing at the widget boundary keeps
+            // an out-of-order foreground update from briefly rendering duplicate quota tiles.
+            providers = providers.Distinct().Take(UsageCoordinator.MaxWidgetTiles).ToArray();
+
             // Before Initialize() there are no tiles to bind. Hold the set instead of dropping it — the
             // manager re-sends only on a change, so a dropped first set never came back and the widget
             // stayed empty forever.

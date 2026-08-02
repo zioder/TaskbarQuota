@@ -48,6 +48,12 @@ namespace TaskbarQuota
         private const int SynaraStableMaxAttempts = 4;
         private static readonly TimeSpan SynaraStableDelay = TimeSpan.FromMilliseconds(8);
         private ProviderId? _lastActive;
+        // A foreground process can briefly report a sibling provider while a GUI window is being raised.
+        // Do not publish a one-sample provider switch: that makes the taskbar animate a foreign quota tile
+        // in and back out even though the user never left the current app.
+        private ProviderId? _pendingDetectedProvider;
+        private int _pendingDetectedProviderSamples;
+        private const int RequiredProviderSwitchSamples = 2;
         private ProviderId? _lastLogged;
         private ProviderId? _synaraHoldProvider;
         private DateTime _synaraHoldUntilUtc = DateTime.MinValue;
@@ -493,6 +499,8 @@ namespace TaskbarQuota
                 HoldSynaraProvider(provider);
                 var previous = _lastActive;
                 var providerChanged = previous != provider;
+                if (providerChanged)
+                    ClearPendingDetectedProvider();
                 var hostChanged = !SameSynaraSelection(previousHost, host);
                 _lastActive = provider;
                 if (providerChanged)
@@ -660,6 +668,8 @@ namespace TaskbarQuota
                 }
 
                 var previous = _lastActive;
+                if (previous != target)
+                    ClearPendingDetectedProvider();
                 _lastActive = target;
                 _activeProviderSource = foregroundSource;
                 PromoteRecentProvider(target);
@@ -800,6 +810,8 @@ namespace TaskbarQuota
                     return;
 
                 var previous = _lastActive;
+                if (previous != target)
+                    ClearPendingDetectedProvider();
                 _lastActive = target;
                 _activeProviderSource = _detector.ActiveSource;
                 PromoteRecentProvider(target);
@@ -1026,6 +1038,8 @@ namespace TaskbarQuota
                 // Foreground bookkeeping runs on every tick, including the ones that end in the no-tool
                 // early-out below, so the hide grace period keeps counting while nothing is detected.
                 UpdateProviderForeground(detected is not null);
+                if (detected is null)
+                    ClearPendingDetectedProvider();
 
                 var hasDetectedTool = detected != null || ShouldAssumeToolStillRunning() || ProbeToolPresence();
                 if (!hasDetectedTool)
@@ -1036,6 +1050,7 @@ namespace TaskbarQuota
                         _lastActive = null;
                         _lastLogged = null;
                         _activeProviderSource = ProviderSource.Unknown;
+                        ClearPendingDetectedProvider();
                         ActiveSynaraHost = null;
                         ClearSynaraHold(force: true);
                         ActiveToolPresenceChanged?.Invoke(false);
@@ -1044,7 +1059,8 @@ namespace TaskbarQuota
                 }
 
                 ProviderId? previousActive = _lastActive;
-                if (detected is ProviderId p)
+                if (detected is ProviderId p
+                    && (previousActive == p || AcceptDetectedProvider(p)))
                 {
                     _lastActive = p;
                     _activeProviderSource = detectedSource;
@@ -1142,6 +1158,29 @@ namespace TaskbarQuota
 
         private ProviderSource SourceFor(ProviderId provider)
             => _lastActive == provider ? _activeProviderSource : ProviderSource.Unknown;
+
+        private bool AcceptDetectedProvider(ProviderId provider)
+        {
+            if (_pendingDetectedProvider != provider)
+            {
+                _pendingDetectedProvider = provider;
+                _pendingDetectedProviderSamples = 1;
+                return false;
+            }
+
+            _pendingDetectedProviderSamples++;
+            if (_pendingDetectedProviderSamples < RequiredProviderSwitchSamples)
+                return false;
+
+            ClearPendingDetectedProvider();
+            return true;
+        }
+
+        private void ClearPendingDetectedProvider()
+        {
+            _pendingDetectedProvider = null;
+            _pendingDetectedProviderSamples = 0;
+        }
 
         private static ProviderSource SynaraSource(HostApp host)
             => new(
