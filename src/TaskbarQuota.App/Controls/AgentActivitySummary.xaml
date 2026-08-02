@@ -48,11 +48,20 @@
                                  ForegroundBrush="{ThemeResource TextFillColorPrimaryBrush}"
                                  AutomationProperties.Name="Activity provider"/>
 
-        <StackPanel Grid.Column="2" VerticalAlignment="Center">
-            <TextBlock x:Name="TitleText" FontSize="12" FontWeight="SemiBold"
+        <!-- A StackPanel measures its children at their full desired width, which
+             prevents TextTrimming from engaging for long task/tool descriptions. -->
+        <Grid Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Stretch"
+              MinWidth="0" RowSpacing="0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <TextBlock x:Name="TitleText" Grid.Row="0" HorizontalAlignment="Stretch"
+                       FontSize="12" FontWeight="SemiBold" TextWrapping="NoWrap"
                        TextTrimming="CharacterEllipsis"/>
-            <TextBlock x:Name="StepText" FontSize="11" Opacity="0.72"
+            <TextBlock x:Name="StepText" Grid.Row="1" HorizontalAlignment="Stretch"
+                       FontSize="11" Opacity="0.72" TextWrapping="NoWrap"
                        TextTrimming="CharacterEllipsis"/>
-        </StackPanel>
+        </Grid>
     </Grid>
 </UserControl>
