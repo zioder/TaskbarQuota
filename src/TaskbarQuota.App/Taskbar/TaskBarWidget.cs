@@ -511,7 +511,7 @@ namespace TaskbarQuota.Taskbar
             activitySnapshot = snapshot;
             activitySummary?.Apply(snapshot, activeTileProvider);
             foreach (var tile in tiles)
-                tile?.SetAgentActivity(activitySummary?.FollowedItem ?? snapshot.Primary);
+                tile?.SetAgentActivity(snapshot);
             RecomputeLayout(forceReposition: true);
         }
 

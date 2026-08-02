@@ -299,14 +299,30 @@ namespace TaskbarQuota.Controls
                     : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}");
         }
 
-        /// <summary>Colors the provider glyph to match its latest independently-discovered agent task.</summary>
-        public void SetAgentActivity(AgentActivityItem? activity)
+        /// <summary>Colors this provider glyph from its own independently-discovered agent tasks.</summary>
+        public void SetAgentActivity(AgentActivitySnapshot snapshot)
         {
-            _agentStatus = activity is not null && activity.Provider == _lastAppliedProvider
-                ? activity.Status
+            var activity = _lastAppliedProvider is { } provider
+                ? snapshot.TrackedItems
+                    .Where(item => item.Provider == provider)
+                    .OrderByDescending(item => item.IsLive)
+                    .ThenByDescending(item => ActivityStatusPriority(item.Status))
+                    .ThenByDescending(item => item.UpdatedAt)
+                    .FirstOrDefault()
                 : null;
+            _agentStatus = activity?.Status;
             UpdateBadgeFill();
         }
+
+        private static int ActivityStatusPriority(AgentActivityStatus status) => status switch
+        {
+            AgentActivityStatus.Working => 5,
+            AgentActivityStatus.Waiting => 4,
+            AgentActivityStatus.Idle => 3,
+            AgentActivityStatus.Failed => 2,
+            AgentActivityStatus.Completed => 1,
+            _ => 0,
+        };
 
         private void UpdateBadgeFill()
             => BadgeGlyph.Fill = AgentActivityVisuals.StatusBrush(_agentStatus, Foreground);
