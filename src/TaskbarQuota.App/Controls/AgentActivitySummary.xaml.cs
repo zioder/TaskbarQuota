@@ -57,8 +57,7 @@ public sealed partial class AgentActivitySummary : UserControl
             item.Status,
             ProviderIcon.ForegroundBrush ?? (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"]);
         ProviderIcon.ForegroundBrush = statusBrush;
-        bool showProviderMarker = items.Select(candidate => candidate.Provider).Distinct().Count() > 1
-            || item.Provider != activeProvider;
+        bool showProviderMarker = item.Provider != activeProvider;
         ProviderIcon.Visibility = showProviderMarker ? Visibility.Visible : Visibility.Collapsed;
         var activitySummary = ActivitySummary(items);
         AgentStatusText.Text = activitySummary;
