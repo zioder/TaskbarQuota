@@ -253,8 +253,9 @@ namespace TaskbarQuota
                 var metadata = string.IsNullOrWhiteSpace(item.Model)
                     ? $"{ActivityProviderLabel(item)} · {item.StatusText}"
                     : $"{ActivityProviderLabel(item)} · {item.Model} · {item.StatusText}";
-                text.Children.Add(new TextBlock { Text = metadata, Foreground = statusBrush, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
-                text.Children.Add(new TextBlock { Text = item.Step, Foreground = statusBrush, TextTrimming = TextTrimming.CharacterEllipsis, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
+                var mutedTextBrush = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
+                text.Children.Add(new TextBlock { Text = metadata, Foreground = mutedTextBrush, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
+                text.Children.Add(new TextBlock { Text = item.Step, Foreground = mutedTextBrush, TextTrimming = TextTrimming.CharacterEllipsis, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
                 if (item.SubagentCount > 0)
                     text.Children.Add(new TextBlock { Text = $"▸ {item.SubagentCount} subagents", Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
                 Grid.SetColumn(text, 1);

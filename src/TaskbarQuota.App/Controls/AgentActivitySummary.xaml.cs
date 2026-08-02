@@ -69,7 +69,7 @@ public sealed partial class AgentActivitySummary : UserControl
         var state = allDone ? $"{completed} / {total} completed" : SummaryText(item);
         StepText.Text = showProgress && !allDone ? $"{state} · {completed} / {total} completed" : state;
         ToolTipService.SetToolTip(this, $"{ActivityTitle(item)}: {item.Step}");
-        ApplyForeground(statusBrush);
+        ApplyForeground();
     }
 
     private void AgentActivitySummary_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
@@ -171,13 +171,11 @@ public sealed partial class AgentActivitySummary : UserControl
             ? $"{ProviderDisplayName(item.Provider)} through {item.Host}"
             : item.Title;
 
-    private void ApplyForeground(Brush? statusBrush = null)
+    private void ApplyForeground()
     {
         bool light = Interop.SystemInfos.IsSystemLightThemeUsed() == true;
         var brush = new SolidColorBrush(light ? Color.FromArgb(255, 28, 28, 28) : Colors.White);
         StepText.Foreground = brush;
         TitleText.Foreground = brush;
-        if (statusBrush is not null)
-            StepText.Foreground = statusBrush;
     }
 }
