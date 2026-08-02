@@ -36,7 +36,7 @@ public sealed partial class AgentActivitySummary : UserControl
         _snapshot = snapshot;
         _activeProvider = activeProvider;
         var items = snapshot.TrackedItems;
-        var item = items.FirstOrDefault(candidate => candidate.Id == _followedId && candidate.IsLive)
+        var item = items.FirstOrDefault(candidate => candidate.Id == _followedId)
             ?? items.FirstOrDefault(candidate => candidate.IsLive)
             ?? items.OrderByDescending(candidate => candidate.UpdatedAt).FirstOrDefault();
         if (item is null)
@@ -61,7 +61,7 @@ public sealed partial class AgentActivitySummary : UserControl
         ProviderIcon.Visibility = showProviderMarker ? Visibility.Visible : Visibility.Collapsed;
         var activitySummary = ActivitySummary(items);
         AgentStatusText.Text = activitySummary;
-        AgentStatusText.Visibility = items.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
+        UpdateNavigation(items, item.Id);
         ToolTipService.SetToolTip(ProviderIcon,
             $"{items.Count} agents · {activitySummary}. Use the mouse wheel to switch agents.");
         TitleText.Text = ActivityTitle(item);
@@ -72,34 +72,60 @@ public sealed partial class AgentActivitySummary : UserControl
 
     private void AgentActivitySummary_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
-        var liveItems = _snapshot.TrackedItems
-            .Where(item => item.IsLive)
-            .OrderBy(item => item.StartedAt)
-            .ThenBy(item => item.Id, StringComparer.Ordinal)
-            .ToList();
-        if (liveItems.Count < 2)
-            return;
-
         int delta = e.GetCurrentPoint(this).Properties.MouseWheelDelta;
         if (delta == 0)
             return;
 
-        int currentIndex = liveItems.FindIndex(item => item.Id == _followedId);
-        if (currentIndex < 0)
-            currentIndex = 0;
-
         // Wheel-up moves toward the earlier agent; wheel-down moves toward the later agent.
         int direction = delta > 0 ? -1 : 1;
-        int nextIndex = (currentIndex + direction + liveItems.Count) % liveItems.Count;
-        var next = liveItems[nextIndex];
-        if (next.Id == _followedId)
-            return;
+        if (MoveSelection(direction))
+            e.Handled = true;
+    }
 
-        _followedId = next.Id;
+    private void PreviousButton_Click(object sender, RoutedEventArgs e) => MoveSelection(-1);
+
+    private void NextButton_Click(object sender, RoutedEventArgs e) => MoveSelection(1);
+
+    private void NavigationButton_PointerPressed(object sender, PointerRoutedEventArgs e)
+        => e.Handled = true;
+
+    private bool MoveSelection(int direction)
+    {
+        var items = NavigationItems(_snapshot.TrackedItems);
+        int currentIndex = items.FindIndex(item => item.Id == _followedId);
+        if (currentIndex < 0)
+            return false;
+
+        int nextIndex = currentIndex + direction;
+        if (nextIndex < 0 || nextIndex >= items.Count)
+            return false;
+
+        _followedId = items[nextIndex].Id;
         Apply(_snapshot, _activeProvider);
         AnimateSelection(direction);
-        e.Handled = true;
+        return true;
     }
+
+    private void UpdateNavigation(IReadOnlyList<AgentActivityItem> items, string selectedId)
+    {
+        var navigationItems = NavigationItems(items);
+        int index = navigationItems.FindIndex(item => item.Id == selectedId);
+        bool hasSelection = index >= 0;
+        AgentPositionText.Text = hasSelection ? $"{index + 1}/{navigationItems.Count}" : "—";
+        AgentPositionText.Visibility = navigationItems.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        PreviousButton.IsEnabled = hasSelection && index > 0;
+        NextButton.IsEnabled = hasSelection && index < navigationItems.Count - 1;
+        PreviousButton.Opacity = PreviousButton.IsEnabled ? 1 : 0.35;
+        NextButton.Opacity = NextButton.IsEnabled ? 1 : 0.35;
+    }
+
+    private static List<AgentActivityItem> NavigationItems(IReadOnlyList<AgentActivityItem> items)
+        => items
+            .OrderByDescending(item => item.IsLive)
+            .ThenBy(item => item.StartedAt)
+            .ThenBy(item => item.Id, StringComparer.Ordinal)
+            .ToList();
 
     private void AnimateSelection(int direction)
     {
