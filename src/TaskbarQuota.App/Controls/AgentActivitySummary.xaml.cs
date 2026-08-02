@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
@@ -56,18 +57,18 @@ public sealed partial class AgentActivitySummary : UserControl
             item.Status,
             ProviderIcon.ForegroundBrush ?? (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"]);
         ProviderIcon.ForegroundBrush = statusBrush;
-        bool hasMultipleProviders = items.Select(candidate => candidate.Provider).Distinct().Count() > 1;
-        ProviderIcon.Visibility = hasMultipleProviders || item.Provider != activeProvider
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-        ToolTipService.SetToolTip(ProviderIcon, $"Agent activity from {providerName}");
-        int total = items.Count;
-        int completed = items.Count(candidate => candidate.Status == AgentActivityStatus.Completed);
-        bool showProgress = total > 1;
-        bool allDone = showProgress && completed == total;
-        TitleText.Text = allDone ? "All agent tasks" : ActivityTitle(item);
-        var state = allDone ? $"{completed} / {total} completed" : SummaryText(item);
-        StepText.Text = showProgress && !allDone ? $"{state} · {completed} / {total} completed" : state;
+        bool showProviderMarker = items.Select(candidate => candidate.Provider).Distinct().Count() > 1
+            || item.Provider != activeProvider
+            || items.Count > 1;
+        ProviderMarker.Visibility = showProviderMarker ? Visibility.Visible : Visibility.Collapsed;
+        AgentCountBadge.Visibility = items.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
+        AgentCountText.Text = items.Count > 9 ? "9+" : items.Count.ToString();
+        var activitySummary = ActivitySummary(items);
+        AgentStatusText.Text = activitySummary;
+        ToolTipService.SetToolTip(ProviderMarker,
+            $"{items.Count} agents · {activitySummary}. Use the mouse wheel to switch agents.");
+        TitleText.Text = ActivityTitle(item);
+        StepText.Text = SummaryText(item);
         ToolTipService.SetToolTip(this, $"{ActivityTitle(item)}: {item.Step}");
         ApplyForeground();
     }
@@ -144,6 +145,24 @@ public sealed partial class AgentActivitySummary : UserControl
         AgentActivityStatus.Failed => "Task needs attention",
         _ => Condense(item.Step),
     };
+
+    private static string ActivitySummary(IReadOnlyList<AgentActivityItem> items)
+    {
+        int working = items.Count(item => item.Status == AgentActivityStatus.Working);
+        int waiting = items.Count(item => item.Status == AgentActivityStatus.Waiting);
+        int idle = items.Count(item => item.Status == AgentActivityStatus.Idle);
+        int completed = items.Count(item => item.Status == AgentActivityStatus.Completed);
+        int failed = items.Count(item => item.Status == AgentActivityStatus.Failed);
+        var parts = new[]
+        {
+            working > 0 ? $"{working} working" : "",
+            waiting > 0 ? $"{waiting} waiting" : "",
+            idle > 0 ? $"{idle} idle" : "",
+            completed > 0 ? $"{completed} done" : "",
+            failed > 0 ? $"{failed} failed" : "",
+        }.Where(part => part.Length > 0);
+        return string.Join(" · ", parts);
+    }
 
     private static string Condense(string text)
     {

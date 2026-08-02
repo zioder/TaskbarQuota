@@ -13,17 +13,47 @@
             <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
 
-        <controls:ProviderAvatar x:Name="ProviderIcon"
-                                 Grid.Column="0"
-                                 Width="24"
-                                 Height="24"
-                                 VerticalAlignment="Center"
-                                 ForegroundBrush="{ThemeResource TextFillColorPrimaryBrush}"
-                                 AutomationProperties.Name="Activity provider"/>
+        <Grid x:Name="ProviderMarker"
+              Grid.Column="0"
+              Width="28"
+              Height="28"
+              VerticalAlignment="Center">
+            <controls:ProviderAvatar x:Name="ProviderIcon"
+                                     Width="24"
+                                     Height="24"
+                                     VerticalAlignment="Center"
+                                     HorizontalAlignment="Center"
+                                     ForegroundBrush="{ThemeResource TextFillColorPrimaryBrush}"
+                                     AutomationProperties.Name="Activity provider"/>
+            <Border x:Name="AgentCountBadge"
+                    Width="15"
+                    Height="15"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    Margin="0,-1,-2,0"
+                    Background="{ThemeResource AccentFillColorDefaultBrush}"
+                    CornerRadius="8"
+                    Visibility="Collapsed">
+                <TextBlock x:Name="AgentCountText"
+                           FontSize="9"
+                           FontWeight="SemiBold"
+                           TextAlignment="Center"
+                           VerticalAlignment="Center"
+                           Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"/>
+            </Border>
+        </Grid>
 
         <StackPanel Grid.Column="1" VerticalAlignment="Center">
-            <TextBlock x:Name="TitleText" FontSize="12" FontWeight="SemiBold"
-                       TextTrimming="CharacterEllipsis"/>
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="TitleText" Grid.Column="0" FontSize="12" FontWeight="SemiBold"
+                           TextTrimming="CharacterEllipsis"/>
+                <TextBlock x:Name="AgentStatusText" Grid.Column="1" FontSize="10" Opacity="0.72"
+                           TextTrimming="CharacterEllipsis" HorizontalAlignment="Right"/>
+            </Grid>
             <TextBlock x:Name="StepText" FontSize="11" Opacity="0.72"
                        TextTrimming="CharacterEllipsis"/>
         </StackPanel>
