@@ -390,7 +390,7 @@ internal sealed class AgentActivityScanner
                 : info.State == TranscriptState.Waiting
                     ? AgentActivityStatus.Waiting
                     : fresh ? AgentActivityStatus.Working : AgentActivityStatus.Idle;
-            var title = FirstNonEmpty(SummarizeTitle(info.Prompt) ?? "", "Antigravity");
+            var title = FirstNonEmpty(info.ConversationTitle, SummarizeTitle(info.Prompt) ?? "", "Antigravity");
             var step = status == AgentActivityStatus.Completed
                 ? "Completed"
                 : status == AgentActivityStatus.Failed
@@ -459,6 +459,7 @@ internal sealed class AgentActivityScanner
         var prompt = "";
         var step = "";
         var summary = "";
+        var conversationTitle = "";
         var model = "";
         var state = TranscriptState.Unknown;
         var hasConversation = false;
@@ -498,6 +499,13 @@ internal sealed class AgentActivityScanner
 
                 switch (type.ToUpperInvariant())
                 {
+                    case "CHECKPOINT":
+                        var checkpoint = FirstString(root, "content");
+                        var checkpointTitle = ExtractAntigravityConversationTitle(checkpoint);
+                        if (checkpointTitle.Length > 0)
+                            conversationTitle = checkpointTitle;
+                        break;
+
                     case "USER_INPUT":
                         var content = root.TryGetProperty("content", out var contentNode)
                             ? ExtractAntigravityGuiContent(contentNode)
@@ -595,8 +603,19 @@ internal sealed class AgentActivityScanner
             catch (JsonException) { }
         }
 
-        return new AntigravityGuiTranscriptInfo(prompt, step, summary, model, started, activity,
+        return new AntigravityGuiTranscriptInfo(prompt, step, summary, conversationTitle, model, started, activity,
             state, hasConversation, subagents);
+    }
+
+    private static string ExtractAntigravityConversationTitle(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+            return "";
+
+        var match = Regex.Match(content,
+            @"^\s*#\s*USER\s+OBJECTIVE\s*:\s*(?<title>[^\r\n]+)",
+            RegexOptions.IgnoreCase | RegexOptions.Multiline);
+        return match.Success ? Clean(match.Groups["title"].Value) : "";
     }
 
     internal static AgentActivityScanner.TranscriptState ParseAntigravityGuiStateForTesting(string text)
@@ -2083,7 +2102,7 @@ internal sealed class AgentActivityScanner
             { Payload, RenderInfo, TaskDetails, Metadata, ErrorDetails, Permissions };
     }
     private sealed record AntigravityGuiTranscriptInfo(
-        string Prompt, string Step, string Summary, string Model,
+        string Prompt, string Step, string Summary, string ConversationTitle, string Model,
         DateTimeOffset? StartedAt, DateTimeOffset? LastActivity,
         TranscriptState State, bool HasConversation, int SubagentCount);
 }

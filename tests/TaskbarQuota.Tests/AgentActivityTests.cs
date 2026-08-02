@@ -311,12 +311,13 @@ public sealed class AgentActivityTests
                 {"step_index":0,"source":"user","type":"USER_INPUT","status":"SUCCESS","created_at":"{{{now}}}","content":"Refactor Antigravity GUI activity tracking"}
                 {"step_index":1,"source":"agent","type":"PLANNER_RESPONSE","status":"SUCCESS","created_at":"{{{now}}}","tool_calls":[{"name":"grep_search","args":{"Query":"activation","toolAction":"Searching for activation","toolSummary":"Grep for activation"}}]}
                 {"step_index":2,"source":"tool","type":"GREP_SEARCH","status":"SUCCESS","created_at":"{{{now}}}","content":"matches"}
+                {"step_index":3,"source":"system","type":"CHECKPOINT","status":"DONE","created_at":"{{{now}}}","content":"# USER Objective:\nSystem Connectivity Test\n"}
                 """);
 
             var item = Assert.Single(AgentActivityScanner.ReadAntigravityGuiForTesting(path));
 
             Assert.Equal(ProviderId.Antigravity, item.Provider);
-            Assert.Equal("Refactor Antigravity GUI activity tracking", item.Title);
+            Assert.Equal("System Connectivity Test", item.Title);
             Assert.Equal("Refactor Antigravity GUI activity tracking", item.Detail);
             Assert.Equal("Inspected files", item.Step);
             Assert.Equal(AgentActivityStatus.Working, item.Status);
