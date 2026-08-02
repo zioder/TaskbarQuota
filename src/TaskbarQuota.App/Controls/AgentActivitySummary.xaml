@@ -9,66 +9,50 @@
             <CompositeTransform x:Name="RootTransform" />
         </Grid.RenderTransform>
         <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="22"/>
             <ColumnDefinition Width="Auto"/>
             <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
 
+        <Grid x:Name="AgentNavigator" Grid.Column="0" RowSpacing="0"
+              VerticalAlignment="Center" HorizontalAlignment="Center">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="12"/>
+                <RowDefinition Height="12"/>
+                <RowDefinition Height="12"/>
+            </Grid.RowDefinitions>
+            <Button x:Name="PreviousButton" Grid.Row="0" Width="20" Height="12"
+                    Padding="0" BorderThickness="0" Background="Transparent"
+                    HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                    Click="PreviousButton_Click" PointerPressed="NavigationButton_PointerPressed"
+                    AutomationProperties.Name="Previous agent">
+                <FontIcon Glyph="&#xE70E;" FontSize="8"/>
+            </Button>
+            <TextBlock x:Name="AgentPositionText" Grid.Row="1" FontSize="9"
+                       TextAlignment="Center" HorizontalAlignment="Center"
+                       VerticalAlignment="Center"/>
+            <Button x:Name="NextButton" Grid.Row="2" Width="20" Height="12"
+                    Padding="0" BorderThickness="0" Background="Transparent"
+                    HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                    Click="NextButton_Click" PointerPressed="NavigationButton_PointerPressed"
+                    AutomationProperties.Name="Next agent">
+                <FontIcon Glyph="&#xE70D;" FontSize="8"/>
+            </Button>
+        </Grid>
+
         <controls:ProviderAvatar x:Name="ProviderIcon"
-                                 Grid.Column="0"
+                                 Grid.Column="1"
                                  Width="24"
                                  Height="24"
                                  VerticalAlignment="Center"
                                  ForegroundBrush="{ThemeResource TextFillColorPrimaryBrush}"
                                  AutomationProperties.Name="Activity provider"/>
 
-        <Grid Grid.Column="1" ColumnSpacing="6" VerticalAlignment="Center">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="22"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-
-            <Grid x:Name="AgentNavigator" Grid.Column="0" RowSpacing="0"
-                  VerticalAlignment="Center" HorizontalAlignment="Center">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="12"/>
-                    <RowDefinition Height="12"/>
-                    <RowDefinition Height="12"/>
-                </Grid.RowDefinitions>
-                <Button x:Name="PreviousButton" Grid.Row="0" Width="20" Height="12"
-                        Padding="0" BorderThickness="0" Background="Transparent"
-                        HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
-                        Click="PreviousButton_Click" PointerPressed="NavigationButton_PointerPressed"
-                        AutomationProperties.Name="Previous agent">
-                    <FontIcon Glyph="&#xE70E;" FontSize="8"/>
-                </Button>
-                <TextBlock x:Name="AgentPositionText" Grid.Row="1" FontSize="9"
-                           TextAlignment="Center" HorizontalAlignment="Center"
-                           VerticalAlignment="Center"/>
-                <Button x:Name="NextButton" Grid.Row="2" Width="20" Height="12"
-                        Padding="0" BorderThickness="0" Background="Transparent"
-                        HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
-                        Click="NextButton_Click" PointerPressed="NavigationButton_PointerPressed"
-                        AutomationProperties.Name="Next agent">
-                    <FontIcon Glyph="&#xE70D;" FontSize="8"/>
-                </Button>
-            </Grid>
-
-            <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                <TextBlock x:Name="TitleText" FontSize="12" FontWeight="SemiBold"
-                           TextTrimming="CharacterEllipsis"/>
-                <Grid ColumnSpacing="8">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <TextBlock x:Name="StepText" Grid.Column="0" FontSize="11" Opacity="0.72"
-                               TextTrimming="CharacterEllipsis"/>
-                    <TextBlock x:Name="AgentStatusText" Grid.Column="1" FontSize="10" Opacity="0.72"
-                               TextTrimming="CharacterEllipsis" TextAlignment="Right"
-                               MaxWidth="155"
-                               VerticalAlignment="Center"/>
-                </Grid>
-            </StackPanel>
-        </Grid>
+        <StackPanel Grid.Column="2" VerticalAlignment="Center">
+            <TextBlock x:Name="TitleText" FontSize="12" FontWeight="SemiBold"
+                       TextTrimming="CharacterEllipsis"/>
+            <TextBlock x:Name="StepText" FontSize="11" Opacity="0.72"
+                       TextTrimming="CharacterEllipsis"/>
+        </StackPanel>
     </Grid>
 </UserControl>

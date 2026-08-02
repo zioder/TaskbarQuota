@@ -60,13 +60,11 @@ public sealed partial class AgentActivitySummary : UserControl
         bool showProviderMarker = item.Provider != activeProvider;
         ProviderIcon.Visibility = showProviderMarker ? Visibility.Visible : Visibility.Collapsed;
         var activitySummary = ActivitySummary(items);
-        AgentStatusText.Text = activitySummary;
         UpdateNavigation(items, item.Id);
-        ToolTipService.SetToolTip(ProviderIcon,
-            $"{items.Count} agents · {activitySummary}. Use the mouse wheel to switch agents.");
         TitleText.Text = ActivityTitle(item);
         StepText.Text = SummaryText(item);
-        ToolTipService.SetToolTip(this, $"{ActivityTitle(item)}: {item.Step}");
+        ToolTipService.SetToolTip(this,
+            $"{ActivityTitle(item)}: {item.Step}\n{items.Count} agents · {activitySummary}. Use the arrows or mouse wheel to switch agents.");
         ApplyForeground();
     }
 
