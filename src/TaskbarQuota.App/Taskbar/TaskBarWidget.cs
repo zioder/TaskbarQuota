@@ -43,6 +43,8 @@ namespace TaskbarQuota.Taskbar
         // Fixed width of the "|" divider drawn between adjacent tiles. Fixed rather than measured so the
         // fit math stays exact and doesn't depend on a layout pass having run.
         private const int TileSeparatorLogicalPx = 7;
+        // The activity summary is separated from the quota row by its own left margin.
+        private const int ActivitySummaryMarginLogicalPx = 8;
         // Space assumed available before the first position pass has measured the real taskbar gap. Wide
         // enough for three tiles; the first pass corrects it either way.
         private const int DefaultAvailableLogicalWidth = 640;
@@ -446,7 +448,7 @@ namespace TaskbarQuota.Taskbar
 
             activitySummary = new AgentActivitySummary
             {
-                Margin = new Microsoft.UI.Xaml.Thickness(8, 0, 0, 0),
+                Margin = new Microsoft.UI.Xaml.Thickness(ActivitySummaryMarginLogicalPx, 0, 0, 0),
                 Visibility = Microsoft.UI.Xaml.Visibility.Collapsed,
                 HorizontalAlignment = Microsoft.UI.Xaml.HorizontalAlignment.Center,
                 VerticalAlignment = Microsoft.UI.Xaml.VerticalAlignment.Stretch,
@@ -642,14 +644,16 @@ namespace TaskbarQuota.Taskbar
                         layoutSlots[count++] = i;
                 }
 
-                int activityWidth = showActivity ? AgentActivitySummary.DesiredLogicalWidth + 8 : 0;
-                count = HoldBackTilesThatDoNotFit(layoutSlots, count, activityWidth);
+                int minimumActivityWidth = showActivity
+                    ? AgentActivitySummary.MinimumLogicalWidth + ActivitySummaryMarginLogicalPx
+                    : 0;
+                count = HoldBackTilesThatDoNotFit(layoutSlots, count, minimumActivityWidth);
 
                 // Widths are measured, never rendered — MeasureDesiredWidth is a pure calculation.
                 // Rendering to measure made the tile restart its refresh animation on every usage publish,
                 // which read as a tile flashing about once a second.
                 var brush = TaskbarForegroundBrush();
-                int total = activityWidth;
+                int total = 0;
                 for (int n = 0; n < count; n++)
                 {
                     int i = layoutSlots[n];
@@ -659,6 +663,23 @@ namespace TaskbarQuota.Taskbar
                         TaskbarSpace.RecordTileWidth(measuredProvider, width);
                     total += width + TileHorizontalMarginLogicalPx + (n > 0 ? TileSeparatorLogicalPx : 0);
                 }
+
+                // Give the activity panel exactly the remaining taskbar budget. Its title and action
+                // TextBlocks can then trim against a real width instead of painting into the shell buttons.
+                int quotaWidth = total;
+                int activityWidth = 0;
+                if (showActivity && activitySummary is not null)
+                {
+                    int remainingWidth = availableLogicalWidth - quotaWidth;
+                    int activityOuterWidth = Math.Clamp(
+                        remainingWidth,
+                        ActivitySummaryMarginLogicalPx + 1,
+                        AgentActivitySummary.DesiredLogicalWidth + ActivitySummaryMarginLogicalPx);
+                    activitySummary.SetLogicalWidth(activityOuterWidth - ActivitySummaryMarginLogicalPx);
+                    activityWidth = activityOuterWidth;
+                }
+
+                total += activityWidth;
 
                 for (int i = 0; i < tiles.Length; i++)
                 {

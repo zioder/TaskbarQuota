@@ -16,6 +16,9 @@ namespace TaskbarQuota.Controls;
 public sealed partial class AgentActivitySummary : UserControl
 {
     public const int DesiredLogicalWidth = 400;
+    // The navigator and provider glyph need to remain usable, but the text area may shrink below the
+    // preferred width so the host never reserves more space than the taskbar gap actually provides.
+    public const int MinimumLogicalWidth = 160;
     public event Action? Clicked;
     public AgentActivityItem? FollowedItem { get; private set; }
     private string? _followedId;
@@ -29,6 +32,11 @@ public sealed partial class AgentActivitySummary : UserControl
         Loaded += (_, _) => ApplyForeground();
         PointerPressed += (_, _) => Clicked?.Invoke();
         PointerWheelChanged += AgentActivitySummary_PointerWheelChanged;
+    }
+
+    public void SetLogicalWidth(int logicalWidth)
+    {
+        Root.Width = Math.Clamp(logicalWidth, 1, DesiredLogicalWidth);
     }
 
     public void Apply(AgentActivitySnapshot snapshot, ProviderId? activeProvider = null)
