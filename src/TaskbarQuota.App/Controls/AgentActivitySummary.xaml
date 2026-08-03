@@ -25,6 +25,7 @@
                     Padding="0" BorderThickness="0" Background="Transparent"
                     HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
                     Click="PreviousButton_Click" PointerPressed="NavigationButton_PointerPressed"
+                    Tapped="NavigationButton_Tapped"
                     AutomationProperties.Name="Previous agent">
                 <FontIcon Glyph="&#xE70E;" FontSize="8"/>
             </Button>
@@ -35,6 +36,7 @@
                     Padding="0" BorderThickness="0" Background="Transparent"
                     HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
                     Click="NextButton_Click" PointerPressed="NavigationButton_PointerPressed"
+                    Tapped="NavigationButton_Tapped"
                     AutomationProperties.Name="Next agent">
                 <FontIcon Glyph="&#xE70D;" FontSize="8"/>
             </Button>

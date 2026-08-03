@@ -455,6 +455,10 @@ namespace TaskbarQuota.Taskbar
                 HorizontalAlignment = Microsoft.UI.Xaml.HorizontalAlignment.Center,
                 VerticalAlignment = Microsoft.UI.Xaml.VerticalAlignment.Stretch,
             };
+            activitySummary.PointerPressed += WidgetSummary_PointerPressed;
+            activitySummary.PointerMoved += WidgetSummary_PointerMoved;
+            activitySummary.PointerReleased += WidgetSummary_PointerReleased;
+            activitySummary.PointerCanceled += WidgetSummary_PointerCanceled;
             activitySummary.Clicked += OnActivityClicked;
 
             for (int i = 0; i < tiles.Length; i++)
@@ -1229,12 +1233,12 @@ namespace TaskbarQuota.Taskbar
 
         private void WidgetSummary_PointerPressed(object sender, PointerRoutedEventArgs e)
         {
-            if (appWindow is null || sender is not WidgetSummary summary) return;
+            if (appWindow is null || sender is not Microsoft.UI.Xaml.UIElement element) return;
             BeginUserRepositioning();
             isPointerTracking = true;
             isDirectDrag = false;
             PrimeObstacleCacheForDrag();
-            summary.CapturePointer(e.Pointer);
+            element.CapturePointer(e.Pointer);
             User32.GetCursorPos(out var point);
             pressCursorPositionX = point.x;
             lastCursorPositionX = point.x;
@@ -1244,7 +1248,7 @@ namespace TaskbarQuota.Taskbar
 
         private void WidgetSummary_PointerMoved(object sender, PointerRoutedEventArgs e)
         {
-            if (!isPointerTracking || appWindow is null || sender is not WidgetSummary) return;
+            if (!isPointerTracking || appWindow is null || sender is not Microsoft.UI.Xaml.UIElement) return;
             User32.GetCursorPos(out var point);
             if (!isDirectDrag)
             {
@@ -1263,7 +1267,7 @@ namespace TaskbarQuota.Taskbar
         private void WidgetSummary_PointerReleased(object sender, PointerRoutedEventArgs e)
         {
             bool wasDirectDrag = isDirectDrag;
-            (sender as WidgetSummary)?.ReleasePointerCaptures();
+            (sender as Microsoft.UI.Xaml.UIElement)?.ReleasePointerCaptures();
             if (wasDirectDrag && appWindow is not null)
             {
                 _ = SnapToValidPositionAsync(dragPreviewX ?? appWindow.Position.X);
@@ -1281,7 +1285,7 @@ namespace TaskbarQuota.Taskbar
             bool wasDirectDrag = isDirectDrag;
             isPointerTracking = false;
             isDirectDrag = false;
-            (sender as WidgetSummary)?.ReleasePointerCaptures();
+            (sender as Microsoft.UI.Xaml.UIElement)?.ReleasePointerCaptures();
             if (wasDirectDrag)
                 QueuePositionUpdate(TaskbarChangeReason.None);
             EndUserRepositioning();
@@ -1312,6 +1316,8 @@ namespace TaskbarQuota.Taskbar
                 if (tile is not null)
                     tile.IsHitTestVisible = visible;
             }
+            if (activitySummary is not null)
+                activitySummary.IsHitTestVisible = visible;
         }
 
         // A drag can cross tiles, so every tile swallows the click that ends it — otherwise releasing over
@@ -1323,6 +1329,8 @@ namespace TaskbarQuota.Taskbar
                 if (tile is not null)
                     tile.SuppressNextClick = true;
             }
+            if (activitySummary is not null)
+                activitySummary.SuppressNextClick = true;
         }
 
         /// <summary>
@@ -2278,6 +2286,10 @@ namespace TaskbarQuota.Taskbar
             summaryPanel = null;
             if (activitySummary is not null)
             {
+                activitySummary.PointerPressed -= WidgetSummary_PointerPressed;
+                activitySummary.PointerMoved -= WidgetSummary_PointerMoved;
+                activitySummary.PointerReleased -= WidgetSummary_PointerReleased;
+                activitySummary.PointerCanceled -= WidgetSummary_PointerCanceled;
                 activitySummary.Clicked -= OnActivityClicked;
             }
             ActivityClicked = null;

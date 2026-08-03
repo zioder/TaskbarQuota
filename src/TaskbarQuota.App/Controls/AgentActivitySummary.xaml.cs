@@ -20,6 +20,7 @@ public sealed partial class AgentActivitySummary : UserControl
     // preferred width so the host never reserves more space than the taskbar gap actually provides.
     public const int MinimumLogicalWidth = 160;
     public event Action<AgentActivityItem?>? Clicked;
+    public bool SuppressNextClick { get; set; }
     public AgentActivityItem? FollowedItem { get; private set; }
     private string? _followedId;
     private AgentActivitySnapshot _snapshot = new(Array.Empty<AgentActivityItem>());
@@ -30,14 +31,23 @@ public sealed partial class AgentActivitySummary : UserControl
     {
         InitializeComponent();
         Loaded += (_, _) => ApplyForeground();
-        PointerPressed += AgentActivitySummary_PointerPressed;
+        Tapped += AgentActivitySummary_Tapped;
         PointerWheelChanged += AgentActivitySummary_PointerWheelChanged;
     }
 
-    private void AgentActivitySummary_PointerPressed(object sender, PointerRoutedEventArgs e)
+    private void AgentActivitySummary_Tapped(object sender, TappedRoutedEventArgs e)
     {
+        if (SuppressNextClick)
+        {
+            SuppressNextClick = false;
+            return;
+        }
+
         if (!e.Handled)
+        {
+            e.Handled = true;
             Clicked?.Invoke(FollowedItem);
+        }
     }
 
     public void SetLogicalWidth(int logicalWidth)
@@ -99,6 +109,9 @@ public sealed partial class AgentActivitySummary : UserControl
     private void NextButton_Click(object sender, RoutedEventArgs e) => MoveSelection(1);
 
     private void NavigationButton_PointerPressed(object sender, PointerRoutedEventArgs e)
+        => e.Handled = true;
+
+    private void NavigationButton_Tapped(object sender, TappedRoutedEventArgs e)
         => e.Handled = true;
 
     private bool MoveSelection(int direction)

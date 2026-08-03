@@ -115,13 +115,18 @@ namespace TaskbarQuota
 
         public void ToggleAbove(IntPtr widgetHandle)
         {
-            if (_shown) { Hide(); return; }
+            if (_shown && !_showingActivity)
+            {
+                Hide();
+                return;
+            }
+
             ShowAbove(widgetHandle);
         }
 
         public void ToggleActivityAbove(IntPtr widgetHandle, string? selectedActivityId = null)
         {
-            if (_shown)
+            if (_shown && _showingActivity && _selectedActivityId == selectedActivityId)
             {
                 Hide();
                 return;
@@ -245,52 +250,6 @@ namespace TaskbarQuota
         private void RenderActivity(AgentActivitySnapshot snapshot)
         {
             ActivityList.Children.Clear();
-            ActivityCountText.Text = snapshot.Items.Count == 0 ? "" : snapshot.Items.Count.ToString();
-
-            var primary = snapshot.Primary;
-            var selected = _selectedActivityId is { Length: > 0 } selectedId
-                ? snapshot.TrackedItems.FirstOrDefault(item => item.Id == selectedId)
-                : null;
-            var headerItem = selected ?? primary;
-            if (headerItem is { } primaryItem)
-            {
-                var providerName = ActivityProviderDisplayName(primaryItem.Provider);
-                var providerCount = snapshot.Items
-                    .Select(item => item.Provider)
-                    .Distinct()
-                    .Count();
-                // The activity panel is keyed to the selected agent, not the foreground quota provider.
-                // Keep its glyph visible even when both happen to use the same provider.
-                bool showProviderMarker = true;
-
-                ActivityProviderAvatar.ProviderId = primaryItem.Provider;
-                ActivityProviderAvatar.Initial = providerName.Length > 0 ? providerName[0].ToString() : "?";
-                ActivityProviderAvatar.ForegroundBrush =
-                    (Brush)Application.Current.Resources["AccentTextFillColorPrimaryBrush"];
-                ActivityProviderAvatar.Visibility = showProviderMarker
-                    ? Visibility.Visible
-                    : Visibility.Collapsed;
-                var primaryLabel = ActivityProviderLabel(primaryItem);
-                ActivityProviderText.Text = providerCount > 1
-                    ? $"{primaryLabel} + {providerCount - 1}"
-                    : primaryLabel;
-                ActivityProviderText.Visibility = showProviderMarker
-                    ? Visibility.Visible
-                    : Visibility.Collapsed;
-                ToolTipService.SetToolTip(
-                    ActivityProviderAvatar,
-                    !showProviderMarker
-                        ? null
-                        : providerCount > 1
-                        ? $"Agent activity from multiple providers; most recent: {primaryLabel}"
-                        : $"Agent activity from {primaryLabel}");
-            }
-            else
-            {
-                ActivityProviderAvatar.Visibility = Visibility.Collapsed;
-                ActivityProviderText.Visibility = Visibility.Collapsed;
-                ToolTipService.SetToolTip(ActivityProviderAvatar, null);
-            }
 
             foreach (var item in snapshot.Items)
             {

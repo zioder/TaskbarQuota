@@ -28,23 +28,7 @@
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
-            <StackPanel Orientation="Horizontal" Spacing="8">
-                <TextBlock Text="Agent activity" Style="{StaticResource SubtitleTextBlockStyle}"/>
-                <controls:ProviderAvatar x:Name="ActivityProviderAvatar"
-                                         Width="20"
-                                         Height="20"
-                                         VerticalAlignment="Center"
-                                         ForegroundBrush="{ThemeResource AccentTextFillColorPrimaryBrush}"
-                                         Visibility="Collapsed"
-                                         AutomationProperties.Name="Activity provider"/>
-                <TextBlock x:Name="ActivityProviderText"
-                           VerticalAlignment="Center"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                           Style="{StaticResource CaptionTextBlockStyle}"
-                           Visibility="Collapsed"/>
-                <TextBlock x:Name="ActivityCountText" VerticalAlignment="Center"
-                           Style="{StaticResource CaptionTextBlockStyle}"/>
-            </StackPanel>
+            <TextBlock Text="Agent activity" Style="{StaticResource SubtitleTextBlockStyle}"/>
             <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,12,0,0">
                 <StackPanel x:Name="ActivityList" Spacing="8"/>
             </ScrollViewer>
