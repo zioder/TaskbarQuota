@@ -148,10 +148,19 @@ namespace TaskbarQuota
         }
 
         public void ShowAbove(IntPtr widgetHandle)
+            => ShowAbove(widgetHandle, showActivity: false);
+
+        public void ShowActivityAbove(IntPtr widgetHandle)
+            => ShowAbove(widgetHandle, showActivity: true);
+
+        private void ShowAbove(IntPtr widgetHandle, bool showActivity)
         {
             _widgetHandle = widgetHandle;
             EnsureDashboardLoaded();
-            ShowProviderDashboard();
+            if (showActivity)
+                ShowActivityPanel();
+            else
+                ShowProviderDashboard();
             RenderActivity(AgentActivityService.Instance.Snapshot);
 
             // Sync the strip selection to the provider the taskbar widget is currently showing,

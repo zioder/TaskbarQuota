@@ -84,7 +84,7 @@ namespace TaskbarQuota.Taskbar
         private static void CreateTrayIcon()
         {
             var open = new PopupMenuItem("Open TaskbarQuota", (_, _) => _dispatcher?.TryEnqueue(() => _showMainWindow?.Invoke()));
-            var activity = new PopupMenuItem("Open agent activity", (_, _) => _dispatcher?.TryEnqueue(OpenActivityFlyout));
+            var activity = new PopupMenuItem("Open agent activity", (_, _) => _dispatcher?.TryEnqueue(() => OpenActivityFlyout()));
             var move = new PopupMenuItem("Move primary taskbar widget", (_, _) => _dispatcher?.TryEnqueue(
                 () => PrimaryWidget()?.StartDragging()));
             var reset = new PopupMenuItem("Reset widget positions", (_, _) => _dispatcher?.TryEnqueue(
@@ -213,6 +213,7 @@ namespace TaskbarQuota.Taskbar
                 };
                 widget.HydrateProvider = provider => HydrateResult(UsageCoordinator.Instance, provider);
                 widget.Clicked += () => _dispatcher?.TryEnqueue(() => ToggleFlyout(widget));
+                widget.ActivityClicked += () => _dispatcher?.TryEnqueue(() => OpenActivityFlyout(widget));
                 Widgets[target.Handle] = widget;
                 SyncWidgetState(widget);
                 PrewarmFlyout();
@@ -446,9 +447,9 @@ namespace TaskbarQuota.Taskbar
             }
         }
 
-        private static void OpenActivityFlyout()
+        private static void OpenActivityFlyout(TaskBarWidget? sourceWidget = null)
         {
-            var widget = PrimaryWidget();
+            var widget = sourceWidget ?? PrimaryWidget();
             if (widget is null)
             {
                 Log.Warning("Cannot open agent activity: no taskbar widget is available");
@@ -458,7 +459,7 @@ namespace TaskbarQuota.Taskbar
             try
             {
                 _flyout ??= new FlyoutWindow();
-                _flyout.ShowAbove(widget.Handle);
+                _flyout.ShowActivityAbove(widget.Handle);
             }
             catch (Exception ex)
             {

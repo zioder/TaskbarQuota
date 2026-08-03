@@ -30,8 +30,14 @@ public sealed partial class AgentActivitySummary : UserControl
     {
         InitializeComponent();
         Loaded += (_, _) => ApplyForeground();
-        PointerPressed += (_, _) => Clicked?.Invoke();
+        PointerPressed += AgentActivitySummary_PointerPressed;
         PointerWheelChanged += AgentActivitySummary_PointerWheelChanged;
+    }
+
+    private void AgentActivitySummary_PointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (!e.Handled)
+            Clicked?.Invoke();
     }
 
     public void SetLogicalWidth(int logicalWidth)

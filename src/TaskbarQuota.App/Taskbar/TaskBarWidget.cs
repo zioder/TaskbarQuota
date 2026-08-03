@@ -203,8 +203,10 @@ namespace TaskbarQuota.Taskbar
         /// until the next fetch lands. Set by <see cref="TaskBarManager"/>.
         /// </summary>
         public Func<ProviderId, UsageResult?>? HydrateProvider { get; set; }
-        /// <summary>Raised when any tile is clicked; provider-agnostic, it just opens the flyout.</summary>
+        /// <summary>Raised when any quota tile is clicked; provider-agnostic, it opens the provider flyout.</summary>
         public event Action? Clicked;
+        /// <summary>Raised when the agent activity summary is clicked, so its activity panel can open.</summary>
+        public event Action? ActivityClicked;
         public event EventHandler? Destroying;
 
         public TaskBarWidget(TaskbarWindowTarget target)
@@ -453,7 +455,7 @@ namespace TaskbarQuota.Taskbar
                 HorizontalAlignment = Microsoft.UI.Xaml.HorizontalAlignment.Center,
                 VerticalAlignment = Microsoft.UI.Xaml.VerticalAlignment.Stretch,
             };
-            activitySummary.Clicked += OnTileClicked;
+            activitySummary.Clicked += OnActivityClicked;
 
             for (int i = 0; i < tiles.Length; i++)
             {
@@ -505,6 +507,8 @@ namespace TaskbarQuota.Taskbar
         };
 
         private void OnTileClicked() => Clicked?.Invoke();
+
+        private void OnActivityClicked() => ActivityClicked?.Invoke();
 
         private void WidgetSummary_DesiredHostWidthChanged(int logicalWidth) => RecomputeLayout();
 
@@ -2273,7 +2277,10 @@ namespace TaskbarQuota.Taskbar
             hostContent = null;
             summaryPanel = null;
             if (activitySummary is not null)
-                activitySummary.Clicked -= OnTileClicked;
+            {
+                activitySummary.Clicked -= OnActivityClicked;
+            }
+            ActivityClicked = null;
             activitySummary = null;
             pendingProviders = null;
             pendingActiveProvider = null;
