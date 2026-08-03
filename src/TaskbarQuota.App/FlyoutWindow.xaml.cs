@@ -74,7 +74,12 @@ namespace TaskbarQuota
 
             var presenter = OverlappedPresenter.CreateForContextMenu();
             presenter.IsAlwaysOnTop = true;
-            GetAppWindow().SetPresenter(presenter);
+            var appWindow = GetAppWindow();
+            // The flyout is transient taskbar UI, not an application window. Keep it out of the
+            // taskbar/Alt+Tab representation; the main window opts in only when Settings or the app
+            // itself is explicitly opened.
+            appWindow.IsShownInSwitchers = false;
+            appWindow.SetPresenter(presenter);
 
             Activated += OnActivated;
             Closed += OnClosed;
