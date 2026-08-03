@@ -460,6 +460,10 @@ namespace TaskbarQuota.Taskbar
             try
             {
                 _flyout ??= new FlyoutWindow();
+                // The taskbar activity section can be clicked before the low-priority startup prewarm
+                // runs. Prime this exact flyout synchronously so DesktopAcrylic is already attached to
+                // a composed window before the activity panel is shown.
+                _flyout.Prewarm();
                 _flyout.ShowActivityAbove(widget.Handle, selectedActivityId);
             }
             catch (Exception ex)
