@@ -57,7 +57,7 @@ public sealed partial class AgentActivitySummary : UserControl
             item.Status,
             ProviderIcon.ForegroundBrush ?? (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"]);
         ProviderIcon.ForegroundBrush = statusBrush;
-        bool showProviderMarker = item.Provider != activeProvider;
+        bool showProviderMarker = !IsSameProvider(item.Provider, activeProvider);
         ProviderIcon.Visibility = showProviderMarker ? Visibility.Visible : Visibility.Collapsed;
         var activitySummary = ActivitySummary(items);
         UpdateNavigation(items, item.Id);
@@ -204,6 +204,14 @@ public sealed partial class AgentActivitySummary : UserControl
         ProviderId.OpenCodeGo => "OpenCode Go",
         _ => provider.ToString(),
     };
+
+    private static bool IsSameProvider(ProviderId activityProvider, ProviderId? activeProvider)
+        => activeProvider is { } active
+            && (activityProvider == active
+                || (activityProvider is ProviderId.Cline && active is ProviderId.ClinePass)
+                || (activityProvider is ProviderId.ClinePass && active is ProviderId.Cline)
+                || (activityProvider is ProviderId.OpenCode && active is ProviderId.OpenCodeGo)
+                || (activityProvider is ProviderId.OpenCodeGo && active is ProviderId.OpenCode));
 
     private static string ActivityTitle(AgentActivityItem item)
         => !string.IsNullOrWhiteSpace(item.Host)

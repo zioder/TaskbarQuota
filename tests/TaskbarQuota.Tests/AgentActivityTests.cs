@@ -39,6 +39,123 @@ public sealed class AgentActivityTests
     }
 
     [Fact]
+    public void ClineSession_ExtractsTitleToolActionAndWorkingState()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "taskbarquota-cline-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var metadataPath = Path.Combine(root, "cline-1.json");
+            var messagesPath = Path.Combine(root, "cline-1.messages.json");
+            File.WriteAllText(metadataPath, $$"""
+                {
+                  "session_id": "cline-1",
+                  "started_at": "{{now:O}}",
+                  "status": "running",
+                  "model": "cline/kimi-k3",
+                  "prompt": "<user_input mode=\"act\">Run the build checks</user_input>",
+                  "metadata": { "title": "Run the build checks" }
+                }
+                """);
+            File.WriteAllText(messagesPath, $$"""
+                {
+                  "messages": [
+                    { "role": "user", "content": [{ "type": "text", "text": "Run the build checks" }], "ts": {{now.ToUnixTimeMilliseconds()}} },
+                    { "role": "assistant", "content": [{ "type": "thinking", "thinking": "Checking the project" }], "ts": {{now.ToUnixTimeMilliseconds()}} },
+                    { "role": "assistant", "content": [{ "type": "tool_use", "name": "shell_command", "input": { "command": "dotnet test" } }], "ts": {{now.ToUnixTimeMilliseconds()}} }
+                  ]
+                }
+                """);
+
+            var item = AgentActivityScanner.ReadClineForTesting(metadataPath);
+
+            Assert.NotNull(item);
+            Assert.Equal(ProviderId.Cline, item.Provider);
+            Assert.Equal("Run the build checks", item.Title);
+            Assert.Equal("Ran tests", item.Step);
+            Assert.Equal(AgentActivityStatus.Working, item.Status);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void KimiSession_ExtractsTitleToolActionAndSubagentCount()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "taskbarquota-kimi-" + Guid.NewGuid().ToString("N"));
+        var session = Path.Combine(root, "session_kimi-1");
+        var main = Path.Combine(session, "agents", "main");
+        Directory.CreateDirectory(main);
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var statePath = Path.Combine(session, "state.json");
+            File.WriteAllText(statePath, $$"""
+                {
+                  "createdAt": "{{now:O}}",
+                  "updatedAt": "{{now:O}}",
+                  "title": "New Session",
+                  "agents": {
+                    "main": { "type": "main" },
+                    "worker": { "type": "subagent" }
+                  }
+                }
+                """);
+            File.WriteAllText(Path.Combine(main, "wire.jsonl"), $$"""
+                {"type":"user_input","text":"Inspect the build" ,"time":{{now.ToUnixTimeMilliseconds()}}}
+                {"type":"tool_call","name":"shell","arguments":{"command":"dotnet test"},"time":{{now.ToUnixTimeMilliseconds()}}}
+                """);
+
+            var item = AgentActivityScanner.ReadKimiForTesting(statePath);
+
+            Assert.NotNull(item);
+            Assert.Equal(ProviderId.Kimi, item.Provider);
+            Assert.Equal("Inspect the build", item.Title);
+            Assert.Equal("Ran tests", item.Step);
+            Assert.Equal(AgentActivityStatus.Working, item.Status);
+            Assert.Equal(1, item.SubagentCount);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LegacyKimiSession_ExtractsDirectWireLog()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "taskbarquota-kimi-legacy-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var statePath = Path.Combine(root, "state.json");
+            File.WriteAllText(statePath, $$"""
+                { "created_at": "{{now:O}}", "title": "Legacy session" }
+                """);
+            File.WriteAllText(Path.Combine(root, "wire.jsonl"), $$"""
+                {"type":"user","text":"Review the legacy session","timestamp":{{now.ToUnixTimeMilliseconds()}}}
+                {"type":"tool_call","name":"Read","timestamp":{{now.ToUnixTimeMilliseconds()}}}
+                """);
+
+            var item = AgentActivityScanner.ReadKimiForTesting(statePath);
+
+            Assert.NotNull(item);
+            Assert.Equal(ProviderId.Kimi, item.Provider);
+            Assert.Equal("Legacy session", item.Title);
+            Assert.Equal("Inspected files", item.Step);
+            Assert.Equal(AgentActivityStatus.Working, item.Status);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ClaudeTranscript_ExtractsPromptModelAndToolAction()
     {
         var transcript = string.Join('\n',

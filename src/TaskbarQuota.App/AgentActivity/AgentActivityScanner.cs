@@ -41,6 +41,8 @@ internal sealed class AgentActivityScanner
         AddAntigravityDatabases(files, cancellationToken);
         AddAntigravityGuiTranscripts(files, cancellationToken);
         AddOpenCodeDatabases(files, cancellationToken);
+        AddClineSessions(files, cancellationToken);
+        AddKimiSessions(files, cancellationToken);
 
         var parsed = new List<AgentActivityItem>();
         var liveClaims = new Dictionary<ProviderId, int>();
@@ -66,6 +68,16 @@ internal sealed class AgentActivityScanner
             else if (file.Provider == ProviderId.OpenCode)
             {
                 parsed.AddRange(ReadOpenCodeSessions(file.Path, file.Modified, claimLive));
+            }
+            else if (file.Provider == ProviderId.Cline)
+            {
+                if (TryReadClineSession(file.Path, file.Modified, claimLive, out var clineItem))
+                    parsed.Add(clineItem);
+            }
+            else if (file.Provider == ProviderId.Kimi)
+            {
+                if (TryReadKimiSession(file.Path, file.Modified, claimLive, out var kimiItem))
+                    parsed.Add(kimiItem);
             }
             else if (TryRead(file.Provider, file.Path, file.Modified, claimLive, out var item))
             {
@@ -98,6 +110,110 @@ internal sealed class AgentActivityScanner
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+    }
+
+    private void AddClineSessions(List<(ProviderId, string, DateTimeOffset)> output,
+        CancellationToken cancellationToken)
+    {
+        var configuredRoot = Environment.GetEnvironmentVariable("CLINE_DATA_DIR");
+        var root = string.IsNullOrWhiteSpace(configuredRoot)
+            ? Path.Combine(_home, ".cline", "data")
+            : configuredRoot;
+        var sessions = Path.Combine(root, "sessions");
+        if (!Directory.Exists(sessions))
+            return;
+
+        try
+        {
+            foreach (var path in Directory.EnumerateFiles(sessions, "*.json", SearchOption.AllDirectories))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (path.EndsWith(".messages.json", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var modified = File.GetLastWriteTimeUtc(path);
+                var messagesPath = Path.Combine(
+                    Path.GetDirectoryName(path) ?? "",
+                    Path.GetFileNameWithoutExtension(path) + ".messages.json");
+                if (File.Exists(messagesPath))
+                {
+                    var messagesModified = File.GetLastWriteTimeUtc(messagesPath);
+                    if (messagesModified > modified)
+                        modified = messagesModified;
+                }
+
+                if (DateTime.UtcNow - modified <= RecentWindow)
+                    output.Add((ProviderId.Cline, path,
+                        new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private void AddKimiSessions(List<(ProviderId, string, DateTimeOffset)> output,
+        CancellationToken cancellationToken)
+    {
+        foreach (var root in KimiHomeCandidates())
+        {
+            var sessions = Path.Combine(root, "sessions");
+            if (!Directory.Exists(sessions))
+                continue;
+
+            try
+            {
+                foreach (var statePath in Directory.EnumerateFiles(sessions, "state.json", SearchOption.AllDirectories))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var sessionDirectory = Path.GetDirectoryName(statePath);
+                    if (string.IsNullOrWhiteSpace(sessionDirectory))
+                        continue;
+
+                    var modified = File.GetLastWriteTimeUtc(statePath);
+                    var agentsDirectory = Path.Combine(sessionDirectory, "agents");
+                    if (Directory.Exists(agentsDirectory))
+                    {
+                        foreach (var wirePath in Directory.EnumerateFiles(
+                            agentsDirectory, "wire.jsonl", SearchOption.AllDirectories))
+                        {
+                            var wireModified = File.GetLastWriteTimeUtc(wirePath);
+                            if (wireModified > modified)
+                                modified = wireModified;
+                        }
+                    }
+                    foreach (var companion in new[] { "wire.jsonl", "context.jsonl" })
+                    {
+                        var companionPath = Path.Combine(sessionDirectory, companion);
+                        if (File.Exists(companionPath))
+                        {
+                            var companionModified = File.GetLastWriteTimeUtc(companionPath);
+                            if (companionModified > modified)
+                                modified = companionModified;
+                        }
+                    }
+
+                    if (DateTime.UtcNow - modified <= RecentWindow)
+                        output.Add((ProviderId.Kimi, statePath,
+                            new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    private IEnumerable<string> KimiHomeCandidates()
+    {
+        var explicitHome = Environment.GetEnvironmentVariable("KIMI_CODE_HOME");
+        if (!string.IsNullOrWhiteSpace(explicitHome))
+            yield return explicitHome;
+
+        var legacyHome = Environment.GetEnvironmentVariable("KIMI_SHARE_DIR");
+        if (!string.IsNullOrWhiteSpace(legacyHome))
+            yield return legacyHome;
+
+        yield return Path.Combine(_home, ".kimi-code");
+        yield return Path.Combine(_home, ".kimi");
     }
 
     private void AddGrokSessions(List<(ProviderId, string, DateTimeOffset)> output,
@@ -873,6 +989,354 @@ internal sealed class AgentActivityScanner
         catch (JsonException) { return false; }
     }
 
+    private static bool TryReadClineSession(string metadataPath, DateTimeOffset modified,
+        bool claimLive, out AgentActivityItem item)
+    {
+        item = default!;
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(metadataPath));
+            var root = document.RootElement;
+            var sessionId = FirstString(root, "session_id", "sessionId")
+                ?? Path.GetFileNameWithoutExtension(metadataPath);
+            var metadata = root.TryGetProperty("metadata", out var metadataNode)
+                && metadataNode.ValueKind == JsonValueKind.Object
+                ? metadataNode
+                : default;
+            var prompt = FirstString(metadata, "prompt") ?? FirstString(root, "prompt") ?? "";
+            var title = FirstString(metadata, "title", "name") ?? FirstString(root, "title") ?? "";
+            var model = FirstString(root, "model") ?? "";
+            var statusText = (FirstString(root, "status") ?? "").ToLowerInvariant();
+            var startedAt = FirstTimestampAny(root, "started_at", "startedAt", "created_at", "createdAt")
+                ?? modified;
+            var messagesPath = FirstString(root, "messages_path", "messagesPath");
+            if (string.IsNullOrWhiteSpace(messagesPath))
+            {
+                messagesPath = Path.Combine(
+                    Path.GetDirectoryName(metadataPath) ?? "",
+                    Path.GetFileNameWithoutExtension(metadataPath) + ".messages.json");
+            }
+            else if (!Path.IsPathRooted(messagesPath))
+            {
+                messagesPath = Path.Combine(Path.GetDirectoryName(metadataPath) ?? "", messagesPath);
+            }
+
+            var tail = ReadClineMessages(messagesPath);
+            prompt = FirstNonEmpty(prompt, tail.Prompt);
+            title = FirstNonEmpty(title, SummarizeTitle(prompt) ?? "Cline");
+            model = FirstNonEmpty(model, tail.Model);
+            var lastActivity = Max(modified, tail.LastActivity ?? modified);
+            var live = claimLive && modified > DateTimeOffset.Now - RecentWindow;
+            var fresh = DateTimeOffset.Now - lastActivity < BusyWindow;
+            var failed = statusText.Contains("fail", StringComparison.Ordinal)
+                || statusText.Contains("error", StringComparison.Ordinal)
+                || tail.State == TranscriptState.Failed;
+            var status = !live
+                ? failed ? AgentActivityStatus.Failed : AgentActivityStatus.Completed
+                : tail.State == TranscriptState.Waiting
+                    ? AgentActivityStatus.Waiting
+                    : fresh ? AgentActivityStatus.Working : AgentActivityStatus.Idle;
+            var step = status switch
+            {
+                AgentActivityStatus.Completed => "Completed",
+                AgentActivityStatus.Failed => "Failed",
+                AgentActivityStatus.Waiting => FirstNonEmpty(tail.Step, "Waiting for input"),
+                AgentActivityStatus.Idle => "Waiting for the next prompt",
+                _ => FirstNonEmpty(tail.Step, tail.Summary, "Thinking"),
+            };
+            item = new AgentActivityItem(
+                $"cline:{sessionId}", ProviderId.Cline, Trim(Clean(title), 72), step, status,
+                startedAt, lastActivity,
+                Detail: prompt,
+                Model: model,
+                ThreadId: sessionId);
+            return true;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (JsonException) { return false; }
+    }
+
+    private static ClineTail ReadClineMessages(string path)
+    {
+        if (!File.Exists(path))
+            return new ClineTail();
+
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            var root = document.RootElement;
+            var messages = root.ValueKind == JsonValueKind.Array
+                ? root
+                : root.TryGetProperty("messages", out var messagesNode)
+                    && messagesNode.ValueKind == JsonValueKind.Array
+                    ? messagesNode
+                    : default;
+            if (messages.ValueKind != JsonValueKind.Array)
+                return new ClineTail();
+
+            var result = new ClineTail();
+            foreach (var message in messages.EnumerateArray())
+            {
+                var timestamp = FirstTimestampAny(message, "ts", "timestamp", "created_at", "createdAt");
+                if (timestamp is { } activity
+                    && (result.LastActivity is null || activity > result.LastActivity))
+                    result.LastActivity = activity;
+
+                var role = (FirstString(message, "role") ?? "").ToLowerInvariant();
+                if (!message.TryGetProperty("content", out var content))
+                    continue;
+
+                if (content.ValueKind == JsonValueKind.String)
+                {
+                    ApplyClineText(role, content.GetString(), result);
+                    continue;
+                }
+                if (content.ValueKind != JsonValueKind.Array)
+                    continue;
+
+                foreach (var part in content.EnumerateArray())
+                {
+                    if (part.ValueKind != JsonValueKind.Object)
+                        continue;
+                    var type = (FirstString(part, "type") ?? "").ToLowerInvariant();
+                    if (type is "text" or "thinking" or "reasoning")
+                    {
+                        var text = FirstString(part, "text", "thinking", "reasoning") ?? "";
+                        ApplyClineText(role, text, result, type != "text");
+                    }
+                    else if (type is "tool_use" or "tool_call" or "function_call")
+                    {
+                        var name = FirstString(part, "name", "tool_name", "toolName", "function") ?? "tool";
+                        var details = GetPayloadDetails(part);
+                        result.State = IsWaitingTool(name) ? TranscriptState.Waiting : TranscriptState.Action;
+                        result.Step = result.State == TranscriptState.Waiting
+                            ? "Waiting for input"
+                            : DescribeAction(name, details);
+                    }
+                    else if (type is "tool_result" or "tool_output" or "function_result")
+                    {
+                        if (IsTrue(part, "is_error", "isError", "error"))
+                        {
+                            result.State = TranscriptState.Failed;
+                            result.Step = "Failed";
+                        }
+                        else
+                        {
+                            result.State = TranscriptState.Action;
+                            result.Step = "Processing tool result";
+                        }
+                    }
+                }
+            }
+            return result;
+        }
+        catch (IOException) { return new ClineTail(); }
+        catch (UnauthorizedAccessException) { return new ClineTail(); }
+        catch (JsonException) { return new ClineTail(); }
+    }
+
+    private static void ApplyClineText(string role, string? rawText, ClineTail result, bool thinking = false)
+    {
+        var text = Clean(rawText);
+        if (text.Length == 0)
+            return;
+        if (role == "user")
+        {
+            var prompt = ExtractUserPrompt(text);
+            if (result.Prompt.Length == 0 && prompt.Length > 0)
+                result.Prompt = prompt;
+            result.State = TranscriptState.Action;
+            result.Step = "Thinking";
+        }
+        else if (thinking)
+        {
+            result.State = TranscriptState.Action;
+            result.Step = "Thinking";
+        }
+        else if (role == "assistant")
+        {
+            result.State = TranscriptState.Finished;
+            result.Summary = text;
+        }
+    }
+
+    private static string ExtractUserPrompt(string text)
+    {
+        var match = Regex.Match(text, "<user_input(?:\\s+[^>]*)?>(?<prompt>.*?)</user_input>",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        return match.Success ? Clean(match.Groups["prompt"].Value) : text;
+    }
+
+    private static bool IsWaitingTool(string name)
+        => name.Equals("AskUserQuestion", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("ExitPlanMode", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("approval", StringComparison.OrdinalIgnoreCase)
+            || name.Contains("confirm", StringComparison.OrdinalIgnoreCase);
+
+    private static bool TryReadKimiSession(string statePath, DateTimeOffset modified,
+        bool claimLive, out AgentActivityItem item)
+    {
+        item = default!;
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(statePath));
+            var root = document.RootElement;
+            var sessionDirectory = Path.GetDirectoryName(statePath) ?? "";
+            var sessionId = Path.GetFileName(sessionDirectory);
+            var title = FirstString(root, "title") ?? "";
+            var startedAt = FirstTimestampAny(root, "createdAt", "created_at") ?? modified;
+            var agents = root.TryGetProperty("agents", out var agentsNode)
+                && agentsNode.ValueKind == JsonValueKind.Object
+                ? agentsNode.EnumerateObject().Count()
+                : 0;
+            var wirePath = Path.Combine(sessionDirectory, "agents", "main", "wire.jsonl");
+            if (!File.Exists(wirePath))
+                wirePath = File.Exists(Path.Combine(sessionDirectory, "wire.jsonl"))
+                    ? Path.Combine(sessionDirectory, "wire.jsonl")
+                    : Directory.Exists(Path.Combine(sessionDirectory, "agents"))
+                    ? Directory.EnumerateFiles(Path.Combine(sessionDirectory, "agents"), "wire.jsonl", SearchOption.AllDirectories).FirstOrDefault() ?? ""
+                    : "";
+
+            var tail = ReadKimiWire(wirePath);
+            title = FirstNonEmpty(
+                string.Equals(title, "New Session", StringComparison.OrdinalIgnoreCase) ? "" : title,
+                SummarizeTitle(tail.Prompt) ?? "",
+                "Kimi");
+            var lastActivity = Max(modified, tail.LastActivity ?? modified);
+            var live = claimLive && modified > DateTimeOffset.Now - RecentWindow;
+            var fresh = DateTimeOffset.Now - lastActivity < BusyWindow;
+            var status = !live
+                ? tail.State == TranscriptState.Failed ? AgentActivityStatus.Failed : AgentActivityStatus.Completed
+                : tail.State == TranscriptState.Waiting
+                    ? AgentActivityStatus.Waiting
+                    : fresh ? AgentActivityStatus.Working : AgentActivityStatus.Idle;
+            var step = status switch
+            {
+                AgentActivityStatus.Completed => "Completed",
+                AgentActivityStatus.Failed => "Failed",
+                AgentActivityStatus.Waiting => FirstNonEmpty(tail.Step, "Waiting for input"),
+                AgentActivityStatus.Idle => "Waiting for the next prompt",
+                _ => FirstNonEmpty(tail.Step, tail.Summary, "Thinking"),
+            };
+            item = new AgentActivityItem(
+                $"kimi:{sessionId}", ProviderId.Kimi, Trim(Clean(title), 72), step, status,
+                startedAt, lastActivity,
+                SubagentCount: Math.Max(0, agents - 1),
+                Detail: tail.Prompt,
+                Model: tail.Model,
+                ThreadId: sessionId);
+            return true;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (JsonException) { return false; }
+    }
+
+    private static KimiTail ReadKimiWire(string path)
+    {
+        var result = new KimiTail();
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            return result;
+
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            stream.Seek(Math.Max(0, stream.Length - 262_144), SeekOrigin.Begin);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            while (reader.ReadLine() is { } line)
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                    continue;
+                try
+                {
+                    using var document = JsonDocument.Parse(line);
+                    ParseKimiRecord(document.RootElement, result);
+                }
+                catch (JsonException) { }
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return result;
+    }
+
+    private static void ParseKimiRecord(JsonElement value, KimiTail result)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+            return;
+
+        var timestamp = FirstTimestampAny(value, "time", "timestamp", "created_at", "createdAt", "ts");
+        if (timestamp is { } activity
+            && (result.LastActivity is null || activity > result.LastActivity))
+            result.LastActivity = activity;
+
+        var nested = FirstObject(value, "event", "payload", "data", "params");
+        if (nested.ValueKind == JsonValueKind.Object)
+            ParseKimiRecord(nested, result);
+
+        var type = FirstString(value, "type", "event", "kind", "method", "role") ?? "";
+        var normalized = type.ToLowerInvariant();
+        var text = FirstStringDeep(value, "prompt", "user_input", "text", "content", "message");
+        var name = FirstStringDeep(value, "tool_name", "toolName", "function_name", "function", "tool", "name");
+        var details = FirstStringDeep(value, "command", "path");
+        if (details.Length == 0)
+            details = FirstJsonTextDeep(value, "arguments", "input", "params");
+
+        if (normalized.Contains("user", StringComparison.Ordinal)
+            || normalized.Contains("prompt", StringComparison.Ordinal)
+            || normalized.Contains("input", StringComparison.Ordinal))
+        {
+            if (result.Prompt.Length == 0 && text.Length > 0)
+                result.Prompt = text;
+            result.State = TranscriptState.Action;
+            result.Step = "Thinking";
+        }
+        else if (normalized.Contains("approval", StringComparison.Ordinal)
+            || normalized.Contains("permission", StringComparison.Ordinal)
+            || normalized.Contains("ask_user", StringComparison.Ordinal)
+            || normalized.Contains("request", StringComparison.Ordinal))
+        {
+            result.State = TranscriptState.Waiting;
+            result.Step = "Waiting for input";
+        }
+        else if (normalized.Contains("error", StringComparison.Ordinal)
+            || normalized.Contains("fail", StringComparison.Ordinal))
+        {
+            result.State = TranscriptState.Failed;
+            result.Step = "Failed";
+        }
+        else if (normalized.Contains("tool", StringComparison.Ordinal)
+            || normalized.Contains("function_call", StringComparison.Ordinal)
+            || normalized.Contains("shell", StringComparison.Ordinal)
+            || normalized.Contains("command", StringComparison.Ordinal))
+        {
+            result.State = TranscriptState.Action;
+            result.Step = string.IsNullOrWhiteSpace(name) ? "Running tool" : DescribeAction(name, details);
+        }
+        else if (normalized.Contains("complete", StringComparison.Ordinal)
+            || normalized.Contains("finish", StringComparison.Ordinal)
+            || normalized.Contains("turn_end", StringComparison.Ordinal)
+            || normalized.Contains("session_end", StringComparison.Ordinal))
+        {
+            result.State = TranscriptState.Finished;
+            if (text.Length > 0)
+                result.Summary = text;
+        }
+        else if (normalized.Contains("assistant", StringComparison.Ordinal)
+            || normalized.Contains("response", StringComparison.Ordinal)
+            || normalized.Contains("message", StringComparison.Ordinal))
+        {
+            if (text.Length > 0)
+                result.Summary = text;
+            result.State = TranscriptState.Finished;
+        }
+
+        if (result.Model.Length == 0)
+            result.Model = FirstStringDeep(value, "model", "model_name", "modelName");
+    }
+
     private static bool TryReadGrokSession(string summaryPath, DateTimeOffset modified,
         bool claimLive, out AgentActivityItem item)
     {
@@ -1172,6 +1636,124 @@ internal sealed class AgentActivityScanner
                 return parsed.ToLocalTime();
         }
         return null;
+    }
+
+    private static DateTimeOffset? FirstTimestampAny(JsonElement value, params string[] names)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+            return null;
+        foreach (var name in names)
+        {
+            if (!value.TryGetProperty(name, out var property))
+                continue;
+            if (property.ValueKind == JsonValueKind.String
+                && DateTimeOffset.TryParse(property.GetString(), out var parsed))
+                return parsed.ToLocalTime();
+            if (property.ValueKind == JsonValueKind.Number
+                && property.TryGetInt64(out var numeric))
+            {
+                try
+                {
+                    return numeric > 10_000_000_000
+                        ? DateTimeOffset.FromUnixTimeMilliseconds(numeric).ToLocalTime()
+                        : DateTimeOffset.FromUnixTimeSeconds(numeric).ToLocalTime();
+                }
+                catch (ArgumentOutOfRangeException) { }
+            }
+        }
+        return null;
+    }
+
+    private static JsonElement FirstObject(JsonElement value, params string[] names)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+            return default;
+        foreach (var name in names)
+            if (value.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.Object)
+                return property;
+        return default;
+    }
+
+    private static string FirstStringDeep(JsonElement value, params string[] names)
+    {
+        if (value.ValueKind == JsonValueKind.String)
+            return Clean(value.GetString());
+        if (value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in value.EnumerateArray())
+            {
+                var result = FirstStringDeep(child, names);
+                if (result.Length > 0)
+                    return result;
+            }
+            return "";
+        }
+        if (value.ValueKind != JsonValueKind.Object)
+            return "";
+
+        foreach (var name in names)
+        {
+            if (!value.TryGetProperty(name, out var property))
+                continue;
+            var result = property.ValueKind == JsonValueKind.String
+                ? Clean(property.GetString())
+                : ExtractContentText(property);
+            if (result.Length > 0)
+                return result;
+        }
+
+        foreach (var property in value.EnumerateObject())
+        {
+            if (property.Value.ValueKind is not (JsonValueKind.Object or JsonValueKind.Array))
+                continue;
+            var result = FirstStringDeep(property.Value, names);
+            if (result.Length > 0)
+                return result;
+        }
+        return "";
+    }
+
+    private static string FirstJsonTextDeep(JsonElement value, params string[] names)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+            return "";
+        foreach (var name in names)
+        {
+            if (!value.TryGetProperty(name, out var property))
+                continue;
+            if (property.ValueKind == JsonValueKind.String)
+                return property.GetString() ?? "";
+            if (property.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
+                return property.ToString();
+        }
+        foreach (var property in value.EnumerateObject())
+        {
+            if (property.Value.ValueKind is not (JsonValueKind.Object or JsonValueKind.Array))
+                continue;
+            var result = FirstJsonTextDeep(property.Value, names);
+            if (result.Length > 0)
+                return result;
+        }
+        return "";
+    }
+
+    private static bool IsTrue(JsonElement value, params string[] names)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+            return false;
+        foreach (var name in names)
+        {
+            if (!value.TryGetProperty(name, out var property))
+                continue;
+            if (property.ValueKind == JsonValueKind.True)
+                return true;
+            if (property.ValueKind == JsonValueKind.String
+                && bool.TryParse(property.GetString(), out var parsed))
+                return parsed;
+            if (property.ValueKind == JsonValueKind.Object)
+                return true;
+        }
+        return false;
     }
 
     private static IReadOnlyList<AgentActivityItem> ReadOpenCodeSessions(
@@ -1615,6 +2197,20 @@ internal sealed class AgentActivityScanner
     internal static string? SummarizeTitleForTesting(string? prompt)
         => SummarizeTitle(prompt);
 
+    internal static AgentActivityItem? ReadClineForTesting(string metadataPath, bool claimLive = true)
+        => TryReadClineSession(
+            metadataPath,
+            new DateTimeOffset(File.GetLastWriteTimeUtc(metadataPath), TimeSpan.Zero).ToLocalTime(),
+            claimLive,
+            out var item) ? item : null;
+
+    internal static AgentActivityItem? ReadKimiForTesting(string statePath, bool claimLive = true)
+        => TryReadKimiSession(
+            statePath,
+            new DateTimeOffset(File.GetLastWriteTimeUtc(statePath), TimeSpan.Zero).ToLocalTime(),
+            claimLive,
+            out var item) ? item : null;
+
     private static void ParseClaudeEvent(JsonElement root, ref string step, ref string summary,
         ref string model, ref string threadId, ref string parentId, ref string prompt,
         ref string host, ref TranscriptState state)
@@ -1932,6 +2528,8 @@ internal sealed class AgentActivityScanner
                     case "cursor": Add(ProviderId.Cursor); break;
                     case "antigravity": Add(ProviderId.Antigravity); break;
                     case "devin": Add(ProviderId.Devin); break;
+                    case "cline": Add(ProviderId.Cline); break;
+                    case "kimi": Add(ProviderId.Kimi); break;
                 }
             }
             catch { }
@@ -1956,7 +2554,7 @@ internal sealed class AgentActivityScanner
             "Name = 'bun.exe' OR Name = 'deno.exe' OR Name = 'npm.exe' OR Name = 'npx.exe' OR " +
             "Name = 'pnpm.exe' OR Name = 'yarn.exe' OR Name = 'wsl.exe' OR Name = 'bash.exe' OR " +
             "Name = 'codex.exe' OR Name = 'claude.exe' OR Name = 'cursor-agent.exe' OR " +
-            "Name = 'opencode.exe' OR Name = 'cline.exe' OR Name = 'agy.exe' OR Name = 'grok.exe'";
+            "Name = 'opencode.exe' OR Name = 'cline.exe' OR Name = 'kimi.exe' OR Name = 'agy.exe' OR Name = 'grok.exe'";
 
         try
         {
@@ -1990,6 +2588,7 @@ internal sealed class AgentActivityScanner
         if (text.Contains("grok") || executable.Equals("grok", StringComparison.OrdinalIgnoreCase)) { provider = ProviderId.Grok; return true; }
         if (text.Contains("opencode")) { provider = ProviderId.OpenCode; return true; }
         if (text.Contains("cline")) { provider = ProviderId.Cline; return true; }
+        if (text.Contains("kimi")) { provider = ProviderId.Kimi; return true; }
         if (text.Contains(" codex") || executable.Equals("codex", StringComparison.OrdinalIgnoreCase)) { provider = ProviderId.Codex; return true; }
         return false;
     }
@@ -2091,6 +2690,24 @@ internal sealed class AgentActivityScanner
         string MessageId, string Type, DateTimeOffset ActivityAt, string Tool, string Status, string Input, string Text);
     private sealed record OpenCodeTail(
         string Step, string Summary, string Prompt, DateTimeOffset? LastActivity, TranscriptState State);
+    private sealed class ClineTail
+    {
+        public string Prompt { get; set; } = "";
+        public string Step { get; set; } = "";
+        public string Summary { get; set; } = "";
+        public string Model { get; set; } = "";
+        public DateTimeOffset? LastActivity { get; set; }
+        public TranscriptState State { get; set; }
+    }
+    private sealed class KimiTail
+    {
+        public string Prompt { get; set; } = "";
+        public string Step { get; set; } = "";
+        public string Summary { get; set; } = "";
+        public string Model { get; set; } = "";
+        public DateTimeOffset? LastActivity { get; set; }
+        public TranscriptState State { get; set; }
+    }
     private sealed record AntigravityConversationMetadata(
         string Id, string Title, string Preview, string Workspace, DateTimeOffset? UpdatedAt, string AgentName);
     private sealed record AntigravityStepRow(
