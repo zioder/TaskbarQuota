@@ -23,11 +23,11 @@ namespace TaskbarQuota.Controls
 
             path.Data = glyph;
             path.Fill = foreground;
-            ApplyTransform(path);
+            ApplyTransform(path, providerId);
             return true;
         }
 
-        public static void ApplyTransform(Path path)
+        public static void ApplyTransform(Path path, ProviderId? providerId = null)
         {
             var bounds = path.Data?.Bounds ?? Rect.Empty;
             if (bounds.IsEmpty || bounds.Width <= 0 || bounds.Height <= 0)
@@ -37,14 +37,18 @@ namespace TaskbarQuota.Controls
             }
 
             double scale = NormalizedExtent / Math.Max(bounds.Width, bounds.Height);
+            double scaleX = scale * OpticalScaleX(providerId);
             path.RenderTransform = new CompositeTransform
             {
-                ScaleX = scale,
+                ScaleX = scaleX,
                 ScaleY = scale,
-                TranslateX = (ViewportSize / 2) - ((bounds.X + bounds.Width / 2) * scale),
+                TranslateX = (ViewportSize / 2) - ((bounds.X + bounds.Width / 2) * scaleX),
                 TranslateY = (ViewportSize / 2) - ((bounds.Y + bounds.Height / 2) * scale),
             };
         }
+
+        internal static double OpticalScaleX(ProviderId? providerId)
+            => providerId is ProviderId.OpenCode or ProviderId.OpenCodeGo ? 1.24 : 1;
 
         public static double Viewport => ViewportSize;
     }
