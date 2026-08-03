@@ -84,7 +84,8 @@ namespace TaskbarQuota.Taskbar
         private static void CreateTrayIcon()
         {
             var open = new PopupMenuItem("Open TaskbarQuota", (_, _) => _dispatcher?.TryEnqueue(() => _showMainWindow?.Invoke()));
-            var activity = new PopupMenuItem("Open agent activity", (_, _) => _dispatcher?.TryEnqueue(() => OpenActivityFlyout()));
+            var activity = new PopupMenuItem("Open agent activity", (_, _) => _dispatcher?.TryEnqueue(
+                () => ToggleActivityFlyout(sourceWidget: null, selectedActivityId: null)));
             var move = new PopupMenuItem("Move primary taskbar widget", (_, _) => _dispatcher?.TryEnqueue(
                 () => PrimaryWidget()?.StartDragging()));
             var reset = new PopupMenuItem("Reset widget positions", (_, _) => _dispatcher?.TryEnqueue(
@@ -339,13 +340,19 @@ namespace TaskbarQuota.Taskbar
             }
         }
 
-        private static void ToggleActivityFlyout(TaskBarWidget widget, string? selectedActivityId)
+        private static void ToggleActivityFlyout(TaskBarWidget? sourceWidget, string? selectedActivityId)
         {
+            var widget = sourceWidget ?? PrimaryWidget();
+            if (widget is null)
+            {
+                Log.Warning("Cannot toggle agent activity: no taskbar widget is available");
+                return;
+            }
+
             if (!widget.IsAlive) return;
             try
             {
                 _flyout ??= new FlyoutWindow();
-                _flyout.Prewarm();
                 _flyout.ToggleActivityAbove(widget.Handle, selectedActivityId);
             }
             catch (Exception ex)
@@ -461,31 +468,6 @@ namespace TaskbarQuota.Taskbar
             {
                 if (widget.IsAlive)
                     SyncWidgetState(widget);
-            }
-        }
-
-        private static void OpenActivityFlyout(TaskBarWidget? sourceWidget = null, string? selectedActivityId = null)
-        {
-            var widget = sourceWidget ?? PrimaryWidget();
-            if (widget is null)
-            {
-                Log.Warning("Cannot open agent activity: no taskbar widget is available");
-                return;
-            }
-
-            try
-            {
-                _flyout ??= new FlyoutWindow();
-                // The taskbar activity section can be clicked before the low-priority startup prewarm
-                // runs. Prime this exact flyout synchronously so DesktopAcrylic is already attached to
-                // a composed window before the activity panel is shown.
-                _flyout.Prewarm();
-                _flyout.ShowActivityAbove(widget.Handle, selectedActivityId);
-            }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "Failed to open agent activity from tray");
-                _flyout = null;
             }
         }
 
