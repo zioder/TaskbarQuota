@@ -157,7 +157,14 @@ namespace TaskbarQuota
         public void ShowActivityAbove(IntPtr widgetHandle, string? selectedActivityId = null)
         {
             _selectedActivityId = selectedActivityId;
-            ShowAbove(widgetHandle, showActivity: true);
+            // Present the same initialized surface as a normal provider open before switching to the
+            // activity layer. This primes DesktopAcrylic on a first open; showing ActivityPanel as the
+            // first-ever surface can otherwise produce a blank, non-composited window until the user
+            // opens the provider dashboard once.
+            ShowAbove(widgetHandle, showActivity: false);
+            ShowActivityPanel();
+            RenderActivity(AgentActivityService.Instance.Snapshot);
+            ScheduleFlyoutBoundsUpdate();
         }
 
         private void ShowAbove(IntPtr widgetHandle, bool showActivity)
