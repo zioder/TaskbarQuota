@@ -119,6 +119,17 @@ namespace TaskbarQuota
             ShowAbove(widgetHandle);
         }
 
+        public void ToggleActivityAbove(IntPtr widgetHandle, string? selectedActivityId = null)
+        {
+            if (_shown)
+            {
+                Hide();
+                return;
+            }
+
+            ShowActivityAbove(widgetHandle, selectedActivityId);
+        }
+
         /// <summary>
         /// Compose the first XAML frame and spin up the acrylic backdrop off-screen once, so the first
         /// real open doesn't flash a black slab while WinUI warms up composition.

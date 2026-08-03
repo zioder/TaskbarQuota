@@ -214,7 +214,7 @@ namespace TaskbarQuota.Taskbar
                 widget.HydrateProvider = provider => HydrateResult(UsageCoordinator.Instance, provider);
                 widget.Clicked += () => _dispatcher?.TryEnqueue(() => ToggleFlyout(widget));
                 widget.ActivityClicked += item => _dispatcher?.TryEnqueue(
-                    () => OpenActivityFlyout(widget, item?.Id));
+                    () => ToggleActivityFlyout(widget, item?.Id));
                 Widgets[target.Handle] = widget;
                 SyncWidgetState(widget);
                 PrewarmFlyout();
@@ -335,6 +335,22 @@ namespace TaskbarQuota.Taskbar
             catch (Exception ex)
             {
                 Log.Error(ex, "Failed to toggle flyout");
+                _flyout = null;
+            }
+        }
+
+        private static void ToggleActivityFlyout(TaskBarWidget widget, string? selectedActivityId)
+        {
+            if (!widget.IsAlive) return;
+            try
+            {
+                _flyout ??= new FlyoutWindow();
+                _flyout.Prewarm();
+                _flyout.ToggleActivityAbove(widget.Handle, selectedActivityId);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to toggle agent activity flyout");
                 _flyout = null;
             }
         }
