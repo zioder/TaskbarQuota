@@ -19,7 +19,7 @@ public sealed partial class AgentActivitySummary : UserControl
     // The navigator and provider glyph need to remain usable, but the text area may shrink below the
     // preferred width so the host never reserves more space than the taskbar gap actually provides.
     public const int MinimumLogicalWidth = 160;
-    public event Action? Clicked;
+    public event Action<AgentActivityItem?>? Clicked;
     public AgentActivityItem? FollowedItem { get; private set; }
     private string? _followedId;
     private AgentActivitySnapshot _snapshot = new(Array.Empty<AgentActivityItem>());
@@ -37,7 +37,7 @@ public sealed partial class AgentActivitySummary : UserControl
     private void AgentActivitySummary_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (!e.Handled)
-            Clicked?.Invoke();
+            Clicked?.Invoke(FollowedItem);
     }
 
     public void SetLogicalWidth(int logicalWidth)

@@ -213,7 +213,8 @@ namespace TaskbarQuota.Taskbar
                 };
                 widget.HydrateProvider = provider => HydrateResult(UsageCoordinator.Instance, provider);
                 widget.Clicked += () => _dispatcher?.TryEnqueue(() => ToggleFlyout(widget));
-                widget.ActivityClicked += () => _dispatcher?.TryEnqueue(() => OpenActivityFlyout(widget));
+                widget.ActivityClicked += item => _dispatcher?.TryEnqueue(
+                    () => OpenActivityFlyout(widget, item?.Id));
                 Widgets[target.Handle] = widget;
                 SyncWidgetState(widget);
                 PrewarmFlyout();
@@ -447,7 +448,7 @@ namespace TaskbarQuota.Taskbar
             }
         }
 
-        private static void OpenActivityFlyout(TaskBarWidget? sourceWidget = null)
+        private static void OpenActivityFlyout(TaskBarWidget? sourceWidget = null, string? selectedActivityId = null)
         {
             var widget = sourceWidget ?? PrimaryWidget();
             if (widget is null)
@@ -459,7 +460,7 @@ namespace TaskbarQuota.Taskbar
             try
             {
                 _flyout ??= new FlyoutWindow();
-                _flyout.ShowActivityAbove(widget.Handle);
+                _flyout.ShowActivityAbove(widget.Handle, selectedActivityId);
             }
             catch (Exception ex)
             {

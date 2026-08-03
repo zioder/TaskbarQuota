@@ -34,6 +34,7 @@ namespace TaskbarQuota
         private bool _shown;
         private bool _prewarmed;
         private bool _dashboardLoaded;
+        private string? _selectedActivityId;
         private bool _showingActivity;
         private bool _sizeHooksRegistered;
         private bool _applyingBounds;
@@ -148,10 +149,16 @@ namespace TaskbarQuota
         }
 
         public void ShowAbove(IntPtr widgetHandle)
-            => ShowAbove(widgetHandle, showActivity: false);
+        {
+            _selectedActivityId = null;
+            ShowAbove(widgetHandle, showActivity: false);
+        }
 
-        public void ShowActivityAbove(IntPtr widgetHandle)
-            => ShowAbove(widgetHandle, showActivity: true);
+        public void ShowActivityAbove(IntPtr widgetHandle, string? selectedActivityId = null)
+        {
+            _selectedActivityId = selectedActivityId;
+            ShowAbove(widgetHandle, showActivity: true);
+        }
 
         private void ShowAbove(IntPtr widgetHandle, bool showActivity)
         {
@@ -200,21 +207,25 @@ namespace TaskbarQuota
             ActivityCountText.Text = snapshot.Items.Count == 0 ? "" : snapshot.Items.Count.ToString();
 
             var primary = snapshot.Primary;
-            if (primary is { } primaryItem)
+            var selected = _selectedActivityId is { Length: > 0 } selectedId
+                ? snapshot.TrackedItems.FirstOrDefault(item => item.Id == selectedId)
+                : null;
+            var headerItem = selected ?? primary;
+            if (headerItem is { } primaryItem)
             {
                 var providerName = ActivityProviderDisplayName(primaryItem.Provider);
                 var providerCount = snapshot.Items
                     .Select(item => item.Provider)
                     .Distinct()
                     .Count();
-                bool showProviderMarker = providerCount > 1
-                    || primaryItem.Provider != UsageCoordinator.Instance.ActiveProvider;
+                // The activity panel is keyed to the selected agent, not the foreground quota provider.
+                // Keep its glyph visible even when both happen to use the same provider.
+                bool showProviderMarker = true;
 
                 ActivityProviderAvatar.ProviderId = primaryItem.Provider;
                 ActivityProviderAvatar.Initial = providerName.Length > 0 ? providerName[0].ToString() : "?";
-                ActivityProviderAvatar.ForegroundBrush = AgentActivityVisuals.StatusBrush(
-                    primaryItem.Status,
-                    ActivityProviderAvatar.ForegroundBrush ?? (Brush)Application.Current.Resources["AccentTextFillColorPrimaryBrush"]);
+                ActivityProviderAvatar.ForegroundBrush =
+                    (Brush)Application.Current.Resources["AccentTextFillColorPrimaryBrush"];
                 ActivityProviderAvatar.Visibility = showProviderMarker
                     ? Visibility.Visible
                     : Visibility.Collapsed;

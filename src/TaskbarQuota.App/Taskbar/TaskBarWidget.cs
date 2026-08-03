@@ -206,7 +206,7 @@ namespace TaskbarQuota.Taskbar
         /// <summary>Raised when any quota tile is clicked; provider-agnostic, it opens the provider flyout.</summary>
         public event Action? Clicked;
         /// <summary>Raised when the agent activity summary is clicked, so its activity panel can open.</summary>
-        public event Action? ActivityClicked;
+        public event Action<AgentActivityItem?>? ActivityClicked;
         public event EventHandler? Destroying;
 
         public TaskBarWidget(TaskbarWindowTarget target)
@@ -508,7 +508,7 @@ namespace TaskbarQuota.Taskbar
 
         private void OnTileClicked() => Clicked?.Invoke();
 
-        private void OnActivityClicked() => ActivityClicked?.Invoke();
+        private void OnActivityClicked(AgentActivityItem? item) => ActivityClicked?.Invoke(item);
 
         private void WidgetSummary_DesiredHostWidthChanged(int logicalWidth) => RecomputeLayout();
 
