@@ -203,10 +203,26 @@ namespace TaskbarQuota
             if (hwnd == IntPtr.Zero)
                 return;
 
-            if (User32.GetForegroundWindow() != hwnd)
-                User32.SetForegroundWindow(hwnd);
-            User32.SetActiveWindow(hwnd);
-            User32.SetFocus(hwnd);
+            var foreground = User32.GetForegroundWindow();
+            var foregroundThread = foreground == IntPtr.Zero
+                ? 0u
+                : User32.GetWindowThreadProcessId(foreground, out _);
+            var currentThread = User32.GetCurrentThreadId();
+            bool attached = foregroundThread != 0
+                && foregroundThread != currentThread
+                && User32.AttachThreadInput(foregroundThread, currentThread, true);
+            try
+            {
+                if (User32.GetForegroundWindow() != hwnd)
+                    User32.SetForegroundWindow(hwnd);
+                User32.SetActiveWindow(hwnd);
+                User32.SetFocus(hwnd);
+            }
+            finally
+            {
+                if (attached)
+                    User32.AttachThreadInput(foregroundThread, currentThread, false);
+            }
         }
 
         private void ShowProviderDashboard()
