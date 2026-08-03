@@ -184,10 +184,24 @@ namespace TaskbarQuota
             _shown = true;
             ApplyFlyoutBounds();
             GetAppWindow().Show();
-            Activate();
+            ActivateFlyout();
             ScheduleFlyoutBoundsUpdate();
 
             _ = UpdateAvailabilityService.Instance.CheckSilentlyAsync();
+        }
+
+        private void ActivateFlyout()
+        {
+            Activate();
+
+            // Activity can be opened directly from the injected taskbar island. In that path WinUI's
+            // Activate() is not always enough to transfer foreground ownership from Explorer, leaving
+            // DesktopAcrylic in its inactive/transparent state until the user clicks the flyout again.
+            // Quota normally gets this transfer as a side effect of its provider interaction, so make it
+            // explicit for the shared path instead.
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            if (hwnd != IntPtr.Zero && User32.GetForegroundWindow() != hwnd)
+                User32.SetForegroundWindow(hwnd);
         }
 
         private void ShowProviderDashboard()
