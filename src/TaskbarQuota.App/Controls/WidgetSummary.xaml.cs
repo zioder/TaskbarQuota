@@ -189,7 +189,7 @@ namespace TaskbarQuota.Controls
             var glyph = TaskbarQuota.ViewModels.Ui.Glyph(result.Id);
             if (glyph != null)
             {
-                SetNormalizedGlyph(BadgeGlyph, glyph, BadgeGlyph.Fill as Brush ?? Foreground, result.Id);
+                SetNormalizedGlyph(BadgeGlyph, glyph, BadgeGlyph.Fill as Brush ?? Foreground);
                 BadgeGlyphBox.Visibility = Visibility.Visible;
                 BadgeText.Visibility = Visibility.Collapsed;
             }
@@ -1356,15 +1356,14 @@ namespace TaskbarQuota.Controls
             };
         }
 
-        private static void SetNormalizedGlyph(
-            Path path, Geometry glyph, Brush foreground, ProviderId? providerId = null)
+        private static void SetNormalizedGlyph(Path path, Geometry glyph, Brush foreground)
         {
             path.Data = glyph;
             path.Fill = foreground;
-            SetNormalizedGlyphTransform(path, providerId);
+            SetNormalizedGlyphTransform(path);
         }
 
-        private static void SetNormalizedGlyphTransform(Path path, ProviderId? providerId = null)
+        private static void SetNormalizedGlyphTransform(Path path)
         {
             var bounds = path.Data?.Bounds ?? Rect.Empty;
             if (bounds.IsEmpty || bounds.Width <= 0 || bounds.Height <= 0)
@@ -1374,12 +1373,11 @@ namespace TaskbarQuota.Controls
             }
 
             double scale = NormalizedGlyphExtent / Math.Max(bounds.Width, bounds.Height);
-            double scaleX = scale * ProviderGlyphRenderer.OpticalScaleX(providerId);
             path.RenderTransform = new CompositeTransform
             {
-                ScaleX = scaleX,
+                ScaleX = scale,
                 ScaleY = scale,
-                TranslateX = (GlyphViewportSize / 2) - ((bounds.X + bounds.Width / 2) * scaleX),
+                TranslateX = (GlyphViewportSize / 2) - ((bounds.X + bounds.Width / 2) * scale),
                 TranslateY = (GlyphViewportSize / 2) - ((bounds.Y + bounds.Height / 2) * scale),
             };
         }
