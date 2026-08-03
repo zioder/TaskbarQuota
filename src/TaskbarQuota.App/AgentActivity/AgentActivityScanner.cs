@@ -912,9 +912,17 @@ internal sealed class AgentActivityScanner
                     continue;
                 var modified = File.GetLastWriteTimeUtc(path);
                 // SQLite WAL mode can leave the main database timestamp unchanged while the
-                // companion -wal file receives the active session writes. The session query below
-                // applies the recency window, so keep the database candidate even when its main
-                // file is older than six hours.
+                // companion -wal file receives the active session writes. Use the newest companion
+                // timestamp so an active OpenCode desktop session stays in the scan's recent set.
+                foreach (var companion in new[] { path + "-wal", path + "-shm" })
+                {
+                    if (File.Exists(companion))
+                    {
+                        var companionModified = File.GetLastWriteTimeUtc(companion);
+                        if (companionModified > modified)
+                            modified = companionModified;
+                    }
+                }
                 output.Add((ProviderId.OpenCode, path, new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
             }
             catch (IOException) { }
@@ -2519,18 +2527,8 @@ internal sealed class AgentActivityScanner
         {
             try
             {
-                switch (process.ProcessName.ToLowerInvariant())
-                {
-                    case "codex":
-                    case "chatgpt": Add(ProviderId.Codex); break;
-                    case "claude": Add(ProviderId.Claude); break;
-                    case "grok": Add(ProviderId.Grok); break;
-                    case "cursor": Add(ProviderId.Cursor); break;
-                    case "antigravity": Add(ProviderId.Antigravity); break;
-                    case "devin": Add(ProviderId.Devin); break;
-                    case "cline": Add(ProviderId.Cline); break;
-                    case "kimi": Add(ProviderId.Kimi); break;
-                }
+                if (TryGetDesktopProvider(process.ProcessName, out var provider))
+                    Add(provider);
             }
             catch { }
             finally { process.Dispose(); }
@@ -2541,6 +2539,30 @@ internal sealed class AgentActivityScanner
         // not several simultaneous tasks.
         void Add(ProviderId provider) => live[provider] = 1;
     }
+
+    private static bool TryGetDesktopProvider(string processName, out ProviderId provider)
+    {
+        provider = default;
+        switch (processName.ToLowerInvariant())
+        {
+            case "codex":
+            case "chatgpt": provider = ProviderId.Codex; return true;
+            case "claude": provider = ProviderId.Claude; return true;
+            case "grok": provider = ProviderId.Grok; return true;
+            case "cursor": provider = ProviderId.Cursor; return true;
+            case "antigravity": provider = ProviderId.Antigravity; return true;
+            case "opencode":
+            case "opencode beta":
+            case "opencode-beta": provider = ProviderId.OpenCode; return true;
+            case "devin": provider = ProviderId.Devin; return true;
+            case "cline": provider = ProviderId.Cline; return true;
+            case "kimi": provider = ProviderId.Kimi; return true;
+            default: return false;
+        }
+    }
+
+    internal static ProviderId? DetectDesktopProviderForTesting(string processName)
+        => TryGetDesktopProvider(processName, out var provider) ? provider : null;
 
     /// <summary>
     /// Finds agents launched from CMD, PowerShell, Windows Terminal, or a script runtime. This is

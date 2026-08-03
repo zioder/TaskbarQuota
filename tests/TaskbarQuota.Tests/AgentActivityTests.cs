@@ -38,6 +38,13 @@ public sealed class AgentActivityTests
         Assert.Equal("waiting", snapshot.Primary?.Id);
     }
 
+    [Theory]
+    [InlineData("OpenCode Beta", ProviderId.OpenCode)]
+    [InlineData("opencode", ProviderId.OpenCode)]
+    [InlineData("opencode-beta", ProviderId.OpenCode)]
+    public void DesktopOpenCodeProcess_IsRecognizedAsLiveProvider(string processName, ProviderId expected)
+        => Assert.Equal(expected, AgentActivityScanner.DetectDesktopProviderForTesting(processName));
+
     [Fact]
     public void ClineSession_ExtractsTitleToolActionAndWorkingState()
     {
