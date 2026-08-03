@@ -200,8 +200,13 @@ namespace TaskbarQuota
             // Quota normally gets this transfer as a side effect of its provider interaction, so make it
             // explicit for the shared path instead.
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
-            if (hwnd != IntPtr.Zero && User32.GetForegroundWindow() != hwnd)
+            if (hwnd == IntPtr.Zero)
+                return;
+
+            if (User32.GetForegroundWindow() != hwnd)
                 User32.SetForegroundWindow(hwnd);
+            User32.SetActiveWindow(hwnd);
+            User32.SetFocus(hwnd);
         }
 
         private void ShowProviderDashboard()

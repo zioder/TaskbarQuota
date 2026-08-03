@@ -116,6 +116,12 @@ namespace TaskbarQuota.Interop
         public static extern bool SetForegroundWindow([In] IntPtr hWnd);
 
         [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr SetActiveWindow([In] IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr SetFocus([In] IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
         public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
         [DllImport("user32.dll")]
