@@ -54,11 +54,6 @@
                     <TextBlock Text="Activity Widget"/>
                 </ToggleButton>
             </Grid>
-            <TextBlock Grid.Row="1"
-                       Margin="0,8,0,0"
-                       Text="Activity is read and displayed locally on this PC. It is not uploaded to TaskbarQuota."
-                       TextWrapping="Wrap"
-                       Style="{StaticResource CaptionTextBlockStyle}"/>
             <TextBlock x:Name="ActivityEmptyState"
                        Grid.Row="2"
                        Margin="0,24,0,0"

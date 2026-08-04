@@ -76,6 +76,9 @@
                 AutomationProperties.AutomationId="AgentActivityOpenButton"
                 AutomationProperties.LiveSetting="Polite"
                 Click="OpenActivityButton_Click">
+            <Button.Resources>
+                <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="Transparent" />
+            </Button.Resources>
             <Grid VerticalAlignment="Center" HorizontalAlignment="Stretch"
                   MinWidth="0" RowSpacing="0">
                 <Grid.RowDefinitions>
