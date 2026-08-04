@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using H.NotifyIcon.Core;
 using Microsoft.UI.Dispatching;
@@ -27,6 +28,7 @@ namespace TaskbarQuota.Taskbar
         private static Action? _showMainWindow;
         private static DispatcherTimer? _widgetHealthTimer;
         private static DispatcherTimer? _activityTimer;
+        private static CancellationTokenSource? _activityCts;
         private static readonly TimeSpan ActiveActivityInterval = TimeSpan.FromSeconds(2);
         private static readonly TimeSpan IdleActivityInterval = TimeSpan.FromSeconds(10);
         private static bool _initialized;
@@ -76,17 +78,19 @@ namespace TaskbarQuota.Taskbar
             if (_activityTimer != null || !WidgetSettingsService.EnableAgentActivityMonitoring)
                 return;
 
+            _activityCts = new CancellationTokenSource();
+            var cancellationToken = _activityCts.Token;
             _activityTimer = new DispatcherTimer { Interval = IdleActivityInterval };
             _activityTimer.Tick += async (_, _) =>
             {
-                await AgentActivityService.Instance.RefreshFromTranscriptsAsync();
+                await AgentActivityService.Instance.RefreshFromTranscriptsAsync(cancellationToken);
                 if (_activityTimer is { } timer)
                     timer.Interval = AgentActivityService.Instance.Snapshot.HasLiveItems
                         ? ActiveActivityInterval
                         : IdleActivityInterval;
             };
             _activityTimer.Start();
-            _ = Task.Run(AgentActivityService.Instance.RefreshFromTranscriptsAsync);
+            _ = AgentActivityService.Instance.RefreshFromTranscriptsAsync(cancellationToken);
         }
 
         private static void ConfigureActivityTimer()
@@ -99,6 +103,9 @@ namespace TaskbarQuota.Taskbar
 
             _activityTimer?.Stop();
             _activityTimer = null;
+            _activityCts?.Cancel();
+            _activityCts?.Dispose();
+            _activityCts = null;
             AgentActivityService.Instance.Clear();
         }
 
@@ -558,6 +565,9 @@ namespace TaskbarQuota.Taskbar
             _widgetHealthTimer = null;
             _activityTimer?.Stop();
             _activityTimer = null;
+            _activityCts?.Cancel();
+            _activityCts?.Dispose();
+            _activityCts = null;
             if (_foregroundWatcher is { } watcher)
             {
                 watcher.ForegroundChanged -= OnForegroundChanged;

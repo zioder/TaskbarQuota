@@ -32,7 +32,7 @@ public sealed class AgentActivityService
 
     public event Action<AgentActivitySnapshot>? Changed;
 
-    public async Task RefreshFromTranscriptsAsync()
+    public async Task RefreshFromTranscriptsAsync(CancellationToken cancellationToken = default)
     {
         // WMI/process inspection can occasionally outlive a tick; keep the newest completed scan rather
         // than queuing stale scans behind it.
@@ -45,7 +45,8 @@ public sealed class AgentActivityService
             IReadOnlyList<AgentActivityItem> scanned;
             try
             {
-                scanned = await Task.Run(() => _scanner.Scan()).ConfigureAwait(false);
+                scanned = await Task.Run(() => _scanner.Scan(cancellationToken), cancellationToken)
+                    .ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
