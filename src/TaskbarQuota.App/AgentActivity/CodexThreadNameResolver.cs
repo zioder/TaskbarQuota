@@ -9,10 +9,15 @@ namespace TaskbarQuota.AgentActivity;
 internal sealed class CodexThreadNameResolver
 {
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromSeconds(10);
-    private readonly string _indexPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "session_index.jsonl");
+    private readonly string _indexPath;
     private readonly Dictionary<string, string> _names = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _loadedAt = DateTimeOffset.MinValue;
+
+    public CodexThreadNameResolver(string? indexPath = null)
+    {
+        _indexPath = indexPath ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "session_index.jsonl");
+    }
 
     public string? GetName(string? threadId)
     {
@@ -29,28 +34,44 @@ internal sealed class CodexThreadNameResolver
             return;
 
         _loadedAt = DateTimeOffset.Now;
-        _names.Clear();
         if (!File.Exists(_indexPath))
+        {
+            _names.Clear();
             return;
+        }
 
         try
         {
+            var refreshed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var line in File.ReadLines(_indexPath))
             {
                 if (string.IsNullOrWhiteSpace(line))
                     continue;
-                using var entry = JsonDocument.Parse(line);
-                var root = entry.RootElement;
-                if (!root.TryGetProperty("id", out var id) || !root.TryGetProperty("thread_name", out var name))
-                    continue;
-                var idValue = id.GetString();
-                var nameValue = name.GetString()?.Trim();
-                if (!string.IsNullOrWhiteSpace(idValue) && !string.IsNullOrWhiteSpace(nameValue))
-                    _names[idValue] = nameValue;
+                try
+                {
+                    using var entry = JsonDocument.Parse(line);
+                    var root = entry.RootElement;
+                    if (!root.TryGetProperty("id", out var id)
+                        || id.ValueKind != JsonValueKind.String
+                        || !root.TryGetProperty("thread_name", out var name)
+                        || name.ValueKind != JsonValueKind.String)
+                        continue;
+                    var idValue = id.GetString();
+                    var nameValue = name.GetString()?.Trim();
+                    if (!string.IsNullOrWhiteSpace(idValue) && !string.IsNullOrWhiteSpace(nameValue))
+                        refreshed[idValue] = nameValue;
+                }
+                catch (JsonException)
+                {
+                    // session_index.jsonl is append-only; the last line may be incomplete while Codex writes it.
+                }
             }
+
+            _names.Clear();
+            foreach (var (id, name) in refreshed)
+                _names[id] = name;
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
-        catch (JsonException) { }
     }
 }

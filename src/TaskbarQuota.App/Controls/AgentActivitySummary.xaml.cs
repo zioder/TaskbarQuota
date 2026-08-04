@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media.Animation;
@@ -22,7 +23,7 @@ public sealed partial class AgentActivitySummary : UserControl
     public const int DefaultLogicalWidth = 240;
     // The navigator and provider glyph need to remain usable, but the text area may shrink below the
     // preferred width so the host never reserves more space than the taskbar gap actually provides.
-    public const int MinimumLogicalWidth = 160;
+    public const int MinimumLogicalWidth = 200;
     public event Action<AgentActivityItem?>? Clicked;
     public bool SuppressNextClick { get; set; }
     public AgentActivityItem? FollowedItem { get; private set; }
@@ -49,23 +50,17 @@ public sealed partial class AgentActivitySummary : UserControl
             _wheelGestureActive = false;
         };
         Loaded += (_, _) => ApplyForeground();
-        Tapped += AgentActivitySummary_Tapped;
         PointerWheelChanged += AgentActivitySummary_PointerWheelChanged;
     }
 
-    private void AgentActivitySummary_Tapped(object sender, TappedRoutedEventArgs e)
+    private void OpenActivityButton_Click(object sender, RoutedEventArgs e)
     {
         if (SuppressNextClick)
         {
             SuppressNextClick = false;
             return;
         }
-
-        if (!e.Handled)
-        {
-            e.Handled = true;
-            Clicked?.Invoke(FollowedItem);
-        }
+        Clicked?.Invoke(FollowedItem);
     }
 
     public void SetLogicalWidth(int logicalWidth)
@@ -104,7 +99,10 @@ public sealed partial class AgentActivitySummary : UserControl
         var activitySummary = ActivitySummary(items);
         UpdateNavigation(items, item.Id);
         TitleText.Text = ActivityTitle(item);
-        StepText.Text = SummaryText(item);
+        StepText.Text = $"{item.StatusText} · {SummaryText(item)}";
+        var accessibleSummary = $"{ActivityTitle(item)}, {providerName}, {item.StatusText}. {SummaryText(item)}";
+        AutomationProperties.SetName(OpenActivityButton, $"Open agent activity. {accessibleSummary}");
+        AutomationProperties.SetName(ProviderIcon, $"{providerName}, {item.StatusText}");
         ToolTipService.SetToolTip(this,
             $"{ActivityTitle(item)}: {item.Step}\n{items.Count} agents · {activitySummary}. Use the arrows or mouse wheel to switch agents.");
         ApplyForeground();
@@ -134,12 +132,6 @@ public sealed partial class AgentActivitySummary : UserControl
     private void PreviousButton_Click(object sender, RoutedEventArgs e) => MoveSelection(-1);
 
     private void NextButton_Click(object sender, RoutedEventArgs e) => MoveSelection(1);
-
-    private void NavigationButton_PointerPressed(object sender, PointerRoutedEventArgs e)
-        => e.Handled = true;
-
-    private void NavigationButton_Tapped(object sender, TappedRoutedEventArgs e)
-        => e.Handled = true;
 
     private bool MoveSelection(int direction)
     {

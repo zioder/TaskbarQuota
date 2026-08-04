@@ -62,6 +62,8 @@ public static class WidgetSettingsService
 
     private static readonly string ShowAgentActivityInWidgetPath =
         Path.Combine(AppStorage.AppDataDirectory, "show-agent-activity-in-widget.txt");
+    private static readonly string EnableAgentActivityMonitoringPath =
+        Path.Combine(AppStorage.AppDataDirectory, "enable-agent-activity-monitoring.txt");
 
     private static readonly Dictionary<string, bool> RowVisibility = LoadRowVisibility();
     private static readonly Dictionary<string, bool> ProviderVisibility = LoadProviderVisibility();
@@ -80,6 +82,8 @@ public static class WidgetSettingsService
     public static bool HideWhenProviderUnfocused { get; private set; } = LoadHideWhenUnfocused();
     /// <summary>Whether the separate Agent Activity island is shown on the taskbar. Enabled by default.</summary>
     public static bool ShowAgentActivityInWidget { get; private set; } = LoadShowAgentActivityInWidget();
+    /// <summary>Whether local agent processes and transcript stores are inspected for activity visualization.</summary>
+    public static bool EnableAgentActivityMonitoring { get; private set; } = LoadEnableAgentActivityMonitoring();
     public static event EventHandler? Changed;
     public static event EventHandler? DashboardCompositionChanged;
     public static event EventHandler? PercentageModeChanged;
@@ -259,6 +263,16 @@ public static class WidgetSettingsService
 
         ShowAgentActivityInWidget = enabled;
         Save(ShowAgentActivityInWidgetPath, enabled ? 1 : 0);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ApplyEnableAgentActivityMonitoring(bool enabled)
+    {
+        if (EnableAgentActivityMonitoring == enabled)
+            return;
+
+        EnableAgentActivityMonitoring = enabled;
+        Save(EnableAgentActivityMonitoringPath, enabled ? 1 : 0);
         Changed?.Invoke(null, EventArgs.Empty);
     }
 
@@ -664,6 +678,23 @@ public static class WidgetSettingsService
                 return true;
 
             string raw = File.ReadAllText(ShowAgentActivityInWidgetPath);
+            return !int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value)
+                || value != 0;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    private static bool LoadEnableAgentActivityMonitoring()
+    {
+        try
+        {
+            if (!File.Exists(EnableAgentActivityMonitoringPath))
+                return true;
+
+            string raw = File.ReadAllText(EnableAgentActivityMonitoringPath);
             return !int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value)
                 || value != 0;
         }

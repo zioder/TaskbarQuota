@@ -1164,19 +1164,35 @@ namespace TaskbarQuota
             => _lastActive == provider ? _activeProviderSource : ProviderSource.Unknown;
 
         private bool AcceptDetectedProvider(ProviderId provider)
+            => ShouldAcceptDetectedProvider(
+                ref _pendingDetectedProvider,
+                ref _pendingDetectedProviderSamples,
+                provider,
+                RequiredProviderSwitchSamples);
+
+        internal static bool ShouldAcceptDetectedProvider(
+            ref ProviderId? pendingProvider,
+            ref int pendingSamples,
+            ProviderId provider,
+            int requiredSamples)
         {
-            if (_pendingDetectedProvider != provider)
+            if (pendingProvider != provider)
             {
-                _pendingDetectedProvider = provider;
-                _pendingDetectedProviderSamples = 1;
-                return false;
+                pendingProvider = provider;
+                pendingSamples = 1;
+                if (requiredSamples > 1)
+                    return false;
+                pendingProvider = null;
+                pendingSamples = 0;
+                return true;
             }
 
-            _pendingDetectedProviderSamples++;
-            if (_pendingDetectedProviderSamples < RequiredProviderSwitchSamples)
+            pendingSamples++;
+            if (pendingSamples < requiredSamples)
                 return false;
 
-            ClearPendingDetectedProvider();
+            pendingProvider = null;
+            pendingSamples = 0;
             return true;
         }
 

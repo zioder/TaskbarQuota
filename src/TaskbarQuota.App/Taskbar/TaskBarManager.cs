@@ -27,6 +27,8 @@ namespace TaskbarQuota.Taskbar
         private static Action? _showMainWindow;
         private static DispatcherTimer? _widgetHealthTimer;
         private static DispatcherTimer? _activityTimer;
+        private static readonly TimeSpan ActiveActivityInterval = TimeSpan.FromSeconds(2);
+        private static readonly TimeSpan IdleActivityInterval = TimeSpan.FromSeconds(10);
         private static bool _initialized;
         private static bool _isReconcilingWidgets;
         private static ProviderId? _lastLoggedWidgetApplyProvider;
@@ -65,20 +67,39 @@ namespace TaskbarQuota.Taskbar
             }
 
             StartWidgetHealthTimer();
-            Log.Information("[activity] starting activity monitor");
-            StartActivityTimer();
+            ConfigureActivityTimer();
             OnActiveToolPresenceChanged(UsageCoordinator.Instance.IsActiveToolPresent);
         }
 
         private static void StartActivityTimer()
         {
-            if (_activityTimer != null)
+            if (_activityTimer != null || !WidgetSettingsService.EnableAgentActivityMonitoring)
                 return;
 
-            _activityTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-            _activityTimer.Tick += async (_, _) => await AgentActivityService.Instance.RefreshFromTranscriptsAsync();
+            _activityTimer = new DispatcherTimer { Interval = IdleActivityInterval };
+            _activityTimer.Tick += async (_, _) =>
+            {
+                await AgentActivityService.Instance.RefreshFromTranscriptsAsync();
+                if (_activityTimer is { } timer)
+                    timer.Interval = AgentActivityService.Instance.Snapshot.HasLiveItems
+                        ? ActiveActivityInterval
+                        : IdleActivityInterval;
+            };
             _activityTimer.Start();
             _ = Task.Run(AgentActivityService.Instance.RefreshFromTranscriptsAsync);
+        }
+
+        private static void ConfigureActivityTimer()
+        {
+            if (WidgetSettingsService.EnableAgentActivityMonitoring)
+            {
+                StartActivityTimer();
+                return;
+            }
+
+            _activityTimer?.Stop();
+            _activityTimer = null;
+            AgentActivityService.Instance.Clear();
         }
 
         private static void CreateTrayIcon()
@@ -328,14 +349,17 @@ namespace TaskbarQuota.Taskbar
         private static void ToggleFlyout(TaskBarWidget widget)
         {
             if (!widget.IsAlive) return;
+            FlyoutWindow? flyout = null;
             try
             {
-                _flyout ??= new FlyoutWindow();
-                _flyout.ToggleAbove(widget.Handle);
+                flyout = _flyout ?? new FlyoutWindow();
+                _flyout = flyout;
+                flyout.ToggleAbove(widget.Handle);
             }
             catch (Exception ex)
             {
                 Log.Error(ex, "Failed to toggle flyout");
+                try { flyout?.Close(); } catch { }
                 _flyout = null;
             }
         }
@@ -350,14 +374,17 @@ namespace TaskbarQuota.Taskbar
             }
 
             if (!widget.IsAlive) return;
+            FlyoutWindow? flyout = null;
             try
             {
-                _flyout ??= new FlyoutWindow();
-                _flyout.ToggleActivityAbove(widget.ActivityHandle, selectedActivityId);
+                flyout = _flyout ?? new FlyoutWindow();
+                _flyout = flyout;
+                flyout.ToggleActivityAbove(widget.ActivityHandle, selectedActivityId);
             }
             catch (Exception ex)
             {
                 Log.Error(ex, "Failed to toggle agent activity flyout");
+                try { flyout?.Close(); } catch { }
                 _flyout = null;
             }
         }
@@ -366,14 +393,17 @@ namespace TaskbarQuota.Taskbar
         {
             _dispatcher?.TryEnqueue(DispatcherQueuePriority.Low, () =>
             {
+                FlyoutWindow? flyout = null;
                 try
                 {
-                    _flyout ??= new FlyoutWindow();
-                    _flyout.Prewarm();
+                    flyout = _flyout ?? new FlyoutWindow();
+                    _flyout = flyout;
+                    flyout.Prewarm();
                 }
                 catch (Exception ex)
                 {
                     Log.Warning(ex, "Failed to prewarm flyout");
+                    try { flyout?.Close(); } catch { }
                     _flyout = null;
                 }
             });
@@ -487,7 +517,11 @@ namespace TaskbarQuota.Taskbar
 
         private static void OnWidgetSettingsChanged(object? sender, EventArgs e)
         {
-            _dispatcher?.TryEnqueue(SyncWidgetState);
+            _dispatcher?.TryEnqueue(() =>
+            {
+                ConfigureActivityTimer();
+                SyncWidgetState();
+            });
         }
 
         private static void OnQuitting()

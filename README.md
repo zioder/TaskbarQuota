@@ -135,6 +135,13 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 - **Click for flyout** — quick provider strip and settings shortcut above the widget.
 - **Fades when idle** — widget can hide when no supported AI tool process is detected; returns when you focus a supported app or terminal session.
 
+### Local agent activity
+
+- **Live task visualization** — a separate taskbar island shows working, waiting, idle, completed, and failed agent sessions. Selecting an agent opens the matching entry in the flyout.
+- **Supported local stores** — activity can be derived from Codex, Claude, OpenCode, Cline, Kimi, Grok, Antigravity, GitHub Copilot, and ZCode process/session data when those tools are running.
+- **Bounded retention** — completed activity is temporary, acknowledged after the activity flyout is viewed, and removed when it expires or disappears from the next successful scan.
+- **User controls** — the activity flyout can stop local activity monitoring completely or hide only the taskbar activity island.
+
 ### Active-tool detection (desktop app **or** terminal agent)
 
 This is the core behavior — everything else (widget, flyout, fetch cache) hangs off it.
@@ -191,6 +198,8 @@ Cookie headers are session credentials. Keep them private and do not paste them 
 ### Privacy
 
 - **Local-only** — no TaskbarQuota backend; usage calls go directly from your PC to each provider (or localhost for Antigravity).
+- **Agent activity stays on your PC** — TaskbarQuota reads local process metadata and supported transcript/session stores only to visualize your activity. Prompt-derived titles and steps are not uploaded to TaskbarQuota, sent to a training service, or used for model training.
+- **Monitoring can be disabled** — turn off **Monitoring** in the Agent activity flyout to stop process/session inspection and immediately clear retained activity from TaskbarQuota memory. Hiding **Activity Widget** alone only removes the taskbar island.
 - **No telemetry** — diagnostics log to `%TEMP%\taskbarquota.log` only.
 - **Cookie extraction is in-memory** — browser cookies are read to build a request header for the active fetch; they are not intentionally persisted (manual credentials in `credentials.json` are plain JSON today — keep that file on your PC only).
 
@@ -220,6 +229,7 @@ TaskBarManager → WidgetSummary (taskbar) + Dashboard + Flyout
 | Path | Role |
 | ---- | ---- |
 | `src/TaskbarQuota.App/ActiveApp/` | Foreground and CLI provider detection |
+| `src/TaskbarQuota.App/AgentActivity/` | Local process/session activity scanning and bounded in-memory state |
 | `src/TaskbarQuota.App/Browser/` | Browser cookie discovery and Chromium decryption |
 | `src/TaskbarQuota.App/Taskbar/` | Widget host, tray icon, taskbar layout watcher |
 | `src/TaskbarQuota.App/Usage/Providers/` | Per-provider fetch logic |

@@ -24,7 +24,10 @@ internal sealed class AgentActivityScanner
     private static readonly TimeSpan RecentWindow = TimeSpan.FromHours(6);
     private static readonly TimeSpan BusyWindow = TimeSpan.FromSeconds(30);
     private readonly string _home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-    private readonly CodexThreadNameResolver _threadNames = new();
+    private CodexThreadNameResolver _threadNames = new();
+    private readonly object _candidateGate = new();
+    private readonly Dictionary<string, (ProviderId Provider, string Path, DateTimeOffset Modified)> _knownCandidates =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public IReadOnlyList<AgentActivityItem> Scan(CancellationToken cancellationToken = default)
     {
@@ -33,7 +36,7 @@ internal sealed class AgentActivityScanner
         var desktopApps = ScanDesktopAgentApps();
         var terminalAgents = ScanTerminalAgentCommands();
         var liveProviders = MergeLiveProviders(desktopApps, terminalAgents);
-        Log.Information($"[activity] agent discovery: desktop={desktopApps.Values.Sum()}, terminal={terminalAgents.Values.Sum()}");
+        Log.Debug($"[activity] agent discovery: desktop={desktopApps.Values.Sum()}, terminal={terminalAgents.Values.Sum()}");
         var files = new List<(ProviderId Provider, string Path, DateTimeOffset Modified)>();
         // Process discovery is intentionally the gate for transcript/database work. Most agent
         // stores are SQLite or recursive file trees, so reopening them every tick when the app is
@@ -76,18 +79,22 @@ internal sealed class AgentActivityScanner
         files.RemoveAll(file => file.Provider == ProviderId.Copilot);
         files.AddRange(copilotFiles);
 
+        AddRememberedCandidates(files);
+        var candidates = SelectCandidates(files);
+        RememberCandidates(candidates);
+
         var parsed = new List<AgentActivityItem>();
         var liveClaims = new Dictionary<ProviderId, int>();
-        foreach (var file in files.OrderByDescending(f => f.Modified).Take(80))
+        foreach (var file in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
             int claim = liveClaims.TryGetValue(file.Provider, out var currentClaim) ? currentClaim : 0;
             bool claimLive = liveProviders.TryGetValue(file.Provider, out var liveCount) && claim < liveCount;
-            liveClaims[file.Provider] = claim + 1;
+            var candidateItems = new List<AgentActivityItem>();
             if (file.Provider == ProviderId.Grok)
             {
                 if (TryReadGrokSession(file.Path, file.Modified, claimLive, out var grokItem))
-                    parsed.Add(grokItem);
+                    candidateItems.Add(grokItem);
             }
             else if (file.Provider == ProviderId.Antigravity)
             {
@@ -95,35 +102,43 @@ internal sealed class AgentActivityScanner
                     ? TryReadAntigravityGuiSession(file.Path, file.Modified, claimLive, out var antigravityItem)
                     : TryReadAntigravitySession(file.Path, file.Modified, claimLive, out antigravityItem);
                 if (read)
-                    parsed.Add(antigravityItem);
+                    candidateItems.Add(antigravityItem);
             }
             else if (file.Provider == ProviderId.OpenCode)
             {
-                parsed.AddRange(ReadOpenCodeSessions(file.Path, file.Modified, claimLive));
+                candidateItems.AddRange(ReadOpenCodeSessions(file.Path, file.Modified, claimLive));
             }
             else if (file.Provider == ProviderId.Cline)
             {
                 if (TryReadClineSession(file.Path, file.Modified, claimLive, out var clineItem))
-                    parsed.Add(clineItem);
+                    candidateItems.Add(clineItem);
             }
             else if (file.Provider == ProviderId.Kimi)
             {
                 if (TryReadKimiSession(file.Path, file.Modified, claimLive, out var kimiItem))
-                    parsed.Add(kimiItem);
+                    candidateItems.Add(kimiItem);
             }
             else if (file.Provider == ProviderId.Copilot)
             {
                 if (TryReadCopilotSession(file.Path, file.Modified, claimLive, out var copilotItem))
-                    parsed.Add(copilotItem);
+                    candidateItems.Add(copilotItem);
             }
             else if (file.Provider == ProviderId.Zai)
             {
-                parsed.AddRange(ReadZcodeSessions(file.Path, file.Modified, claimLive));
+                candidateItems.AddRange(ReadZcodeSessions(file.Path, file.Modified, claimLive));
             }
             else if (TryRead(file.Provider, file.Path, file.Modified, claimLive, out var item))
             {
-                parsed.Add(item);
+                candidateItems.Add(item);
             }
+
+            // A concurrently-written or malformed newest file must not consume the only live-process
+            // claim and force the next valid session to look completed.
+            if (candidateItems.Count == 0)
+                continue;
+
+            liveClaims[file.Provider] = claim + 1;
+            parsed.AddRange(candidateItems);
         }
 
         return ApplyActiveHostFallback(GroupSessions(parsed))
@@ -132,6 +147,59 @@ internal sealed class AgentActivityScanner
             .ThenByDescending(item => item.UpdatedAt)
             .ToArray();
     }
+
+    private void AddRememberedCandidates(
+        List<(ProviderId Provider, string Path, DateTimeOffset Modified)> files)
+    {
+        lock (_candidateGate)
+        {
+            var existingPaths = files.Select(file => file.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var (path, candidate) in _knownCandidates.ToArray())
+            {
+                if (!File.Exists(path) || DateTimeOffset.Now - candidate.Modified > RecentWindow)
+                {
+                    _knownCandidates.Remove(path);
+                    continue;
+                }
+                if (!existingPaths.Contains(path))
+                    files.Add(candidate);
+            }
+        }
+    }
+
+    private void RememberCandidates(
+        IReadOnlyList<(ProviderId Provider, string Path, DateTimeOffset Modified)> candidates)
+    {
+        lock (_candidateGate)
+        {
+            foreach (var candidate in candidates)
+                _knownCandidates[candidate.Path] = candidate;
+
+            var retainedPaths = _knownCandidates.Values
+                .GroupBy(candidate => candidate.Provider)
+                .SelectMany(group => group.OrderByDescending(candidate => candidate.Modified).Take(20))
+                .Select(candidate => candidate.Path)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in _knownCandidates.Keys.Where(path => !retainedPaths.Contains(path)).ToArray())
+                _knownCandidates.Remove(path);
+        }
+    }
+
+    public void ClearCache()
+    {
+        lock (_candidateGate)
+            _knownCandidates.Clear();
+        _threadNames = new CodexThreadNameResolver();
+    }
+
+    internal static IReadOnlyList<(ProviderId Provider, string Path, DateTimeOffset Modified)> SelectCandidates(
+        IEnumerable<(ProviderId Provider, string Path, DateTimeOffset Modified)> files,
+        int maxPerProvider = 20)
+        => files
+            .GroupBy(file => file.Provider)
+            .SelectMany(group => group.OrderByDescending(file => file.Modified).Take(maxPerProvider))
+            .OrderByDescending(file => file.Modified)
+            .ToArray();
 
     private void AddRecent(List<(ProviderId, string, DateTimeOffset)> output, string root,
         ProviderId provider, CancellationToken cancellationToken)
@@ -361,7 +429,13 @@ internal sealed class AgentActivityScanner
 
             transcript.LastActivity ??= modified;
             transcript.StartedAt ??= transcript.LastActivity;
-            var live = claimLive;
+            // VS Code being open is not proof that Copilot is currently running a turn. Require a
+            // pending/waiting request or a fresh transcript write so an old chat does not stay live for
+            // the lifetime of the editor process.
+            var live = claimLive
+                && (transcript.Pending
+                    || transcript.Waiting
+                    || DateTimeOffset.Now - transcript.LastActivity.Value < BusyWindow);
             var status = !live
                 ? transcript.Failed ? AgentActivityStatus.Failed : AgentActivityStatus.Completed
                 : transcript.Failed ? AgentActivityStatus.Failed
@@ -1572,8 +1646,9 @@ internal sealed class AgentActivityScanner
         {
             using var document = JsonDocument.Parse(File.ReadAllText(metadataPath));
             var root = document.RootElement;
-            var sessionId = FirstString(root, "session_id", "sessionId")
-                ?? Path.GetFileNameWithoutExtension(metadataPath);
+            var sessionId = FirstNonEmpty(
+                FirstString(root, "session_id", "sessionId"),
+                Path.GetFileNameWithoutExtension(metadataPath));
             var metadata = root.TryGetProperty("metadata", out var metadataNode)
                 && metadataNode.ValueKind == JsonValueKind.Object
                 ? metadataNode
@@ -3158,7 +3233,8 @@ internal sealed class AgentActivityScanner
     private static IReadOnlyDictionary<ProviderId, int> ScanTerminalAgentCommands()
     {
         var live = new Dictionary<ProviderId, int>();
-        const string query = "SELECT Name, CommandLine FROM Win32_Process WHERE " +
+        var matches = new List<(int ProcessId, int ParentProcessId, ProviderId Provider)>();
+        const string query = "SELECT ProcessId, ParentProcessId, Name, CommandLine FROM Win32_Process WHERE " +
             "Name = 'cmd.exe' OR Name = 'powershell.exe' OR Name = 'pwsh.exe' OR Name = 'node.exe' OR " +
             "Name = 'bun.exe' OR Name = 'deno.exe' OR Name = 'npm.exe' OR Name = 'npx.exe' OR " +
             "Name = 'pnpm.exe' OR Name = 'yarn.exe' OR Name = 'wsl.exe' OR Name = 'bash.exe' OR " +
@@ -3176,12 +3252,41 @@ internal sealed class AgentActivityScanner
                     var name = Path.GetFileNameWithoutExtension(process["Name"]?.ToString() ?? "");
                     var commandLine = process["CommandLine"]?.ToString() ?? "";
                     if (TryGetTerminalProvider(name, commandLine, out var provider))
-                        Add(provider);
+                    {
+                        var processId = Convert.ToInt32(process["ProcessId"] ?? 0);
+                        if (processId <= 0)
+                            continue;
+                        matches.Add((
+                            processId,
+                            Convert.ToInt32(process["ParentProcessId"] ?? 0),
+                            provider));
+                    }
                 }
             }
         }
         catch (ManagementException) { }
         catch (UnauthorizedAccessException) { }
+
+        var byId = matches.ToDictionary(match => match.ProcessId);
+        foreach (var match in matches)
+        {
+            // npm/npx/node and shell launchers can all describe the same agent process tree. Count only
+            // the highest matching ancestor so a single task receives one transcript claim.
+            var parentId = match.ParentProcessId;
+            var hasMatchingAncestor = false;
+            var visited = new HashSet<int>();
+            while (parentId != 0 && visited.Add(parentId) && byId.TryGetValue(parentId, out var parent))
+            {
+                if (parent.Provider == match.Provider)
+                {
+                    hasMatchingAncestor = true;
+                    break;
+                }
+                parentId = parent.ParentProcessId;
+            }
+            if (!hasMatchingAncestor)
+                Add(match.Provider);
+        }
 
         return live;
         void Add(ProviderId provider) => live[provider] = live.TryGetValue(provider, out var count) ? count + 1 : 1;
@@ -3190,19 +3295,55 @@ internal sealed class AgentActivityScanner
     private static bool TryGetTerminalProvider(string executable, string commandLine, out ProviderId provider)
     {
         provider = default;
-        var text = (executable + " " + commandLine).ToLowerInvariant();
-        if (text.Contains("claude-code") || text.Contains(" claude") || executable.Equals("claude", StringComparison.OrdinalIgnoreCase)) { provider = ProviderId.Claude; return true; }
-        if (text.Contains("cursor-agent") || text.Contains("cursor agent")) { provider = ProviderId.Cursor; return true; }
-        if (text.Contains("antigravity") || executable.Equals("agy", StringComparison.OrdinalIgnoreCase)) { provider = ProviderId.Antigravity; return true; }
-        if (text.Contains("grok") || executable.Equals("grok", StringComparison.OrdinalIgnoreCase)) { provider = ProviderId.Grok; return true; }
-        if (text.Contains("opencode")) { provider = ProviderId.OpenCode; return true; }
-        if (text.Contains("cline")) { provider = ProviderId.Cline; return true; }
-        if (text.Contains("kimi")) { provider = ProviderId.Kimi; return true; }
-        if (text.Contains("zcode") || executable.Equals("zcode", StringComparison.OrdinalIgnoreCase)) { provider = ProviderId.Zai; return true; }
-        if (text.Contains("copilot") || executable.Equals("github-copilot", StringComparison.OrdinalIgnoreCase)) { provider = ProviderId.Copilot; return true; }
-        if (text.Contains(" codex") || executable.Equals("codex", StringComparison.OrdinalIgnoreCase)) { provider = ProviderId.Codex; return true; }
+        var exe = executable.ToLowerInvariant();
+        if (TryGetDirectTerminalProvider(exe, out provider))
+            return true;
+
+        // Shell command lines routinely contain paths such as .codex or user-entered search terms. Do
+        // not infer an agent from arbitrary substrings. Runtime wrappers are accepted only when their
+        // command line names a known package/entry point.
+        if (exe is not ("node" or "bun" or "deno" or "npm" or "npx" or "pnpm" or "yarn" or "wsl" or "bash"))
+            return false;
+
+        var text = commandLine.ToLowerInvariant().Replace('/', '\\');
+        if (ContainsPackage(text, "@anthropic-ai\\claude-code", "claude-code\\cli", "\\claude-code.")) { provider = ProviderId.Claude; return true; }
+        if (ContainsPackage(text, "@openai\\codex", "\\codex\\bin\\codex", "\\codex-cli")) { provider = ProviderId.Codex; return true; }
+        if (ContainsPackage(text, "cursor-agent", "@cursor\\agent")) { provider = ProviderId.Cursor; return true; }
+        if (ContainsPackage(text, "opencode-ai", "\\opencode\\bin", "\\opencode-ai")) { provider = ProviderId.OpenCode; return true; }
+        if (ContainsPackage(text, "@cline\\", "\\cline\\bin", "cline-cli")) { provider = ProviderId.Cline; return true; }
+        if (ContainsPackage(text, "kimi-cli", "\\kimi\\cli")) { provider = ProviderId.Kimi; return true; }
+        if (ContainsPackage(text, "antigravity-cli", "\\agy\\cli")) { provider = ProviderId.Antigravity; return true; }
+        if (ContainsPackage(text, "grok-cli", "@xai\\grok")) { provider = ProviderId.Grok; return true; }
+        if (ContainsPackage(text, "zcode-cli", "\\zcode\\cli")) { provider = ProviderId.Zai; return true; }
+        if (ContainsPackage(text, "github-copilot", "@github\\copilot", "copilot-cli")) { provider = ProviderId.Copilot; return true; }
         return false;
     }
+
+    private static bool TryGetDirectTerminalProvider(string executable, out ProviderId provider)
+    {
+        provider = executable switch
+        {
+            "claude" => ProviderId.Claude,
+            "codex" => ProviderId.Codex,
+            "cursor-agent" => ProviderId.Cursor,
+            "opencode" => ProviderId.OpenCode,
+            "cline" => ProviderId.Cline,
+            "kimi" => ProviderId.Kimi,
+            "agy" => ProviderId.Antigravity,
+            "grok" => ProviderId.Grok,
+            "zcode" => ProviderId.Zai,
+            "copilot" or "github-copilot" => ProviderId.Copilot,
+            _ => default,
+        };
+        return executable is "claude" or "codex" or "cursor-agent" or "opencode" or "cline" or
+            "kimi" or "agy" or "grok" or "zcode" or "copilot" or "github-copilot";
+    }
+
+    private static bool ContainsPackage(string commandLine, params string[] markers)
+        => markers.Any(marker => commandLine.Contains(marker, StringComparison.Ordinal));
+
+    internal static ProviderId? DetectTerminalProviderForTesting(string executable, string commandLine)
+        => TryGetTerminalProvider(executable, commandLine, out var provider) ? provider : null;
 
     private static IReadOnlyDictionary<ProviderId, int> MergeLiveProviders(
         IReadOnlyDictionary<ProviderId, int> desktopApps,

@@ -126,6 +126,27 @@ public sealed class AgentActivityTests
     }
 
     [Fact]
+    public void CopilotCompletedSession_DoesNotStayLiveJustBecauseVsCodeIsOpen()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "taskbarquota-copilot-" + Guid.NewGuid().ToString("N") + ".json");
+        try
+        {
+            File.WriteAllText(path, """
+                {"v":{"sessionId":"copilot-old","requests":[{"message":{"text":"Old request"},"response":[{"value":"Done"}]}]}}
+                """);
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(-5));
+
+            var item = Assert.Single(AgentActivityScanner.ReadCopilotForTesting(path, claimLive: true));
+
+            Assert.Equal(AgentActivityStatus.Completed, item.Status);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void CopilotJsonSession_EmptyResponseRemainsWorking()
     {
         var path = Path.Combine(Path.GetTempPath(), "taskbarquota-copilot-" + Guid.NewGuid().ToString("N") + ".json");

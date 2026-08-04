@@ -51,7 +51,7 @@ namespace TaskbarQuota
         public FlyoutWindow()
         {
             InitializeComponent();
-            UpdateActivityWidgetButton();
+            UpdateActivityControls();
             _dashboardViewModel = DashboardPage.SharedViewModel ?? new DashboardViewModel(DispatcherQueue);
             DashboardPage.SharedViewModel = _dashboardViewModel;
             _dashboardViewModel.Cards.CollectionChanged += DashboardCards_CollectionChanged;
@@ -102,7 +102,7 @@ namespace TaskbarQuota
             _dashboardViewModel.SelectedCardChanged -= DashboardSelectedCardChanged;
             _dashboardViewModel.DetailContentWidthChanged -= DashboardDetailContentWidthChanged;
             _dashboardViewModel.DetailContentHeightChanged -= DashboardDetailContentHeightChanged;
-            _boundsUpdateTimer.Stop();
+            _boundsUpdateTimer?.Stop();
             _providerStripItems.Clear();
         }
 
@@ -110,7 +110,7 @@ namespace TaskbarQuota
             => DispatcherQueue.TryEnqueue(() =>
             {
                 SyncProviderStripPins();
-                UpdateActivityWidgetButton();
+                UpdateActivityControls();
             });
 
         private void OnActivated(object sender, WindowActivatedEventArgs args)
@@ -242,6 +242,8 @@ namespace TaskbarQuota
 
         private void ShowProviderDashboard()
         {
+            if (_showingActivity)
+                AgentActivityService.Instance.AcknowledgeAll();
             _showingActivity = false;
             ActivityPanel.Visibility = Visibility.Collapsed;
             ContentFrame.Visibility = Visibility.Visible;
@@ -252,17 +254,24 @@ namespace TaskbarQuota
             _showingActivity = true;
             ActivityPanel.Visibility = Visibility.Visible;
             ContentFrame.Visibility = Visibility.Collapsed;
-            UpdateActivityWidgetButton();
+            UpdateActivityControls();
         }
 
-        private void UpdateActivityWidgetButton()
+        private void UpdateActivityControls()
         {
-            bool enabled = WidgetSettingsService.ShowAgentActivityInWidget;
-            ActivityWidgetButton.IsChecked = enabled;
+            bool widgetEnabled = WidgetSettingsService.ShowAgentActivityInWidget;
+            bool monitoringEnabled = WidgetSettingsService.EnableAgentActivityMonitoring;
+            ActivityWidgetButton.IsChecked = widgetEnabled;
+            ActivityWidgetButton.IsEnabled = monitoringEnabled;
+            ActivityMonitoringButton.IsChecked = monitoringEnabled;
             ToolTipService.SetToolTip(ActivityWidgetButton,
-                enabled ? "Hide agent activity from taskbar widget" : "Show agent activity in taskbar widget");
+                widgetEnabled ? "Hide agent activity from taskbar widget" : "Show agent activity in taskbar widget");
             AutomationProperties.SetName(ActivityWidgetButton,
-                enabled ? "Hide agent activity from taskbar widget" : "Show agent activity in taskbar widget");
+                widgetEnabled ? "Hide agent activity from taskbar widget" : "Show agent activity in taskbar widget");
+            ToolTipService.SetToolTip(ActivityMonitoringButton,
+                monitoringEnabled ? "Stop monitoring local agent activity" : "Start monitoring local agent activity");
+            AutomationProperties.SetName(ActivityMonitoringButton,
+                monitoringEnabled ? "Stop monitoring local agent activity" : "Start monitoring local agent activity");
         }
 
         private void OnActivityChanged(AgentActivitySnapshot snapshot)
@@ -271,8 +280,14 @@ namespace TaskbarQuota
         private void RenderActivity(AgentActivitySnapshot snapshot)
         {
             ActivityList.Children.Clear();
+            var items = snapshot.ItemsForDisplay(_selectedActivityId);
+            bool monitoringEnabled = WidgetSettingsService.EnableAgentActivityMonitoring;
+            ActivityEmptyState.Text = monitoringEnabled ? "No recent agent activity" : "Agent activity monitoring is off";
+            ActivityEmptyState.Visibility = items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            ActivityScrollViewer.Visibility = items.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            FrameworkElement? selectedCard = null;
 
-            foreach (var item in snapshot.Items)
+            foreach (var item in items)
             {
                 var statusBrush = AgentActivityVisuals.StatusBrush(
                     item.Status,
@@ -285,6 +300,16 @@ namespace TaskbarQuota
                     BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
                     BorderThickness = new Thickness(1),
                 };
+                var accessibleName = $"{ActivityTitle(item)}, {ActivityProviderLabel(item)}, {item.StatusText}. {item.Step}";
+                AutomationProperties.SetName(card, accessibleName);
+                AutomationProperties.SetAutomationId(card, $"AgentActivityCard_{ActivityList.Children.Count}");
+                if (item.Id == _selectedActivityId)
+                {
+                    card.BorderBrush = (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"];
+                    card.BorderThickness = new Thickness(2);
+                    selectedCard = card;
+                    AutomationProperties.SetName(ActivityScrollViewer, $"Selected agent activity. {accessibleName}");
+                }
                 var row = new Grid { ColumnSpacing = 10 };
                 row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(32) });
                 row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -303,6 +328,15 @@ namespace TaskbarQuota
                 row.Children.Add(text);
                 card.Child = row;
                 ActivityList.Children.Add(card);
+            }
+
+            if (_showingActivity && selectedCard is not null)
+            {
+                DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+                {
+                    selectedCard.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = true });
+                    ActivityScrollViewer.Focus(FocusState.Programmatic);
+                });
             }
         }
 
@@ -388,7 +422,15 @@ namespace TaskbarQuota
         {
             WidgetSettingsService.ApplyShowAgentActivityInWidget(
                 !WidgetSettingsService.ShowAgentActivityInWidget);
-            UpdateActivityWidgetButton();
+            UpdateActivityControls();
+        }
+
+        private void ActivityMonitoringButton_Click(object sender, RoutedEventArgs e)
+        {
+            WidgetSettingsService.ApplyEnableAgentActivityMonitoring(
+                !WidgetSettingsService.EnableAgentActivityMonitoring);
+            UpdateActivityControls();
+            RenderActivity(AgentActivityService.Instance.Snapshot);
         }
 
         private void RegisterWindowSizeHooks()
@@ -519,6 +561,8 @@ namespace TaskbarQuota
             _shown = false;
             _lastAppliedBounds = null;
             GetAppWindow().Hide();
+            if (_showingActivity)
+                AgentActivityService.Instance.AcknowledgeAll();
         }
 
         private void DashboardCards_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)

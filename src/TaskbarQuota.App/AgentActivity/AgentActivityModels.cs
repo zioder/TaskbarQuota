@@ -67,6 +67,17 @@ public sealed record AgentActivitySnapshot(IReadOnlyList<AgentActivityItem> Item
     public bool HasLiveItems => Items.Any(item => item.IsLive);
     public bool HasUnreadCompletions => Items.Any(item => item.Status is AgentActivityStatus.Completed or AgentActivityStatus.Failed);
 
+    public IReadOnlyList<AgentActivityItem> ItemsForDisplay(string? selectedId)
+    {
+        if (string.IsNullOrWhiteSpace(selectedId))
+            return Items;
+
+        var selected = Items.FirstOrDefault(item => item.Id == selectedId);
+        return selected is null
+            ? Items
+            : new[] { selected }.Concat(Items.Where(item => item.Id != selectedId)).ToArray();
+    }
+
     private static AgentActivityItem? ToCompactItem(AgentActivityItem item)
     {
         if (item.Status is AgentActivityStatus.Working or AgentActivityStatus.Waiting)
