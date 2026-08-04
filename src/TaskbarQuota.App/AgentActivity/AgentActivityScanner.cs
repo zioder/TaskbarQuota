@@ -2778,7 +2778,8 @@ internal sealed class AgentActivityScanner
                     && timestamp.ValueKind == JsonValueKind.String
                     && DateTimeOffset.TryParse(timestamp.GetString(), out var parsedTime))
                 {
-                    started ??= parsedTime;
+                    if (started is null || parsedTime < started.Value)
+                        started = parsedTime;
                     if (activity is null && IsConversationEvent(root, provider)) activity = parsedTime;
                 }
 
