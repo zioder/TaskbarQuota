@@ -560,6 +560,25 @@ namespace TaskbarQuota.Taskbar
             QueuePositionUpdate(TaskbarChangeReason.None);
         }
 
+        /// <summary>Shows or hides only the quota host, leaving the independent activity host untouched.</summary>
+        public void SetQuotaVisible(bool visible)
+        {
+            if (appWindow is null || isVisible == visible && appWindow.IsVisible == visible)
+                return;
+
+            isVisible = visible;
+            if (visible)
+            {
+                QueuePositionUpdate(TaskbarChangeReason.None);
+                appWindow.Show(false);
+            }
+            else
+            {
+                classicTaskbarReservation.Restore();
+                appWindow.Hide();
+            }
+        }
+
         private Microsoft.UI.Xaml.Controls.StackPanel BuildSummaryPanel()
         {
             var panel = new Microsoft.UI.Xaml.Controls.StackPanel

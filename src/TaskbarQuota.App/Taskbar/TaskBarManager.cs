@@ -284,7 +284,11 @@ namespace TaskbarQuota.Taskbar
             // back in either — the set below runs first on show.
             if (providers.Count == 0)
             {
-                widget.SetVisible(WidgetSettingsService.ShowAgentActivityInWidget && activity.Primary is not null);
+                widget.SetDisplayProviders(Array.Empty<ProviderId>(), coordinator.ActiveProvider);
+                if (WidgetSettingsService.ShowAgentActivityInWidget && activity.Primary is not null)
+                    widget.SetQuotaVisible(false);
+                else
+                    widget.SetVisible(false);
                 return;
             }
 
@@ -429,11 +433,15 @@ namespace TaskbarQuota.Taskbar
                 // Reconcile the tile set first, so a provider that just became active already owns a slot
                 // before its result is routed. SetDisplayProviders is a cheap no-op when nothing changed.
                 widget.SetActivitySnapshot(activity);
-                // As in SyncWidgetState, an empty set only hides — rebinding the slots here would collapse
-                // the tiles mid-fade.
+                // As in SyncWidgetState, clear the quota slots before hiding the quota host so a later
+                // provider return cannot reveal stale tiles.
                 if (providers.Count == 0)
                 {
-                    widget.SetVisible(WidgetSettingsService.ShowAgentActivityInWidget && activity.Primary is not null);
+                    widget.SetDisplayProviders(Array.Empty<ProviderId>(), coordinator.ActiveProvider);
+                    if (WidgetSettingsService.ShowAgentActivityInWidget && activity.Primary is not null)
+                        widget.SetQuotaVisible(false);
+                    else
+                        widget.SetVisible(false);
                     continue;
                 }
 
@@ -510,8 +518,20 @@ namespace TaskbarQuota.Taskbar
                         continue;
 
                     widget.SetActivitySnapshot(snapshot);
-                    widget.SetVisible((WidgetSettingsService.ShowAgentActivityInWidget && snapshot.Primary is not null)
-                        || UsageCoordinator.Instance.WidgetDisplayProviders.Count > 0);
+                    var providers = UsageCoordinator.Instance.WidgetDisplayProviders;
+                    if (providers.Count == 0)
+                    {
+                        widget.SetDisplayProviders(Array.Empty<ProviderId>(), UsageCoordinator.Instance.ActiveProvider);
+                        if (WidgetSettingsService.ShowAgentActivityInWidget && snapshot.Primary is not null)
+                            widget.SetQuotaVisible(false);
+                        else
+                            widget.SetVisible(false);
+                    }
+                    else
+                    {
+                        widget.SetDisplayProviders(providers, UsageCoordinator.Instance.ActiveProvider);
+                        widget.SetVisible(true);
+                    }
                 }
             });
 
