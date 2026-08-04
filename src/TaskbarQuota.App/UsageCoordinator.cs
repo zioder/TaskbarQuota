@@ -1063,7 +1063,6 @@ namespace TaskbarQuota
                     ClearPendingDetectedProvider();
                 if (detected is ProviderId p
                     && (previousActive == p
-                        || detectedSource.Kind is ProviderSourceKind.DesktopApp or ProviderSourceKind.HostApp
                         || AcceptDetectedProvider(p)))
                 {
                     _lastActive = p;
