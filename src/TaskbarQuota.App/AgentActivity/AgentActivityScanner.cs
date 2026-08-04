@@ -1653,10 +1653,10 @@ internal sealed class AgentActivityScanner
                 && metadataNode.ValueKind == JsonValueKind.Object
                 ? metadataNode
                 : default;
-            var prompt = FirstString(metadata, "prompt") ?? FirstString(root, "prompt") ?? "";
-            var title = FirstString(metadata, "title", "name") ?? FirstString(root, "title") ?? "";
-            var model = FirstString(root, "model") ?? "";
-            var statusText = (FirstString(root, "status") ?? "").ToLowerInvariant();
+            var prompt = FirstNonEmpty(FirstString(metadata, "prompt"), FirstString(root, "prompt"));
+            var title = FirstNonEmpty(FirstString(metadata, "title", "name"), FirstString(root, "title"));
+            var model = FirstString(root, "model");
+            var statusText = FirstString(root, "status").ToLowerInvariant();
             var startedAt = FirstTimestampAny(root, "started_at", "startedAt", "created_at", "createdAt")
                 ?? modified;
             var messagesPath = FirstString(root, "messages_path", "messagesPath");
