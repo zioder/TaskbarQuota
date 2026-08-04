@@ -20,7 +20,7 @@ public sealed partial class AgentActivitySummary : UserControl
     // A separate taskbar island should start compact. The wider value above remains the maximum when
     // space is abundant, but using it as the initial native-window width makes narrow drag lanes look
     // unavailable and causes a large resize the first time the activity island is moved.
-    public const int DefaultLogicalWidth = 240;
+    public const int DefaultLogicalWidth = MinimumLogicalWidth;
     // The navigator and provider glyph need to remain usable, but the text area may shrink below the
     // preferred width so the host never reserves more space than the taskbar gap actually provides.
     public const int MinimumLogicalWidth = 160;
