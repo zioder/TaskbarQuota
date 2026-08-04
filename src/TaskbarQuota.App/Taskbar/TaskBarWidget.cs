@@ -1294,9 +1294,16 @@ namespace TaskbarQuota.Taskbar
 
                 if (isActivityVisible && activityAppWindow is not null)
                 {
-                    int activityPreferred = activityOffsetX != int.MinValue
-                        ? activityOffsetX
-                        : offsetX + WidgetHostWidth + (int)Math.Ceiling(ActivitySummaryMarginLogicalPx * dpiScale);
+                    int quotaRightAnchor = offsetX + WidgetHostWidth
+                        + (int)Math.Ceiling(ActivitySummaryMarginLogicalPx * dpiScale);
+                    // In the normal quota-first order, keep the activity island to the quota's
+                    // right even when a previously saved activity position is stale or too far left.
+                    // This lets a wider quota widget push the optional activity view outward.
+                    int activityPreferred = widgetOrder == TaskbarWidgetOrder.QuotaFirst
+                        ? Math.Max(activityOffsetX, quotaRightAnchor)
+                        : activityOffsetX != int.MinValue
+                            ? activityOffsetX
+                            : quotaRightAnchor;
                     var quotaRect = new RECT
                     {
                         left = offsetX - (int)Math.Ceiling(ActivitySummaryMarginLogicalPx * dpiScale),
