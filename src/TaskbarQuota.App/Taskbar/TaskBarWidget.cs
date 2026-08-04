@@ -1331,8 +1331,18 @@ namespace TaskbarQuota.Taskbar
                     }
                     else
                     {
-                        activityX = PlaceInFittingGap(activityPreferred, activityGaps, ActivityHostWidth)
-                            ?? (activityOffsetX != int.MinValue ? activityOffsetX : activityPreferred);
+                        var fittedActivityX = PlaceInFittingGap(activityPreferred, activityGaps, ActivityHostWidth);
+                        if (fittedActivityX is not { } fittingX)
+                        {
+                            // There is no free lane for the activity host. Keeping the old preferred
+                            // position here would place the transparent activity window on top of quota
+                            // values, which is worse than temporarily hiding the optional activity view.
+                            Log.Debug("activity hidden: no taskbar gap can fit the activity host without overlap");
+                            SetActivityHostVisible(false);
+                            return;
+                        }
+
+                        activityX = fittingX;
                     }
                     activityX = ClampToTaskbarMonitor(
                         activityX,
