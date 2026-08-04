@@ -23,7 +23,7 @@ public sealed partial class AgentActivitySummary : UserControl
     public const int DefaultLogicalWidth = 240;
     // The navigator and provider glyph need to remain usable, but the text area may shrink below the
     // preferred width so the host never reserves more space than the taskbar gap actually provides.
-    public const int MinimumLogicalWidth = 200;
+    public const int MinimumLogicalWidth = 160;
     public event Action<AgentActivityItem?>? Clicked;
     public bool SuppressNextClick { get; set; }
     public AgentActivityItem? FollowedItem { get; private set; }
@@ -99,7 +99,7 @@ public sealed partial class AgentActivitySummary : UserControl
         var activitySummary = ActivitySummary(items);
         UpdateNavigation(items, item.Id);
         TitleText.Text = ActivityTitle(item);
-        StepText.Text = $"{item.StatusText} · {SummaryText(item)}";
+        StepText.Text = SummaryText(item);
         var accessibleSummary = $"{ActivityTitle(item)}, {providerName}, {item.StatusText}. {SummaryText(item)}";
         AutomationProperties.SetName(OpenActivityButton, $"Open agent activity. {accessibleSummary}");
         AutomationProperties.SetName(ProviderIcon, $"{providerName}, {item.StatusText}");
