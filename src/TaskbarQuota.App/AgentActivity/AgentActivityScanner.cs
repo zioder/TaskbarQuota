@@ -23,11 +23,13 @@ internal sealed class AgentActivityScanner
 {
     private static readonly TimeSpan RecentWindow = TimeSpan.FromHours(6);
     private static readonly TimeSpan BusyWindow = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan CandidateDiscoveryInterval = TimeSpan.FromSeconds(5);
     private readonly string _home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
     private CodexThreadNameResolver _threadNames = new();
     private readonly object _candidateGate = new();
     private readonly Dictionary<string, (ProviderId Provider, string Path, DateTimeOffset Modified)> _knownCandidates =
         new(StringComparer.OrdinalIgnoreCase);
+    private DateTimeOffset _lastCandidateDiscovery = DateTimeOffset.MinValue;
 
     public IReadOnlyList<AgentActivityItem> Scan(CancellationToken cancellationToken = default)
     {
@@ -38,30 +40,34 @@ internal sealed class AgentActivityScanner
         var liveProviders = MergeLiveProviders(desktopApps, terminalAgents);
         Log.Debug($"[activity] agent discovery: desktop={desktopApps.Values.Sum()}, terminal={terminalAgents.Values.Sum()}");
         var files = new List<(ProviderId Provider, string Path, DateTimeOffset Modified)>();
+        bool discoverCandidates = DateTimeOffset.UtcNow - _lastCandidateDiscovery >= CandidateDiscoveryInterval;
         // Process discovery is intentionally the gate for transcript/database work. Most agent
         // stores are SQLite or recursive file trees, so reopening them every tick when the app is
         // closed wastes the bulk of the activity refresh time.
-        if (IsDetected(ProviderId.Codex))
+        if (discoverCandidates && IsDetected(ProviderId.Codex))
             AddRecent(files, Path.Combine(_home, ".codex", "sessions"), ProviderId.Codex, cancellationToken);
-        if (IsDetected(ProviderId.Claude))
+        if (discoverCandidates && IsDetected(ProviderId.Claude))
             AddRecent(files, Path.Combine(_home, ".claude", "projects"), ProviderId.Claude, cancellationToken);
-        if (IsDetected(ProviderId.Grok))
+        if (discoverCandidates && IsDetected(ProviderId.Grok))
             AddGrokSessions(files, cancellationToken);
-        if (IsDetected(ProviderId.Antigravity))
+        if (discoverCandidates && IsDetected(ProviderId.Antigravity))
         {
             AddAntigravityDatabases(files, cancellationToken);
             AddAntigravityGuiTranscripts(files, cancellationToken);
         }
-        if (IsDetected(ProviderId.OpenCode))
+        if (discoverCandidates && IsDetected(ProviderId.OpenCode))
             AddOpenCodeDatabases(files, cancellationToken);
-        if (IsDetected(ProviderId.Cline))
+        if (discoverCandidates && IsDetected(ProviderId.Cline))
             AddClineSessions(files, cancellationToken);
-        if (IsDetected(ProviderId.Kimi))
+        if (discoverCandidates && IsDetected(ProviderId.Kimi))
             AddKimiSessions(files, cancellationToken);
-        if (IsDetected(ProviderId.Copilot))
+        if (discoverCandidates && IsDetected(ProviderId.Copilot))
             AddCopilotSessions(files, cancellationToken);
-        if (IsDetected(ProviderId.Zai))
+        if (discoverCandidates && IsDetected(ProviderId.Zai))
             AddZcodeDatabase(files, cancellationToken);
+
+        if (discoverCandidates)
+            _lastCandidateDiscovery = DateTimeOffset.UtcNow;
 
         bool IsDetected(ProviderId provider) => liveProviders.ContainsKey(provider);
 
@@ -156,13 +162,20 @@ internal sealed class AgentActivityScanner
             var existingPaths = files.Select(file => file.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
             foreach (var (path, candidate) in _knownCandidates.ToArray())
             {
-                if (!File.Exists(path) || DateTimeOffset.Now - candidate.Modified > RecentWindow)
+                if (!File.Exists(path))
+                {
+                    _knownCandidates.Remove(path);
+                    continue;
+                }
+                var modifiedUtc = File.GetLastWriteTimeUtc(path);
+                var modified = new DateTimeOffset(modifiedUtc, TimeSpan.Zero).ToLocalTime();
+                if (DateTimeOffset.Now - modified > RecentWindow)
                 {
                     _knownCandidates.Remove(path);
                     continue;
                 }
                 if (!existingPaths.Contains(path))
-                    files.Add(candidate);
+                    files.Add((candidate.Provider, candidate.Path, modified));
             }
         }
     }
@@ -189,6 +202,7 @@ internal sealed class AgentActivityScanner
     {
         lock (_candidateGate)
             _knownCandidates.Clear();
+        _lastCandidateDiscovery = DateTimeOffset.MinValue;
         _threadNames = new CodexThreadNameResolver();
     }
 
