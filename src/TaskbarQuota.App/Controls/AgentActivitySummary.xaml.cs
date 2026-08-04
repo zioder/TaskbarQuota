@@ -31,6 +31,8 @@ public sealed partial class AgentActivitySummary : UserControl
     private AgentActivitySnapshot _snapshot = new(Array.Empty<AgentActivityItem>());
     private ProviderId? _activeProvider;
     private Storyboard? _selectionStoryboard;
+    private Storyboard? _appearanceStoryboard;
+    private bool _hasAppeared;
     private readonly DispatcherTimer _wheelGestureEndTimer;
     private bool _wheelGestureActive;
 
@@ -81,9 +83,11 @@ public sealed partial class AgentActivitySummary : UserControl
             Visibility = Visibility.Collapsed;
             FollowedItem = null;
             _followedId = null;
+            _hasAppeared = false;
             return;
         }
 
+        bool shouldReveal = !_hasAppeared;
         _followedId = item.Id;
         FollowedItem = item;
         Visibility = Visibility.Visible;
@@ -96,16 +100,18 @@ public sealed partial class AgentActivitySummary : UserControl
         ProviderIcon.ForegroundBrush = statusBrush;
         bool showProviderMarker = !IsSameProvider(item.Provider, activeProvider);
         ProviderIcon.Visibility = showProviderMarker ? Visibility.Visible : Visibility.Collapsed;
-        var activitySummary = ActivitySummary(items);
         UpdateNavigation(items, item.Id);
         TitleText.Text = ActivityTitle(item);
         StepText.Text = SummaryText(item);
         var accessibleSummary = $"{ActivityTitle(item)}, {providerName}, {item.StatusText}. {SummaryText(item)}";
         AutomationProperties.SetName(OpenActivityButton, $"Open agent activity. {accessibleSummary}");
         AutomationProperties.SetName(ProviderIcon, $"{providerName}, {item.StatusText}");
-        ToolTipService.SetToolTip(this,
-            $"{ActivityTitle(item)}: {item.Step}\n{items.Count} agents · {activitySummary}. Use the arrows or mouse wheel to switch agents.");
         ApplyForeground();
+        if (shouldReveal)
+        {
+            _hasAppeared = true;
+            AnimateReveal();
+        }
     }
 
     private void AgentActivitySummary_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
@@ -201,6 +207,40 @@ public sealed partial class AgentActivitySummary : UserControl
         storyboard.Children.Add(fade);
         storyboard.Children.Add(slide);
         _selectionStoryboard = storyboard;
+        storyboard.Begin();
+    }
+
+    private void AnimateReveal()
+    {
+        _appearanceStoryboard?.Stop();
+        Root.Opacity = 1;
+        RootTransform.TranslateY = 0;
+
+        var fade = new DoubleAnimation
+        {
+            From = 0,
+            To = 1,
+            Duration = new Duration(TimeSpan.FromMilliseconds(240)),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+        };
+        Storyboard.SetTarget(fade, Root);
+        Storyboard.SetTargetProperty(fade, "Opacity");
+
+        var slide = new DoubleAnimation
+        {
+            From = 5,
+            To = 0,
+            Duration = new Duration(TimeSpan.FromMilliseconds(260)),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+            EnableDependentAnimation = true,
+        };
+        Storyboard.SetTarget(slide, RootTransform);
+        Storyboard.SetTargetProperty(slide, "TranslateY");
+
+        var storyboard = new Storyboard();
+        storyboard.Children.Add(fade);
+        storyboard.Children.Add(slide);
+        _appearanceStoryboard = storyboard;
         storyboard.Begin();
     }
 

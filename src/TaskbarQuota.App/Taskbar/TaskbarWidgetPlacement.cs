@@ -17,6 +17,11 @@ internal enum TaskbarWidgetOrder
 
 internal readonly record struct WidgetPairPlacement(int QuotaX, int ActivityX, int Width);
 internal readonly record struct AdaptiveWidgetPlacement(int X, int Width);
+internal readonly record struct AdaptiveWidgetPairPlacement(
+    int QuotaX,
+    int ActivityX,
+    int ActivityWidth,
+    int Width);
 
 internal static class TaskbarWidgetPlacement
 {
@@ -84,6 +89,144 @@ internal static class TaskbarWidgetPlacement
         }
 
         return best;
+    }
+
+    /// <summary>
+    /// Places quota and activity as one unit while allowing only the activity surface to shrink.
+    /// The quota stays at its preferred position whenever the lane permits, which prevents a quota
+    /// width change from using the activity window's stale bounds and making the two islands jump.
+    /// </summary>
+    internal static AdaptiveWidgetPairPlacement? PlaceAdaptivePair(
+        int preferredQuotaX,
+        int quotaWidth,
+        int minimumActivityWidth,
+        int maximumActivityWidth,
+        int gap,
+        TaskbarWidgetOrder order,
+        IReadOnlyList<(int start, int end)> freeGaps,
+        int preferredActivityX = int.MinValue,
+        int currentActivityWidth = 0)
+    {
+        AdaptiveWidgetPairPlacement? best = null;
+        long bestDistance = long.MaxValue;
+
+        foreach (var zone in freeGaps)
+        {
+            int laneWidth = zone.end - zone.start;
+            int fixedWidth = quotaWidth + gap;
+            if (laneWidth < fixedWidth + minimumActivityWidth)
+                continue;
+
+            int quotaX;
+            int activityX;
+            int activityWidth;
+            if (order == TaskbarWidgetOrder.QuotaFirst)
+            {
+                quotaX = Math.Clamp(
+                    preferredQuotaX,
+                    zone.start,
+                    zone.end - fixedWidth - minimumActivityWidth);
+                int defaultActivityX = quotaX + fixedWidth;
+                activityX = preferredActivityX == int.MinValue
+                    ? defaultActivityX
+                    : Math.Clamp(preferredActivityX, defaultActivityX, zone.end - minimumActivityWidth);
+                activityWidth = Math.Min(maximumActivityWidth, zone.end - activityX);
+            }
+            else
+            {
+                quotaX = Math.Clamp(
+                    preferredQuotaX,
+                    zone.start + gap + minimumActivityWidth,
+                    zone.end - quotaWidth);
+                int defaultActivityRight = quotaX - gap;
+                if (preferredActivityX == int.MinValue)
+                {
+                    activityWidth = Math.Min(maximumActivityWidth, defaultActivityRight - zone.start);
+                    activityX = defaultActivityRight - activityWidth;
+                }
+                else
+                {
+                    // A manual drop owns its left edge. Grow into the free space on its right instead of
+                    // preserving the compact drag width's right edge and pulling the window toward zero.
+                    activityX = Math.Clamp(
+                        preferredActivityX,
+                        zone.start,
+                        defaultActivityRight - minimumActivityWidth);
+                    activityWidth = Math.Min(maximumActivityWidth, defaultActivityRight - activityX);
+                }
+            }
+
+            int totalWidth = fixedWidth + activityWidth;
+            long distance = Math.Abs((long)quotaX - preferredQuotaX);
+
+            if (distance < bestDistance
+                || (distance == bestDistance
+                    && (best is null || activityWidth > best.Value.ActivityWidth)))
+            {
+                bestDistance = distance;
+                best = new AdaptiveWidgetPairPlacement(quotaX, activityX, activityWidth, totalWidth);
+            }
+        }
+
+        return best;
+    }
+
+    internal static bool OccupyDifferentGaps(
+        int firstX,
+        int firstWidth,
+        int secondX,
+        int secondWidth,
+        IReadOnlyList<(int start, int end)> freeGaps)
+    {
+        int firstGap = ContainingGap(firstX, firstWidth, freeGaps);
+        int secondGap = ContainingGap(secondX, secondWidth, freeGaps);
+        return firstGap >= 0 && secondGap >= 0 && firstGap != secondGap;
+    }
+
+    internal static int? SnapNextToPartner(
+        int droppedX,
+        int draggedWidth,
+        int partnerX,
+        int partnerWidth,
+        int gap,
+        int maximumDistance,
+        IReadOnlyList<(int start, int end)> fittingGaps)
+    {
+        int leftCandidate = partnerX - gap - draggedWidth;
+        int rightCandidate = partnerX + partnerWidth + gap;
+        int? best = null;
+        long bestDistance = long.MaxValue;
+
+        foreach (int candidate in new[] { leftCandidate, rightCandidate })
+        {
+            long distance = Math.Abs((long)candidate - droppedX);
+            if (distance > maximumDistance
+                || ContainingGap(candidate, draggedWidth, fittingGaps) < 0
+                || distance >= bestDistance)
+            {
+                continue;
+            }
+
+            best = candidate;
+            bestDistance = distance;
+        }
+
+        return best;
+    }
+
+    private static int ContainingGap(
+        int x,
+        int width,
+        IReadOnlyList<(int start, int end)> freeGaps)
+    {
+        for (int i = 0; i < freeGaps.Count; i++)
+        {
+            var gap = freeGaps[i];
+            if (x >= gap.start && x + width <= gap.end)
+                return i;
+        }
+
+        return -1;
     }
 
     internal static TaskbarWidgetOrder OrderForDraggedWidget(

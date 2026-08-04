@@ -963,13 +963,11 @@ namespace TaskbarQuota.Controls
 
         private void AnimateSoftRefresh()
         {
-            // Start below the resting value so the refresh still reads as a pulse, but never brighten
-            // past it — a stale snapshot must stay dimmed once the animation settles.
-            double targetOpacity = RestingPanelOpacity;
-            double startOpacity = Math.Min(0.72, targetOpacity);
-            Panel.Opacity = startOpacity;
-
-            AnimatePanelOpacity(startOpacity, targetOpacity, 180);
+            // A refresh replaces the row elements in-place. Dimming the entire panel here made every
+            // quota poll flash, especially when providers publish a stale snapshot followed by a live
+            // result a moment later. Keep the resting opacity stable; first reveal and provider switches
+            // still use their dedicated transitions.
+            Panel.Opacity = RestingPanelOpacity;
         }
 
         /// <summary>
