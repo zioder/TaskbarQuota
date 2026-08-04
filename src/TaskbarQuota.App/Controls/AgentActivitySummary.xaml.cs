@@ -102,7 +102,7 @@ public sealed partial class AgentActivitySummary : UserControl
         ProviderIcon.Visibility = showProviderMarker ? Visibility.Visible : Visibility.Collapsed;
         UpdateNavigation(items, item.Id);
         TitleText.Text = ActivityTitle(item);
-        StepText.Text = SummaryText(item);
+        StepText.Text = $"{item.StatusText} · {SummaryText(item)}";
         var accessibleSummary = $"{ActivityTitle(item)}, {providerName}, {item.StatusText}. {SummaryText(item)}";
         AutomationProperties.SetName(OpenActivityButton, $"Open agent activity. {accessibleSummary}");
         AutomationProperties.SetName(ProviderIcon, $"{providerName}, {item.StatusText}");
