@@ -43,13 +43,50 @@ public sealed record AgentActivityItem(
 
 public sealed record AgentActivitySnapshot(IReadOnlyList<AgentActivityItem> Items, IReadOnlyList<AgentActivityItem>? RunItems = null)
 {
-    public IReadOnlyList<AgentActivityItem> TrackedItems => RunItems is { Count: > 0 } ? RunItems : Items;
-    public AgentActivityItem? Primary => Items
-        .Where(item => item.IsLive)
+    public static readonly TimeSpan CompletedRetention = TimeSpan.FromMinutes(1);
+    public static readonly TimeSpan IdleWaitingRetention = TimeSpan.FromSeconds(90);
+    public static readonly TimeSpan IdleCompletedRetention = TimeSpan.FromSeconds(120);
+    public static readonly TimeSpan FailedRetention = TimeSpan.FromMinutes(5);
+
+    private IReadOnlyList<AgentActivityItem> SourceItems => RunItems is { Count: > 0 } ? RunItems : Items;
+
+    /// <summary>Items appropriate for the compact taskbar surface; full history remains in <see cref="Items"/>.</summary>
+    public IReadOnlyList<AgentActivityItem> CompactItems => SourceItems
+        .Select(ToCompactItem)
+        .Where(item => item is not null)
+        .Select(item => item!)
+        .ToArray();
+
+    public IReadOnlyList<AgentActivityItem> TrackedItems => CompactItems;
+    public AgentActivityItem? Primary => CompactItems
+        .Where(item => item.Status is AgentActivityStatus.Working or AgentActivityStatus.Waiting)
         .OrderByDescending(item => item.UpdatedAt)
         .FirstOrDefault()
-        ?? Items.OrderByDescending(item => item.UpdatedAt).FirstOrDefault();
+        ?? CompactItems.OrderByDescending(item => item.UpdatedAt).FirstOrDefault();
 
     public bool HasLiveItems => Items.Any(item => item.IsLive);
     public bool HasUnreadCompletions => Items.Any(item => item.Status is AgentActivityStatus.Completed or AgentActivityStatus.Failed);
+
+    private static AgentActivityItem? ToCompactItem(AgentActivityItem item)
+    {
+        if (item.Status is AgentActivityStatus.Working or AgentActivityStatus.Waiting)
+            return item;
+
+        var age = DateTimeOffset.UtcNow - item.UpdatedAt.ToUniversalTime();
+        if (item.Status == AgentActivityStatus.Idle)
+        {
+            if (age <= IdleWaitingRetention)
+                return item;
+            if (age <= IdleCompletedRetention)
+                return item with { Status = AgentActivityStatus.Completed, Step = "Completed" };
+            return null;
+        }
+
+        var retention = item.Status switch
+        {
+            AgentActivityStatus.Failed => FailedRetention,
+            _ => CompletedRetention,
+        };
+        return age <= retention ? item : null;
+    }
 }

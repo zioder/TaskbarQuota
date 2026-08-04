@@ -263,7 +263,7 @@ namespace TaskbarQuota.Taskbar
             // back in either — the set below runs first on show.
             if (providers.Count == 0)
             {
-                widget.SetVisible(activity.Primary is not null);
+                widget.SetVisible(WidgetSettingsService.ShowAgentActivityInWidget && activity.Primary is not null);
                 return;
             }
 
@@ -353,7 +353,7 @@ namespace TaskbarQuota.Taskbar
             try
             {
                 _flyout ??= new FlyoutWindow();
-                _flyout.ToggleActivityAbove(widget.Handle, selectedActivityId);
+                _flyout.ToggleActivityAbove(widget.ActivityHandle, selectedActivityId);
             }
             catch (Exception ex)
             {
@@ -403,7 +403,7 @@ namespace TaskbarQuota.Taskbar
                 // the tiles mid-fade.
                 if (providers.Count == 0)
                 {
-                    widget.SetVisible(activity.Primary is not null);
+                    widget.SetVisible(WidgetSettingsService.ShowAgentActivityInWidget && activity.Primary is not null);
                     continue;
                 }
 
@@ -480,7 +480,8 @@ namespace TaskbarQuota.Taskbar
                         continue;
 
                     widget.SetActivitySnapshot(snapshot);
-                    widget.SetVisible(snapshot.Primary is not null || UsageCoordinator.Instance.WidgetDisplayProviders.Count > 0);
+                    widget.SetVisible((WidgetSettingsService.ShowAgentActivityInWidget && snapshot.Primary is not null)
+                        || UsageCoordinator.Instance.WidgetDisplayProviders.Count > 0);
                 }
             });
 

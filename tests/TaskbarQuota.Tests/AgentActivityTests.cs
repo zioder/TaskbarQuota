@@ -38,12 +38,223 @@ public sealed class AgentActivityTests
         Assert.Equal("waiting", snapshot.Primary?.Id);
     }
 
+    [Fact]
+    public void CompactItems_ExpiresCompletedButRetainsFailureLonger()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var snapshot = new AgentActivitySnapshot(new[]
+        {
+            new AgentActivityItem("old-done", ProviderId.Claude, "Done", "Finished", AgentActivityStatus.Completed,
+                now.AddMinutes(-2), now.AddMinutes(-2)),
+            new AgentActivityItem("recent-failed", ProviderId.Cline, "Build", "Failed", AgentActivityStatus.Failed,
+                now.AddMinutes(-2), now.AddMinutes(-2)),
+        });
+
+        Assert.DoesNotContain(snapshot.CompactItems, item => item.Id == "old-done");
+        Assert.Contains(snapshot.CompactItems, item => item.Id == "recent-failed");
+        Assert.Contains(snapshot.Items, item => item.Id == "old-done");
+    }
+
+    [Fact]
+    public void CompactItems_KeepsLiveAgentsRegardlessOfAge()
+    {
+        var now = DateTimeOffset.UtcNow.AddDays(-2);
+        var snapshot = new AgentActivitySnapshot(new[]
+        {
+            new AgentActivityItem("live", ProviderId.Codex, "Tests", "Working", AgentActivityStatus.Working,
+                now, now),
+        });
+
+        Assert.Contains(snapshot.CompactItems, item => item.Id == "live");
+        Assert.Equal("live", snapshot.Primary?.Id);
+    }
+
+    [Fact]
+    public void CompactItems_ShowsIdleThenCompletedThenExpires()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var snapshot = new AgentActivitySnapshot(new[]
+        {
+            new AgentActivityItem("recent-idle", ProviderId.Codex, "Task", "Waiting for the next prompt",
+                AgentActivityStatus.Idle, now.AddSeconds(-30), now.AddSeconds(-30)),
+              new AgentActivityItem("completed-idle", ProviderId.Codex, "Completed task", "Waiting for the next prompt",
+                  AgentActivityStatus.Idle, now.AddSeconds(-100), now.AddSeconds(-100)),
+              new AgentActivityItem("old-idle", ProviderId.Codex, "Old task", "Waiting for the next prompt",
+                  AgentActivityStatus.Idle, now.AddSeconds(-130), now.AddSeconds(-130)),
+          });
+
+          Assert.Contains(snapshot.CompactItems, item => item.Id == "recent-idle");
+          var completed = Assert.Single(snapshot.CompactItems, item => item.Id == "completed-idle");
+          Assert.Equal(AgentActivityStatus.Completed, completed.Status);
+          Assert.Equal("Completed", completed.Step);
+          Assert.DoesNotContain(snapshot.CompactItems, item => item.Id == "old-idle");
+    }
+
     [Theory]
     [InlineData("OpenCode Beta", ProviderId.OpenCode)]
     [InlineData("opencode", ProviderId.OpenCode)]
     [InlineData("opencode-beta", ProviderId.OpenCode)]
     public void DesktopOpenCodeProcess_IsRecognizedAsLiveProvider(string processName, ProviderId expected)
         => Assert.Equal(expected, AgentActivityScanner.DetectDesktopProviderForTesting(processName));
+
+    [Theory]
+    [InlineData("code")]
+    [InlineData("code-insiders")]
+    public void DesktopVsCodeProcess_IsRecognizedAsCopilot(string processName)
+        => Assert.Equal(ProviderId.Copilot, AgentActivityScanner.DetectDesktopProviderForTesting(processName));
+
+    [Fact]
+    public void CopilotJsonSession_ExtractsPromptModelAndCompletedState()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "taskbarquota-copilot-" + Guid.NewGuid().ToString("N") + ".json");
+        try
+        {
+            File.WriteAllText(path, """
+                {"v":{"sessionId":"copilot-json-1","customTitle":"Project SEO Evaluation","selectedModel":{"family":"GPT-4.1"},"requests":[{"message":{"text":"Fix the build"},"response":[{"value":"Done"}]}]}}
+                """);
+
+            var item = Assert.Single(AgentActivityScanner.ReadCopilotForTesting(path, claimLive: true));
+            Assert.Equal(ProviderId.Copilot, item.Provider);
+            Assert.Equal("Project SEO Evaluation", item.Title);
+            Assert.Equal("GPT-4.1", item.Model);
+            Assert.Equal(AgentActivityStatus.Idle, item.Status);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void CopilotJsonSession_EmptyResponseRemainsWorking()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "taskbarquota-copilot-" + Guid.NewGuid().ToString("N") + ".json");
+        try
+        {
+            File.WriteAllText(path, """
+                {"sessionId":"copilot-in-progress","customTitle":"Project SEO Evaluation","requests":[{"message":{"text":"Evaluate the SEO project"},"response":[]}]}
+                """);
+
+            var item = Assert.Single(AgentActivityScanner.ReadCopilotForTesting(path, claimLive: true));
+            Assert.Equal("Project SEO Evaluation", item.Title);
+            Assert.Equal(AgentActivityStatus.Working, item.Status);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void CopilotJsonlSnapshotAndDeltas_UseCustomTitleAndModelState()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "taskbarquota-copilot-" + Guid.NewGuid().ToString("N") + ".jsonl");
+        try
+        {
+            File.WriteAllText(path, """
+                {"kind":0,"v":{"sessionId":"copilot-snapshot-1","customTitle":"Project SEO Evaluation","requests":[{"message":{"text":"Evaluate SEO"},"modelId":"copilot/auto","modelState":{"value":0},"response":[{"kind":"thinking","value":"Working"}]}]}}
+                {"kind":1,"k":["requests",0,"modelState"],"v":{"value":0}}
+                """);
+
+            var item = Assert.Single(AgentActivityScanner.ReadCopilotForTesting(path, claimLive: true));
+            Assert.Equal("Project SEO Evaluation", item.Title);
+            Assert.Equal("copilot/auto", item.Model);
+            Assert.Equal(AgentActivityStatus.Working, item.Status);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void CopilotJsonlSession_ReportsWorkingOnlyWhenVsCodeIsLive()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "taskbarquota-copilot-" + Guid.NewGuid().ToString("N") + ".jsonl");
+        try
+        {
+            File.WriteAllText(path, """
+                {"type":"session.start","data":{"sessionId":"copilot-jsonl-1","startTime":"2026-08-03T12:00:00Z"}}
+                {"type":"user.message","data":{"content":"Inspect the failing test"}}
+                """);
+
+            var live = Assert.Single(AgentActivityScanner.ReadCopilotForTesting(path, claimLive: true));
+            Assert.Equal("Inspect the failing test", live.Title);
+            Assert.Equal(AgentActivityStatus.Working, live.Status);
+
+            var closed = Assert.Single(AgentActivityScanner.ReadCopilotForTesting(path, claimLive: false));
+            Assert.Equal(AgentActivityStatus.Completed, closed.Status);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void CopilotJsonlSession_ReportsToolActivityAndInsidersHost()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "Code - Insiders", "User", "workspaceStorage", Guid.NewGuid().ToString("N"), "chatSessions");
+        var path = Path.Combine(root, "copilot-tool.jsonl");
+        try
+        {
+            Directory.CreateDirectory(root);
+            File.WriteAllText(path, """
+                {"type":"user.message","data":{"content":"Run the tests"}}
+                {"type":"assistant.message","data":{"toolRequests":[{"name":"shell"}],"status":"running"}}
+                """);
+
+            var item = Assert.Single(AgentActivityScanner.ReadCopilotForTesting(path, claimLive: true));
+            Assert.Equal("Running shell", item.Step);
+            Assert.Equal("VS Code Insiders", item.Host);
+            Assert.Equal(AgentActivityStatus.Working, item.Status);
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ZcodeDatabase_ExtractsPromptToolAndModel()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "taskbarquota-zcode-" + Guid.NewGuid().ToString("N") + ".sqlite");
+        try
+        {
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            using (var connection = new SqliteConnection($"Data Source={path}"))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, title TEXT, time_created INTEGER, time_updated INTEGER);
+                    CREATE TABLE session_target (session_id TEXT PRIMARY KEY, status TEXT);
+                    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+                    CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+                    INSERT INTO session VALUES ('s1', NULL, 'Review the build', $now, $now);
+                    INSERT INTO session_target VALUES ('s1', 'active');
+                    INSERT INTO message VALUES ('m1', 's1', $now, $now, '{"role":"user","content":[{"type":"text","text":"Review the build"}]}');
+                    INSERT INTO message VALUES ('m2', 's1', $now, $now, '{"role":"assistant","modelID":"GLM-5.2"}');
+                    INSERT INTO part VALUES ('p1', 'm2', 's1', $now, $now, '{"type":"tool","tool":"shell","state":{"status":"running","input":{"command":"dotnet test"}}}');
+                    """;
+                command.Parameters.AddWithValue("$now", now);
+                command.ExecuteNonQuery();
+            }
+
+            var item = Assert.Single(AgentActivityScanner.ReadZcodeForTesting(path));
+            Assert.Equal(ProviderId.Zai, item.Provider);
+            Assert.Equal("Review the build", item.Title);
+            Assert.Equal("Ran tests", item.Step);
+            Assert.Equal("GLM-5.2", item.Model);
+            Assert.Equal(AgentActivityStatus.Working, item.Status);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { if (File.Exists(path)) File.Delete(path); } catch (IOException) { }
+        }
+    }
 
     [Fact]
     public void ClineSession_ExtractsTitleToolActionAndWorkingState()

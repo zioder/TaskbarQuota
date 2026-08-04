@@ -35,14 +35,46 @@ internal sealed class AgentActivityScanner
         var liveProviders = MergeLiveProviders(desktopApps, terminalAgents);
         Log.Information($"[activity] agent discovery: desktop={desktopApps.Values.Sum()}, terminal={terminalAgents.Values.Sum()}");
         var files = new List<(ProviderId Provider, string Path, DateTimeOffset Modified)>();
-        AddRecent(files, Path.Combine(_home, ".codex", "sessions"), ProviderId.Codex, cancellationToken);
-        AddRecent(files, Path.Combine(_home, ".claude", "projects"), ProviderId.Claude, cancellationToken);
-        AddGrokSessions(files, cancellationToken);
-        AddAntigravityDatabases(files, cancellationToken);
-        AddAntigravityGuiTranscripts(files, cancellationToken);
-        AddOpenCodeDatabases(files, cancellationToken);
-        AddClineSessions(files, cancellationToken);
-        AddKimiSessions(files, cancellationToken);
+        // Process discovery is intentionally the gate for transcript/database work. Most agent
+        // stores are SQLite or recursive file trees, so reopening them every tick when the app is
+        // closed wastes the bulk of the activity refresh time.
+        if (IsDetected(ProviderId.Codex))
+            AddRecent(files, Path.Combine(_home, ".codex", "sessions"), ProviderId.Codex, cancellationToken);
+        if (IsDetected(ProviderId.Claude))
+            AddRecent(files, Path.Combine(_home, ".claude", "projects"), ProviderId.Claude, cancellationToken);
+        if (IsDetected(ProviderId.Grok))
+            AddGrokSessions(files, cancellationToken);
+        if (IsDetected(ProviderId.Antigravity))
+        {
+            AddAntigravityDatabases(files, cancellationToken);
+            AddAntigravityGuiTranscripts(files, cancellationToken);
+        }
+        if (IsDetected(ProviderId.OpenCode))
+            AddOpenCodeDatabases(files, cancellationToken);
+        if (IsDetected(ProviderId.Cline))
+            AddClineSessions(files, cancellationToken);
+        if (IsDetected(ProviderId.Kimi))
+            AddKimiSessions(files, cancellationToken);
+        if (IsDetected(ProviderId.Copilot))
+            AddCopilotSessions(files, cancellationToken);
+        if (IsDetected(ProviderId.Zai))
+            AddZcodeDatabase(files, cancellationToken);
+
+        bool IsDetected(ProviderId provider) => liveProviders.ContainsKey(provider);
+
+        // VS Code persists the same Copilot thread twice: the canonical session snapshot under
+        // chatSessions (with customTitle/modelState) and an extension transcript under transcripts.
+        // Keep one source per session so the prompt-only transcript cannot replace the titled state.
+        var copilotFiles = files
+            .Where(file => file.Provider == ProviderId.Copilot)
+            .GroupBy(file => Path.GetFileNameWithoutExtension(file.Path), StringComparer.OrdinalIgnoreCase)
+            .Select(group => group
+                .OrderBy(file => file.Path.Contains("\\chatSessions\\", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                .ThenByDescending(file => file.Modified)
+                .First())
+            .ToArray();
+        files.RemoveAll(file => file.Provider == ProviderId.Copilot);
+        files.AddRange(copilotFiles);
 
         var parsed = new List<AgentActivityItem>();
         var liveClaims = new Dictionary<ProviderId, int>();
@@ -78,6 +110,15 @@ internal sealed class AgentActivityScanner
             {
                 if (TryReadKimiSession(file.Path, file.Modified, claimLive, out var kimiItem))
                     parsed.Add(kimiItem);
+            }
+            else if (file.Provider == ProviderId.Copilot)
+            {
+                if (TryReadCopilotSession(file.Path, file.Modified, claimLive, out var copilotItem))
+                    parsed.Add(copilotItem);
+            }
+            else if (file.Provider == ProviderId.Zai)
+            {
+                parsed.AddRange(ReadZcodeSessions(file.Path, file.Modified, claimLive));
             }
             else if (TryRead(file.Provider, file.Path, file.Modified, claimLive, out var item))
             {
@@ -214,6 +255,340 @@ internal sealed class AgentActivityScanner
 
         yield return Path.Combine(_home, ".kimi-code");
         yield return Path.Combine(_home, ".kimi");
+    }
+
+    private void AddCopilotSessions(List<(ProviderId, string, DateTimeOffset)> output,
+        CancellationToken cancellationToken)
+    {
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        var configuredUserData = Environment.GetEnvironmentVariable("VSCODE_USER_DATA_DIR");
+        var userRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            Path.Combine(appData, "Code", "User"),
+            Path.Combine(appData, "Code - Insiders", "User"),
+            Path.Combine(appData, "VSCodium", "User"),
+        };
+        if (!string.IsNullOrWhiteSpace(configuredUserData))
+        {
+            var configured = configuredUserData.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            userRoots.Add(Path.GetFileName(configured).Equals("User", StringComparison.OrdinalIgnoreCase)
+                ? configured
+                : Path.Combine(configured, "User"));
+        }
+
+        try
+        {
+            foreach (var userRoot in userRoots)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!Directory.Exists(userRoot))
+                    continue;
+
+                var transcriptDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var workspaceStorage = Path.Combine(userRoot, "workspaceStorage");
+                if (Directory.Exists(workspaceStorage))
+                {
+                    foreach (var workspace in Directory.EnumerateDirectories(workspaceStorage, "*", SearchOption.TopDirectoryOnly))
+                    {
+                        transcriptDirectories.Add(Path.Combine(workspace, "chatSessions"));
+                        transcriptDirectories.Add(Path.Combine(workspace, "GitHub.copilot-chat", "transcripts"));
+                    }
+                }
+                transcriptDirectories.Add(Path.Combine(userRoot, "globalStorage", "emptyWindowChatSessions"));
+
+                foreach (var directory in transcriptDirectories)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (!Directory.Exists(directory))
+                        continue;
+                    foreach (var path in Directory.EnumerateFiles(directory, "*.*", SearchOption.TopDirectoryOnly))
+                    {
+                        var extension = Path.GetExtension(path);
+                        if (!extension.Equals(".json", StringComparison.OrdinalIgnoreCase)
+                            && !extension.Equals(".jsonl", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        var modified = File.GetLastWriteTimeUtc(path);
+                        if (DateTime.UtcNow - modified <= RecentWindow)
+                        {
+                            output.Add((ProviderId.Copilot, path,
+                                new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
+                        }
+                    }
+                }
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    internal static bool TryReadCopilotSession(string path, DateTimeOffset modified, bool claimLive,
+        out AgentActivityItem item)
+    {
+        item = default!;
+        if (!File.Exists(path))
+            return false;
+
+        try
+        {
+            var transcript = new CopilotTranscript(Path.GetFileNameWithoutExtension(path));
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            if (stream.Length == 0)
+                return false;
+
+            if (Path.GetExtension(path).Equals(".json", StringComparison.OrdinalIgnoreCase))
+            {
+                using var document = JsonDocument.Parse(stream);
+                ParseCopilotDocument(document.RootElement, transcript);
+            }
+            else
+            {
+                using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                string? line;
+                while ((line = reader.ReadLine()) is not null)
+                {
+                    if (string.IsNullOrWhiteSpace(line))
+                        continue;
+                    try
+                    {
+                        using var document = JsonDocument.Parse(line);
+                        ParseCopilotEvent(document.RootElement, transcript);
+                    }
+                    catch (JsonException) { }
+                }
+            }
+
+            transcript.LastActivity ??= modified;
+            transcript.StartedAt ??= transcript.LastActivity;
+            var live = claimLive;
+            var status = !live
+                ? transcript.Failed ? AgentActivityStatus.Failed : AgentActivityStatus.Completed
+                : transcript.Failed ? AgentActivityStatus.Failed
+                : transcript.Waiting ? AgentActivityStatus.Waiting
+                : transcript.Pending ? AgentActivityStatus.Working
+                : AgentActivityStatus.Idle;
+            var step = status switch
+            {
+                AgentActivityStatus.Completed => "Completed",
+                AgentActivityStatus.Failed => "Failed",
+                AgentActivityStatus.Waiting => FirstNonEmpty(transcript.Step, "Waiting for input"),
+                AgentActivityStatus.Idle => "Waiting for the next prompt",
+                _ => FirstNonEmpty(transcript.Step, "Working"),
+            };
+            var host = path.Contains("Code - Insiders", StringComparison.OrdinalIgnoreCase)
+                ? "VS Code Insiders"
+                : path.Contains("VSCodium", StringComparison.OrdinalIgnoreCase) ? "VSCodium" : "VS Code";
+            item = new AgentActivityItem(
+                $"copilot:{transcript.SessionId}", ProviderId.Copilot,
+                Trim(Clean(FirstNonEmpty(transcript.Title, "GitHub Copilot Session")), 72),
+                Trim(Clean(step), 96), status, transcript.StartedAt.Value, transcript.LastActivity.Value,
+                Detail: transcript.Prompt, Model: FirstNonEmpty(transcript.Model, "GitHub Copilot"),
+                ThreadId: transcript.SessionId, Host: host);
+            return true;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        catch (JsonException) { return false; }
+    }
+
+    private static void ParseCopilotDocument(JsonElement root, CopilotTranscript transcript)
+    {
+        var value = root.TryGetProperty("v", out var versioned) && versioned.ValueKind == JsonValueKind.Object
+            ? versioned : root;
+        transcript.SessionId = FirstNonEmpty(FirstString(value, "sessionId", "session_id"), transcript.SessionId);
+        transcript.Title = FirstNonEmpty(FirstString(value, "customTitle", "title"), transcript.Title);
+        transcript.StartedAt = FirstTimestampAny(value, "creationDate", "createdAt", "created_at") ?? transcript.StartedAt;
+        transcript.LastActivity = FirstTimestampAny(value, "lastMessageDate", "updatedAt", "updated_at") ?? transcript.LastActivity;
+        transcript.Model = FirstNonEmpty(ParseCopilotModel(value), transcript.Model);
+        if (value.TryGetProperty("requests", out var requests) && requests.ValueKind == JsonValueKind.Array)
+        {
+            var requestIndex = 0;
+            foreach (var request in requests.EnumerateArray())
+                ParseCopilotRequest(request, transcript, requestIndex++);
+        }
+        else
+        {
+            ParseCopilotEvent(value, transcript);
+        }
+    }
+
+    private static void ParseCopilotRequest(JsonElement request, CopilotTranscript transcript, int requestIndex = -1)
+    {
+        if (requestIndex >= 0)
+            transcript.LatestRequestIndex = Math.Max(transcript.LatestRequestIndex, requestIndex);
+        var prompt = FirstStringDeep(request, "text", "prompt", "message", "content");
+        if (prompt.Length > 0)
+        {
+            transcript.Prompt = prompt;
+            transcript.Title = FirstNonEmpty(transcript.Title, SummarizeTitle(prompt) ?? prompt);
+            transcript.HasUser = true;
+        }
+        transcript.Model = FirstNonEmpty(ParseCopilotModel(request), transcript.Model);
+        var requestActivity = FirstTimestampAny(request, "timestamp", "createdAt", "created_at", "completedAt");
+        if (requestActivity is { } requestTime)
+            transcript.LastActivity = transcript.LastActivity is { } previous ? Max(previous, requestTime) : requestTime;
+        var status = FirstString(request, "status", "state", "finishReason", "finish_reason").ToLowerInvariant();
+        if (status is "error" or "failed" or "cancelled")
+            transcript.Failed = true;
+        if (status is "running" or "pending" or "in_progress")
+            transcript.Pending = true;
+        if (status is "waiting" or "awaiting_approval" or "needs_input")
+            transcript.Waiting = true;
+        if (request.TryGetProperty("toolRequests", out var tools) && tools.ValueKind == JsonValueKind.Array && tools.GetArrayLength() > 0)
+        {
+            transcript.Pending = true;
+            transcript.Step = $"Running {FirstStringDeep(tools[tools.GetArrayLength() - 1], "name", "tool", "id")}";
+        }
+        var hasResponse = request.TryGetProperty("response", out var response)
+            && response.ValueKind is JsonValueKind.Array or JsonValueKind.Object
+            && (response.ValueKind != JsonValueKind.Array || response.GetArrayLength() > 0);
+        if (hasResponse)
+        {
+            transcript.HasAssistant = true;
+            var completed = CopilotRequestCompleted(request);
+            transcript.Pending = completed is false;
+            transcript.Waiting = false;
+            transcript.Step = FirstNonEmpty(
+                response.ValueKind == JsonValueKind.Array ? ExtractContentText(response) : FirstStringDeep(response, "text", "value", "content"),
+                transcript.Step);
+        }
+        else if (transcript.HasUser)
+        {
+            transcript.Pending = true;
+        }
+    }
+
+    private static void ParseCopilotEvent(JsonElement root, CopilotTranscript transcript)
+    {
+        if (root.TryGetProperty("kind", out var kindNode) && kindNode.ValueKind == JsonValueKind.Number
+            && kindNode.TryGetInt32(out var kind))
+        {
+            if (kind == 0 && root.TryGetProperty("v", out var snapshot) && snapshot.ValueKind == JsonValueKind.Object)
+            {
+                ParseCopilotDocument(root, transcript);
+                return;
+            }
+            if (root.TryGetProperty("k", out var key) && key.ValueKind == JsonValueKind.Array)
+            {
+                ParseCopilotDelta(root, key, transcript);
+                return;
+            }
+        }
+
+        transcript.SessionId = FirstNonEmpty(FirstString(root, "sessionId", "session_id"), transcript.SessionId);
+        var eventActivity = FirstTimestampAny(root, "timestamp", "time", "createdAt", "created_at", "ts");
+        if (eventActivity is { } eventTime)
+            transcript.LastActivity = transcript.LastActivity is { } previous ? Max(previous, eventTime) : eventTime;
+        transcript.Model = FirstNonEmpty(FirstStringDeep(root, "model", "modelId", "model_id", "selectedModel"), transcript.Model);
+        var type = FirstString(root, "type", "event", "kind").ToLowerInvariant();
+        var payload = root.TryGetProperty("data", out var data) ? data : root;
+        if (type is "session.start" or "session_started")
+        {
+            transcript.SessionId = FirstNonEmpty(FirstString(payload, "sessionId", "session_id"), transcript.SessionId);
+            transcript.StartedAt = FirstTimestampAny(payload, "startTime", "startedAt", "createdAt") ?? transcript.StartedAt;
+            return;
+        }
+
+        var role = FirstString(root, "role").ToLowerInvariant();
+        if (type is "user.message" or "user_message" or "user" or "request" || role == "user")
+        {
+            var prompt = FirstStringDeep(payload, "text", "prompt", "content", "message");
+            if (prompt.Length > 0)
+            {
+                transcript.Prompt = prompt;
+                transcript.Title = FirstNonEmpty(transcript.Title, SummarizeTitle(prompt) ?? prompt);
+                transcript.HasUser = true;
+            }
+            transcript.Pending = true;
+            return;
+        }
+
+        if (type is "assistant.message" or "assistant_message" or "assistant" or "response" || role == "assistant")
+        {
+            transcript.HasAssistant = true;
+            var tool = payload.TryGetProperty("toolRequests", out var tools) && tools.ValueKind == JsonValueKind.Array
+                ? tools : default;
+            if (tool.ValueKind == JsonValueKind.Array && tool.GetArrayLength() > 0)
+            {
+                transcript.Pending = true;
+                var name = FirstStringDeep(tool[tool.GetArrayLength() - 1], "name", "tool", "id");
+                transcript.Step = string.IsNullOrWhiteSpace(name) ? "Running tool" : $"Running {name}";
+            }
+            else
+            {
+                transcript.Pending = false;
+                transcript.Waiting = false;
+                transcript.Step = FirstNonEmpty(
+                    FirstStringDeep(payload, "reasoningText", "reasoning", "text", "content"), transcript.Step);
+            }
+            var status = FirstString(payload, "status", "state", "finishReason", "finish_reason").ToLowerInvariant();
+            if (status is "error" or "failed") transcript.Failed = true;
+            if (status is "running" or "pending" or "in_progress") transcript.Pending = true;
+            if (status is "waiting" or "awaiting_approval" or "needs_input") transcript.Waiting = true;
+        }
+    }
+
+    private static void ParseCopilotDelta(JsonElement root, JsonElement key, CopilotTranscript transcript)
+    {
+        if (key.GetArrayLength() < 3
+            || !string.Equals(key[0].GetString(), "requests", StringComparison.OrdinalIgnoreCase)
+            || !key[1].TryGetInt32(out var requestIndex))
+            return;
+
+        // Deltas can arrive for an earlier request after a newer request has
+        // already been persisted. They must not overwrite the live status of
+        // the newest request.
+        if (requestIndex < transcript.LatestRequestIndex)
+            return;
+        transcript.LatestRequestIndex = requestIndex;
+        var field = key[2].GetString() ?? "";
+        var value = root.TryGetProperty("v", out var valueNode) ? valueNode : default;
+        if (field.Equals("modelState", StringComparison.OrdinalIgnoreCase))
+        {
+            if (value.ValueKind == JsonValueKind.Object && value.TryGetProperty("completedAt", out _))
+            {
+                transcript.Pending = false;
+                transcript.Waiting = false;
+            }
+            else if (value.ValueKind == JsonValueKind.Object && value.TryGetProperty("value", out var state)
+                && state.ValueKind == JsonValueKind.Number && state.TryGetInt32(out var stateValue))
+            {
+                transcript.Pending = stateValue != 1;
+            }
+        }
+        else if (field.Equals("response", StringComparison.OrdinalIgnoreCase))
+        {
+            transcript.HasAssistant = true;
+            if (value.ValueKind == JsonValueKind.Array)
+                transcript.Step = FirstNonEmpty(ExtractContentText(value), transcript.Step);
+        }
+        else if (field.Equals("result", StringComparison.OrdinalIgnoreCase))
+        {
+            transcript.Pending = false;
+            transcript.Waiting = false;
+        }
+    }
+
+    private static bool? CopilotRequestCompleted(JsonElement request)
+    {
+        if (!request.TryGetProperty("modelState", out var state) || state.ValueKind != JsonValueKind.Object)
+            return null;
+        if (state.TryGetProperty("completedAt", out _))
+            return true;
+        if (state.TryGetProperty("value", out var value) && value.ValueKind == JsonValueKind.Number
+            && value.TryGetInt32(out var numeric))
+            return numeric == 1;
+        return null;
+    }
+
+    private static string ParseCopilotModel(JsonElement value)
+    {
+        if (!value.TryGetProperty("selectedModel", out var model))
+            return FirstString(value, "model", "modelId", "model_id");
+        return model.ValueKind == JsonValueKind.Object
+            ? FirstString(model, "family", "identifier", "id")
+            : model.ValueKind == JsonValueKind.String ? Clean(model.GetString()) : "";
     }
 
     private void AddGrokSessions(List<(ProviderId, string, DateTimeOffset)> output,
@@ -929,6 +1304,198 @@ internal sealed class AgentActivityScanner
             catch (UnauthorizedAccessException) { }
         }
     }
+
+    private void AddZcodeDatabase(List<(ProviderId, string, DateTimeOffset)> output,
+        CancellationToken cancellationToken)
+    {
+        var configured = Environment.GetEnvironmentVariable("ZCODE_DB_PATH");
+        var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            string.IsNullOrWhiteSpace(configured)
+                ? Path.Combine(_home, ".zcode", "cli", "db", "db.sqlite")
+                : configured,
+        };
+
+        foreach (var path in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                if (!File.Exists(path))
+                    continue;
+                var modified = File.GetLastWriteTimeUtc(path);
+                foreach (var companion in new[] { path + "-wal", path + "-shm" })
+                {
+                    if (File.Exists(companion))
+                    {
+                        var companionModified = File.GetLastWriteTimeUtc(companion);
+                        if (companionModified > modified)
+                            modified = companionModified;
+                    }
+                }
+                if (DateTime.UtcNow - modified <= RecentWindow)
+                    output.Add((ProviderId.Zai, path, new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    private static IReadOnlyList<AgentActivityItem> ReadZcodeSessions(
+        string path, DateTimeOffset modified, bool claimLive)
+    {
+        var items = new List<AgentActivityItem>();
+        try
+        {
+            var connectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = path,
+                Mode = SqliteOpenMode.ReadOnly,
+                Cache = SqliteCacheMode.Shared,
+                Pooling = false,
+            }.ToString();
+            using var connection = new SqliteConnection(connectionString);
+            connection.Open();
+
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT id, parent_id, title, time_created, time_updated,
+                       COALESCE((SELECT status FROM session_target st WHERE st.session_id = session.id), '')
+                FROM session
+                WHERE COALESCE(time_updated, time_created, 0) >= $cutoff
+                ORDER BY time_updated DESC, time_created DESC
+                LIMIT 80;
+                """;
+            command.Parameters.AddWithValue("$cutoff", DateTimeOffset.Now.Add(-RecentWindow).ToUnixTimeMilliseconds());
+
+            var sessions = new List<ZcodeSessionRow>();
+            using (var reader = command.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    sessions.Add(new ZcodeSessionRow(
+                        reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1),
+                        reader.IsDBNull(2) ? "" : reader.GetString(2),
+                        reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                        reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                        reader.IsDBNull(5) ? "" : reader.GetString(5)));
+                }
+            }
+
+            bool claimed = false;
+            foreach (var session in sessions)
+            {
+                var tail = ReadZcodeTail(connection, session.Id);
+                var lastActivity = Max(FromUnixMilliseconds(session.UpdatedAt, modified), tail.LastActivity ?? modified);
+                var fresh = DateTimeOffset.Now - lastActivity < BusyWindow;
+                var live = claimLive && !claimed;
+                if (live) claimed = true;
+
+                var status = !live
+                    ? tail.State == TranscriptState.Failed ? AgentActivityStatus.Failed : AgentActivityStatus.Completed
+                    : session.TargetStatus is "paused" or "complete" || tail.State == TranscriptState.Waiting
+                        ? AgentActivityStatus.Waiting
+                        : fresh ? AgentActivityStatus.Working : AgentActivityStatus.Idle;
+                if (session.TargetStatus == "complete" && !live)
+                    status = AgentActivityStatus.Completed;
+
+                var step = status switch
+                {
+                    AgentActivityStatus.Completed => "Completed",
+                    AgentActivityStatus.Failed => "Failed",
+                    AgentActivityStatus.Waiting => FirstNonEmpty(tail.Step, "Waiting for input"),
+                    AgentActivityStatus.Idle => "Waiting for the next prompt",
+                    _ => FirstNonEmpty(tail.Step, fresh ? "Working" : "Thinking"),
+                };
+                items.Add(new AgentActivityItem(
+                    $"zcode:{session.Id}", ProviderId.Zai,
+                    string.IsNullOrWhiteSpace(session.Title) ? SummarizeTitle(tail.Prompt) ?? "ZCode" : Trim(Clean(session.Title), 72),
+                    step, status, FromUnixMilliseconds(session.CreatedAt, modified), lastActivity,
+                    Detail: tail.Prompt, Model: tail.Model, ThreadId: session.Id, ParentThreadId: session.ParentId));
+            }
+        }
+        catch (SqliteException) { }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return items;
+    }
+
+    private static ZcodeTail ReadZcodeTail(SqliteConnection connection, string sessionId)
+    {
+        var messages = new List<(string Role, string Data, long Created, long Updated)>();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT data, time_created, time_updated FROM message WHERE session_id = $session ORDER BY time_created DESC LIMIT 100;";
+            command.Parameters.AddWithValue("$session", sessionId);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var data = reader.GetString(0);
+                try
+                {
+                    using var doc = JsonDocument.Parse(data);
+                    var role = FirstString(doc.RootElement, "role").ToLowerInvariant();
+                    messages.Add((role, data, reader.GetInt64(1), reader.GetInt64(2)));
+                }
+                catch (JsonException) { }
+            }
+        }
+
+        var user = messages.FirstOrDefault(x => x.Role == "user");
+        var assistant = messages.FirstOrDefault(x => x.Role == "assistant");
+        var prompt = user.Data.Length == 0 ? "" : ReadZcodeText(user.Data, "content", "text");
+        var model = assistant.Data.Length == 0 ? "" : FirstJsonString(assistant.Data, "modelID", "modelId", "model");
+        var assistantActivity = assistant.Data.Length == 0
+            ? DateTimeOffset.MinValue
+            : FromUnixMilliseconds(Math.Max(assistant.Created, assistant.Updated), DateTimeOffset.MinValue);
+        var activity = messages.Select(x => FromUnixMilliseconds(Math.Max(x.Created, x.Updated), DateTimeOffset.MinValue)).DefaultIfEmpty().Max();
+        var state = assistant.Data.Length == 0 || user.Created > assistant.Updated ? TranscriptState.Action : TranscriptState.Finished;
+        var step = state == TranscriptState.Action ? "Thinking" : "";
+
+        using var partCommand = connection.CreateCommand();
+        partCommand.CommandText = "SELECT data, time_created, time_updated FROM part WHERE session_id = $session ORDER BY time_created DESC LIMIT 200;";
+        partCommand.Parameters.AddWithValue("$session", sessionId);
+        using var parts = partCommand.ExecuteReader();
+        while (parts.Read())
+        {
+            var data = parts.GetString(0);
+            try
+            {
+                using var doc = JsonDocument.Parse(data);
+                var root = doc.RootElement;
+                var type = FirstString(root, "type").ToLowerInvariant();
+                var partActivity = FromUnixMilliseconds(Math.Max(parts.GetInt64(1), parts.GetInt64(2)), DateTimeOffset.MinValue);
+                activity = Max(activity, partActivity);
+                if (type == "tool" && partActivity >= assistantActivity)
+                {
+                    var tool = FirstString(root, "tool", "name", "toolName");
+                    var statusText = root.TryGetProperty("state", out var stateNode) ? FirstString(stateNode, "status") : "";
+                    state = statusText is "error" or "failed" ? TranscriptState.Failed
+                        : statusText is "pending" or "waiting" ? TranscriptState.Waiting : TranscriptState.Action;
+                    step = DescribeAction(tool, FirstStringDeep(root, "command", "path", "input"));
+                    break;
+                }
+                if (type is "reasoning" or "text")
+                    step = FirstNonEmpty(FirstString(root, "text", "reasoning"), step);
+            }
+            catch (JsonException) { }
+        }
+        return new ZcodeTail(prompt, step, model, activity == DateTimeOffset.MinValue ? null : activity, state,
+            FirstStringDeepFromJson(messages.FirstOrDefault(x => x.Role == "assistant").Data, "error"));
+    }
+
+    private static string ReadZcodeText(string json, params string[] names)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return FirstStringDeep(doc.RootElement, names);
+        }
+        catch (JsonException) { return ""; }
+    }
+
+    private static string FirstJsonString(string json, params string[] names) => ReadZcodeText(json, names);
+    private static string FirstStringDeepFromJson(string json, params string[] names) => string.IsNullOrWhiteSpace(json) ? "" : ReadZcodeText(json, names);
 
     private bool TryRead(ProviderId provider, string path, DateTimeOffset modified,
         bool claimLive, out AgentActivityItem item)
@@ -1858,6 +2425,19 @@ internal sealed class AgentActivityScanner
     internal static IReadOnlyList<AgentActivityItem> ReadOpenCodeForTesting(string path, bool claimLive = true)
         => ReadOpenCodeSessions(path, DateTimeOffset.Now, claimLive);
 
+    internal static IReadOnlyList<AgentActivityItem> ReadZcodeForTesting(string path, bool claimLive = true)
+        => ReadZcodeSessions(path, DateTimeOffset.Now, claimLive);
+
+    internal static IReadOnlyList<AgentActivityItem> ReadCopilotForTesting(string path, bool claimLive = true)
+    {
+        var modified = File.GetLastWriteTimeUtc(path);
+        return TryReadCopilotSession(path,
+            new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime(), claimLive,
+            out var item)
+            ? new[] { item }
+            : Array.Empty<AgentActivityItem>();
+    }
+
     private static OpenCodeTail ReadOpenCodeTail(SqliteConnection connection, string sessionId)
     {
         var messages = new List<OpenCodeMessageRow>();
@@ -2557,6 +3137,13 @@ internal sealed class AgentActivityScanner
             case "devin": provider = ProviderId.Devin; return true;
             case "cline": provider = ProviderId.Cline; return true;
             case "kimi": provider = ProviderId.Kimi; return true;
+            case "zcode": provider = ProviderId.Zai; return true;
+            case "code":
+            case "code-insiders": provider = ProviderId.Copilot; return true;
+            case "code - insiders": provider = ProviderId.Copilot; return true;
+            case "copilot":
+            case "github copilot":
+            case "github-copilot": provider = ProviderId.Copilot; return true;
             default: return false;
         }
     }
@@ -2576,7 +3163,7 @@ internal sealed class AgentActivityScanner
             "Name = 'bun.exe' OR Name = 'deno.exe' OR Name = 'npm.exe' OR Name = 'npx.exe' OR " +
             "Name = 'pnpm.exe' OR Name = 'yarn.exe' OR Name = 'wsl.exe' OR Name = 'bash.exe' OR " +
             "Name = 'codex.exe' OR Name = 'claude.exe' OR Name = 'cursor-agent.exe' OR " +
-            "Name = 'opencode.exe' OR Name = 'cline.exe' OR Name = 'kimi.exe' OR Name = 'agy.exe' OR Name = 'grok.exe'";
+            "Name = 'opencode.exe' OR Name = 'cline.exe' OR Name = 'kimi.exe' OR Name = 'agy.exe' OR Name = 'grok.exe' OR Name = 'zcode.exe' OR Name = 'copilot.exe' OR Name = 'github-copilot.exe'";
 
         try
         {
@@ -2611,6 +3198,8 @@ internal sealed class AgentActivityScanner
         if (text.Contains("opencode")) { provider = ProviderId.OpenCode; return true; }
         if (text.Contains("cline")) { provider = ProviderId.Cline; return true; }
         if (text.Contains("kimi")) { provider = ProviderId.Kimi; return true; }
+        if (text.Contains("zcode") || executable.Equals("zcode", StringComparison.OrdinalIgnoreCase)) { provider = ProviderId.Zai; return true; }
+        if (text.Contains("copilot") || executable.Equals("github-copilot", StringComparison.OrdinalIgnoreCase)) { provider = ProviderId.Copilot; return true; }
         if (text.Contains(" codex") || executable.Equals("codex", StringComparison.OrdinalIgnoreCase)) { provider = ProviderId.Codex; return true; }
         return false;
     }
@@ -2712,6 +3301,26 @@ internal sealed class AgentActivityScanner
         string MessageId, string Type, DateTimeOffset ActivityAt, string Tool, string Status, string Input, string Text);
     private sealed record OpenCodeTail(
         string Step, string Summary, string Prompt, DateTimeOffset? LastActivity, TranscriptState State);
+    private sealed record ZcodeTail(
+        string Prompt, string Step, string Model, DateTimeOffset? LastActivity, TranscriptState State, string Error);
+    private sealed record ZcodeSessionRow(
+        string Id, string? ParentId, string Title, long CreatedAt, long UpdatedAt, string TargetStatus);
+    private sealed class CopilotTranscript(string sessionId)
+    {
+        public string SessionId { get; set; } = sessionId;
+        public string Title { get; set; } = "";
+        public string Prompt { get; set; } = "";
+        public string Model { get; set; } = "";
+        public string Step { get; set; } = "";
+        public DateTimeOffset? StartedAt { get; set; }
+        public DateTimeOffset? LastActivity { get; set; }
+        public bool HasUser { get; set; }
+        public bool HasAssistant { get; set; }
+        public bool Pending { get; set; }
+        public bool Waiting { get; set; }
+        public bool Failed { get; set; }
+        public int LatestRequestIndex { get; set; } = -1;
+    }
     private sealed class ClineTail
     {
         public string Prompt { get; set; } = "";

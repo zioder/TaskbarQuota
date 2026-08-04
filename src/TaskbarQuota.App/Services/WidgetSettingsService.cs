@@ -60,6 +60,9 @@ public static class WidgetSettingsService
     private static readonly string HideWhenUnfocusedPath =
         Path.Combine(AppStorage.AppDataDirectory, "hide-when-unfocused.txt");
 
+    private static readonly string ShowAgentActivityInWidgetPath =
+        Path.Combine(AppStorage.AppDataDirectory, "show-agent-activity-in-widget.txt");
+
     private static readonly Dictionary<string, bool> RowVisibility = LoadRowVisibility();
     private static readonly Dictionary<string, bool> ProviderVisibility = LoadProviderVisibility();
     private static readonly Dictionary<string, bool> DashboardProviderVisibility = LoadDashboardProviderVisibility();
@@ -75,6 +78,8 @@ public static class WidgetSettingsService
     /// are never affected — a pin is an explicit "always show this" request.
     /// </summary>
     public static bool HideWhenProviderUnfocused { get; private set; } = LoadHideWhenUnfocused();
+    /// <summary>Whether the separate Agent Activity island is shown on the taskbar. Enabled by default.</summary>
+    public static bool ShowAgentActivityInWidget { get; private set; } = LoadShowAgentActivityInWidget();
     public static event EventHandler? Changed;
     public static event EventHandler? DashboardCompositionChanged;
     public static event EventHandler? PercentageModeChanged;
@@ -244,6 +249,16 @@ public static class WidgetSettingsService
 
         HideWhenProviderUnfocused = enabled;
         Save(HideWhenUnfocusedPath, enabled ? 1 : 0);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ApplyShowAgentActivityInWidget(bool enabled)
+    {
+        if (ShowAgentActivityInWidget == enabled)
+            return;
+
+        ShowAgentActivityInWidget = enabled;
+        Save(ShowAgentActivityInWidgetPath, enabled ? 1 : 0);
         Changed?.Invoke(null, EventArgs.Empty);
     }
 
@@ -638,6 +653,23 @@ public static class WidgetSettingsService
         catch
         {
             return false;
+        }
+    }
+
+    private static bool LoadShowAgentActivityInWidget()
+    {
+        try
+        {
+            if (!File.Exists(ShowAgentActivityInWidgetPath))
+                return true;
+
+            string raw = File.ReadAllText(ShowAgentActivityInWidgetPath);
+            return !int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value)
+                || value != 0;
+        }
+        catch
+        {
+            return true;
         }
     }
 

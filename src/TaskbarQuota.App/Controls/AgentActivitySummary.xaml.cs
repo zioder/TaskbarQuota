@@ -16,6 +16,10 @@ namespace TaskbarQuota.Controls;
 public sealed partial class AgentActivitySummary : UserControl
 {
     public const int DesiredLogicalWidth = 400;
+    // A separate taskbar island should start compact. The wider value above remains the maximum when
+    // space is abundant, but using it as the initial native-window width makes narrow drag lanes look
+    // unavailable and causes a large resize the first time the activity island is moved.
+    public const int DefaultLogicalWidth = 240;
     // The navigator and provider glyph need to remain usable, but the text area may shrink below the
     // preferred width so the host never reserves more space than the taskbar gap actually provides.
     public const int MinimumLogicalWidth = 160;
@@ -26,10 +30,24 @@ public sealed partial class AgentActivitySummary : UserControl
     private AgentActivitySnapshot _snapshot = new(Array.Empty<AgentActivityItem>());
     private ProviderId? _activeProvider;
     private Storyboard? _selectionStoryboard;
+    private readonly DispatcherTimer _wheelGestureEndTimer;
+    private bool _wheelGestureActive;
 
     public AgentActivitySummary()
     {
         InitializeComponent();
+        _wheelGestureEndTimer = new DispatcherTimer
+        {
+            // Precision touchpads keep emitting wheel events while momentum decays. A short fixed
+            // cooldown prevents a swipe from racing through agents without making the next swipe feel
+            // blocked.
+            Interval = TimeSpan.FromMilliseconds(140),
+        };
+        _wheelGestureEndTimer.Tick += (_, _) =>
+        {
+            _wheelGestureEndTimer.Stop();
+            _wheelGestureActive = false;
+        };
         Loaded += (_, _) => ApplyForeground();
         Tapped += AgentActivitySummary_Tapped;
         PointerWheelChanged += AgentActivitySummary_PointerWheelChanged;
@@ -94,14 +112,23 @@ public sealed partial class AgentActivitySummary : UserControl
 
     private void AgentActivitySummary_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
-        int delta = e.GetCurrentPoint(this).Properties.MouseWheelDelta;
-        if (delta == 0)
+        var properties = e.GetCurrentPoint(this).Properties;
+        int delta = properties.MouseWheelDelta;
+        if (delta == 0 || properties.IsHorizontalMouseWheel)
             return;
 
+        // Consume every vertical wheel event over the widget, including momentum events and attempts at
+        // either end of the list. Letting those events bubble can scroll an enclosing surface instead.
+        e.Handled = true;
+        if (_wheelGestureActive)
+            return;
+
+        _wheelGestureActive = true;
+        _wheelGestureEndTimer.Stop();
+        _wheelGestureEndTimer.Start();
         // Wheel-up moves toward the earlier agent; wheel-down moves toward the later agent.
         int direction = delta > 0 ? -1 : 1;
-        if (MoveSelection(direction))
-            e.Handled = true;
+        MoveSelection(direction);
     }
 
     private void PreviousButton_Click(object sender, RoutedEventArgs e) => MoveSelection(-1);
@@ -229,6 +256,7 @@ public sealed partial class AgentActivitySummary : UserControl
     {
         ProviderId.ClinePass => "Cline Pass",
         ProviderId.OpenCodeGo => "OpenCode Go",
+        ProviderId.Copilot => "GitHub Copilot",
         _ => provider.ToString(),
     };
 

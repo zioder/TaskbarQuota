@@ -109,6 +109,9 @@ namespace TaskbarQuota.Interop
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool GetCursorPos([Out] out POINT lpPoint);
 
+        [DllImport("user32.dll")]
+        public static extern short GetAsyncKeyState(int vKey);
+
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr GetForegroundWindow();
 

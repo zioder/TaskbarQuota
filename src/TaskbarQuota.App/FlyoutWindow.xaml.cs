@@ -51,6 +51,7 @@ namespace TaskbarQuota
         public FlyoutWindow()
         {
             InitializeComponent();
+            UpdateActivityWidgetButton();
             _dashboardViewModel = DashboardPage.SharedViewModel ?? new DashboardViewModel(DispatcherQueue);
             DashboardPage.SharedViewModel = _dashboardViewModel;
             _dashboardViewModel.Cards.CollectionChanged += DashboardCards_CollectionChanged;
@@ -106,7 +107,11 @@ namespace TaskbarQuota
         }
 
         private void OnWidgetSettingsChanged(object? sender, EventArgs e)
-            => DispatcherQueue.TryEnqueue(SyncProviderStripPins);
+            => DispatcherQueue.TryEnqueue(() =>
+            {
+                SyncProviderStripPins();
+                UpdateActivityWidgetButton();
+            });
 
         private void OnActivated(object sender, WindowActivatedEventArgs args)
         {
@@ -247,6 +252,17 @@ namespace TaskbarQuota
             _showingActivity = true;
             ActivityPanel.Visibility = Visibility.Visible;
             ContentFrame.Visibility = Visibility.Collapsed;
+            UpdateActivityWidgetButton();
+        }
+
+        private void UpdateActivityWidgetButton()
+        {
+            bool enabled = WidgetSettingsService.ShowAgentActivityInWidget;
+            ActivityWidgetButton.IsChecked = enabled;
+            ToolTipService.SetToolTip(ActivityWidgetButton,
+                enabled ? "Hide agent activity from taskbar widget" : "Show agent activity in taskbar widget");
+            AutomationProperties.SetName(ActivityWidgetButton,
+                enabled ? "Hide agent activity from taskbar widget" : "Show agent activity in taskbar widget");
         }
 
         private void OnActivityChanged(AgentActivitySnapshot snapshot)
@@ -294,6 +310,7 @@ namespace TaskbarQuota
         {
             ProviderId.ClinePass => "Cline Pass",
             ProviderId.OpenCodeGo => "OpenCode Go",
+            ProviderId.Copilot => "GitHub Copilot",
             _ => provider.ToString(),
         };
 
@@ -365,6 +382,13 @@ namespace TaskbarQuota
                 ShowProviderDashboard();
             else
                 ShowActivityPanel();
+        }
+
+        private void ActivityWidgetButton_Click(object sender, RoutedEventArgs e)
+        {
+            WidgetSettingsService.ApplyShowAgentActivityInWidget(
+                !WidgetSettingsService.ShowAgentActivityInWidget);
+            UpdateActivityWidgetButton();
         }
 
         private void RegisterWindowSizeHooks()
