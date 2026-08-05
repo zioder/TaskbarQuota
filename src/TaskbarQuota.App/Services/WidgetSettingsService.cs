@@ -263,6 +263,9 @@ public static class WidgetSettingsService
 
         ShowAgentActivityInWidget = enabled;
         Save(ShowAgentActivityInWidgetPath, enabled ? 1 : 0);
+        // Activity shares the taskbar area with quota tiles. Rebalance pins immediately so enabling it
+        // leaves room for the active quota tile plus one pinned tile (the normal cap is three quota tiles).
+        Services.PinBudgetService.EnforceBudget(notify: false);
         Changed?.Invoke(null, EventArgs.Empty);
     }
 

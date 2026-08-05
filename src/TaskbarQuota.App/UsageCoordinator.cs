@@ -123,11 +123,14 @@ namespace TaskbarQuota
         }
 
         /// <summary>
-        /// Hard cap on taskbar tiles. Three is the most that fits beside the tray on a normal bar even in
-        /// the narrow display modes; <see cref="Taskbar.TaskBarWidget"/> trims further when the measured
-        /// widths don't fit the free gap it actually has.
+        /// Maximum number of quota tile slots allocated by the widget. The effective display cap is lower
+        /// while the activity widget is enabled because the activity island occupies the same taskbar area.
         /// </summary>
         public const int MaxWidgetTiles = 3;
+
+        /// <summary>Effective quota-tile cap: active + two pinned tiles normally, active + one pinned with activity.</summary>
+        public static int MaxDisplayedWidgetTiles =>
+            WidgetSettingsService.ShowAgentActivityInWidget ? 2 : MaxWidgetTiles;
 
         /// <summary>
         /// Every provider the taskbar widget should render as its own tile, left to right: the ACTIVE
@@ -146,7 +149,8 @@ namespace TaskbarQuota
                 Enum.GetValues<ProviderId>(),
                 WidgetSettingsService.IsProviderPinned,
                 WidgetSettingsService.IsProviderVisible,
-                IsProviderAvailable);
+                IsProviderAvailable,
+                WidgetSettingsService.ShowAgentActivityInWidget);
 
         /// <summary>Pure, testable core of <see cref="WidgetDisplayProviders"/>.</summary>
         internal static IReadOnlyList<ProviderId> ComputeWidgetDisplayProviders(
@@ -156,7 +160,8 @@ namespace TaskbarQuota
             IReadOnlyList<ProviderId> ordered,
             Func<ProviderId, bool> isPinned,
             Func<ProviderId, bool> isVisible,
-            Func<ProviderId, bool> isAvailable)
+            Func<ProviderId, bool> isAvailable,
+            bool activityWidgetEnabled = false)
         {
             var result = new List<ProviderId>();
 
@@ -175,8 +180,9 @@ namespace TaskbarQuota
                 .ToList();
             result.AddRange(pinned);
 
-            if (result.Count > MaxWidgetTiles)
-                result.RemoveRange(MaxWidgetTiles, result.Count - MaxWidgetTiles);
+            int maxTiles = activityWidgetEnabled ? 2 : MaxWidgetTiles;
+            if (result.Count > maxTiles)
+                result.RemoveRange(maxTiles, result.Count - maxTiles);
             return result;
         }
 

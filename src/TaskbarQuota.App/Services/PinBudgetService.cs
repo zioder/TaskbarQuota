@@ -107,9 +107,9 @@ public static class PinBudgetService
         var pinned = PinnedProviders();
         string name = ProviderName(provider);
 
-        if (pinned.Count >= UsageCoordinator.MaxWidgetTiles)
+        if (pinned.Count >= UsageCoordinator.MaxDisplayedWidgetTiles)
         {
-            reason = $"The taskbar can show at most {UsageCoordinator.MaxWidgetTiles} providers at once, and you already "
+            reason = $"The taskbar can show at most {UsageCoordinator.MaxDisplayedWidgetTiles} quota providers at once, and you already "
                 + $"have {string.Join(", ", pinned.Select(ProviderName))} pinned. Unpin one of those to make room for {name}.";
             return false;
         }
@@ -180,7 +180,7 @@ public static class PinBudgetService
         var dropped = new List<ProviderId>();
         foreach (var provider in order)
         {
-            if (keeping.Count <= UsageCoordinator.MaxWidgetTiles
+            if (keeping.Count <= UsageCoordinator.MaxDisplayedWidgetTiles
                 && FitsTaskbar(keeping, Taskbar.TaskbarSpace.AvailableLogicalWidth))
             {
                 break;
@@ -216,6 +216,7 @@ public static class PinBudgetService
     {
         var hash = new HashCode();
         hash.Add(Taskbar.TaskbarSpace.AvailableLogicalWidth);
+        hash.Add(UsageCoordinator.MaxDisplayedWidgetTiles);
         foreach (var provider in AllProviders)
         {
             if (!WidgetSettingsService.IsProviderPinned(provider))
