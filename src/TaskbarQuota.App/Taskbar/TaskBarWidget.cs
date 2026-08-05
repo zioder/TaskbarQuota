@@ -18,6 +18,7 @@ using TaskbarQuota.Controls;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Interop;
 using TaskbarQuota.Usage;
+using TaskbarQuota.AgentActivity;
 using Anim = Microsoft.UI.Xaml.Media.Animation;
 
 namespace TaskbarQuota.Taskbar
@@ -42,6 +43,13 @@ namespace TaskbarQuota.Taskbar
         // Fixed width of the "|" divider drawn between adjacent tiles. Fixed rather than measured so the
         // fit math stays exact and doesn't depend on a layout pass having run.
         private const int TileSeparatorLogicalPx = 7;
+        // The activity summary is separated from the quota row by its own left margin.
+        private const int ActivitySummaryMarginLogicalPx = 8;
+        // Keep enough text visible to recognize the activity while dragging, while still fitting beside a
+        // wide two-column quota tile in the normal left taskbar lane.
+        private const int ActivityDragLogicalWidth = 240;
+        private const int PartnerSnapLogicalPx = 32;
+        private const int LayoutTransitionMilliseconds = 190;
         // Space assumed available before the first position pass has measured the real taskbar gap. Wide
         // enough for three tiles; the first pass corrects it either way.
         private const int DefaultAvailableLogicalWidth = 640;
@@ -55,6 +63,7 @@ namespace TaskbarQuota.Taskbar
         // Approx width of the Win11 far-left Widgets/weather pill; used to reserve clearance when its exact
         // bounds can't be read via UIA, so the widget never anchors on top of it (issue #17).
         private const int WidgetsButtonFallbackLogicalPx = 160;
+        private const int VK_LBUTTON = 0x01;
 
         private static readonly bool IsRtlUI = System.Globalization.CultureInfo.CurrentUICulture.TextInfo.IsRightToLeft;
         private static readonly object WindowClassLock = new();
@@ -79,17 +88,26 @@ namespace TaskbarQuota.Taskbar
         private readonly TaskbarStructureWatcher taskbarWatcher;
         private readonly ClassicTaskbarSpaceReservation classicTaskbarReservation;
         private readonly string positionPath;
+        private readonly string orderPath;
+        private readonly string activityPositionPath;
+        private readonly string activityManualPositionPath;
         private readonly CancellationTokenSource positionUpdateCancellation = new();
         private readonly SemaphoreSlim positionUpdateGate = new(1, 1);
         private readonly object positionRequestLock = new();
 
         private IntPtr hwnd;
         private AppWindow? appWindow;
+        private IntPtr activityHwnd;
+        private AppWindow? activityAppWindow;
         // Fixed pool of tile slots, created once and reused. Slot i renders tileProviders[i]; reassigning a
         // slot to another provider re-renders it through WidgetSummary's normal provider-switch path. A
         // fixed pool means the panel's children never change, so no tile is ever unloaded and re-loaded
         // (which would drop its WidgetSettingsService subscription) when the display order shifts.
         private readonly WidgetSummary[] tiles = new WidgetSummary[UsageCoordinator.MaxWidgetTiles];
+        private AgentActivitySummary? activitySummary;
+        private AgentActivitySnapshot activitySnapshot = new(Array.Empty<AgentActivityItem>());
+        private AgentActivitySnapshot? pendingEmptyActivitySnapshot;
+        private readonly Microsoft.UI.Xaml.DispatcherTimer activityEmptySnapshotTimer;
         // separators[i] is the "|" divider between slot i and slot i+1.
         private readonly Microsoft.UI.Xaml.Controls.TextBlock[] separators =
             new Microsoft.UI.Xaml.Controls.TextBlock[UsageCoordinator.MaxWidgetTiles - 1];
@@ -123,14 +141,25 @@ namespace TaskbarQuota.Taskbar
         private int? lastLayoutHash;
         private bool loggedMissingPanel;
         private DesktopWindowXamlSource? host;
+        private DesktopWindowXamlSource? activityHost;
         private Microsoft.UI.Xaml.FrameworkElement? hostContent;
+        private Microsoft.UI.Xaml.FrameworkElement? activityHostContent;
         // Show/hide cross-fade state. Short on purpose: the widget lives on the taskbar, so anything
         // slower reads as lag rather than as a transition.
         private const int HostFadeMilliseconds = 100;
         private Anim.Storyboard? hostFadeStoryboard;
+        private Anim.Storyboard? activityFadeStoryboard;
+        private Anim.Storyboard? quotaLayoutStoryboard;
+        private Anim.Storyboard? activityLayoutStoryboard;
         private int hostFadeGeneration;
+        private int activityFadeGeneration;
         private int WidgetHostWidth;
+        private int ActivityHostWidth;
         private int currentOffsetX = int.MinValue;
+        private int activityOffsetX = int.MinValue;
+        // Runtime placement updates activityOffsetX on every adaptive pass. Only a coordinate loaded from
+        // disk or committed by an Activity drag is user-owned and must survive later quota width changes.
+        private bool hasManualActivityPosition;
         private int currentOffsetY = 0;
         // Last known Widgets/weather pill bounds in taskbar-client coords, captured during the resting
         // reposition so the synchronous drag path can avoid it without an async UIA read.
@@ -142,6 +171,9 @@ namespace TaskbarQuota.Taskbar
         private bool isDragging;
         private bool isPointerTracking;
         private bool isDirectDrag;
+        private Microsoft.UI.Xaml.DispatcherTimer? dragPollTimer;
+        private bool draggingActivity;
+        private TaskbarWidgetOrder widgetOrder = TaskbarWidgetOrder.QuotaFirst;
 
         // True while the user is actively repositioning the widget (tray "Move" mode or a direct pointer
         // drag). Background repositions (2s watcher poll, taskbar events) must not fire during this, or the
@@ -164,9 +196,16 @@ namespace TaskbarQuota.Taskbar
         private int loggedDragGapHash;
         private int lastCursorPositionX;
         private int pressCursorPositionX;
+        private int dragOriginX;
+        private int dragPartnerOriginX;
+        private TaskbarWidgetOrder dragOriginOrder;
+        private int? pendingSwapDraggedX;
+        private (int quotaOld, int quotaNew, int activityOld, int activityNew)? pendingSwapVisual;
+        private Anim.Storyboard? swapVisualStoryboard;
         private bool initialized;
         private bool destroyed;
         private bool isVisible;
+        private bool isActivityVisible;
         private bool windowClassAcquired;
         private bool disposedValue;
         private bool positionRunnerActive;
@@ -176,7 +215,14 @@ namespace TaskbarQuota.Taskbar
         private bool pendingTaskbarWidgetsEnabled;
 
         public IntPtr Handle => hwnd != IntPtr.Zero ? hwnd : throw new InvalidOperationException("Widget not initialized.");
+        public IntPtr ActivityHandle => activityHwnd != IntPtr.Zero && activityAppWindow?.IsVisible == true
+            ? activityHwnd
+            : Handle;
         public bool IsAlive => hwnd != IntPtr.Zero && User32.IsWindow(hwnd);
+        private AppWindow? DragAppWindow => draggingActivity ? activityAppWindow : appWindow;
+        private Microsoft.UI.Xaml.FrameworkElement? DragContent => draggingActivity ? activityHostContent : hostContent;
+        private int DragWidth => draggingActivity ? ActivityHostWidth : WidgetHostWidth;
+        private int DragCurrentOffsetX => draggingActivity ? activityOffsetX : currentOffsetX;
         /// <summary>True once <see cref="Initialize"/> has built the tile panel. A live window without it can
         /// render nothing at all, so the manager treats that pairing as a dead widget and recreates it.</summary>
         public bool IsHostContentReady => summaryPanel is not null;
@@ -198,12 +244,20 @@ namespace TaskbarQuota.Taskbar
         /// until the next fetch lands. Set by <see cref="TaskBarManager"/>.
         /// </summary>
         public Func<ProviderId, UsageResult?>? HydrateProvider { get; set; }
-        /// <summary>Raised when any tile is clicked; provider-agnostic, it just opens the flyout.</summary>
+        /// <summary>Raised when any quota tile is clicked; provider-agnostic, it opens the provider flyout.</summary>
         public event Action? Clicked;
+        /// <summary>Raised when the agent activity summary is clicked, so its activity panel can open.</summary>
+        public event Action<AgentActivityItem?>? ActivityClicked;
         public event EventHandler? Destroying;
 
         public TaskBarWidget(TaskbarWindowTarget target)
         {
+            activityEmptySnapshotTimer = new Microsoft.UI.Xaml.DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(650),
+            };
+            activityEmptySnapshotTimer.Tick += ActivityEmptySnapshotTimer_Tick;
+
             hwndShell = target.Handle;
             isPrimaryTaskbar = target.IsPrimary;
             displayKey = target.DisplayKey;
@@ -219,8 +273,12 @@ namespace TaskbarQuota.Taskbar
             taskbarDpi = detectedDpi == 0 ? 96u : detectedDpi;
             dpiScale = taskbarDpi / 96d;
             WidgetHostWidth = (int)Math.Ceiling(dpiScale * DefaultWidgetHostWidth);
+            ActivityHostWidth = (int)Math.Ceiling(dpiScale * AgentActivitySummary.DefaultLogicalWidth);
             Log.Debug($"Widget ctor: taskbar=0x{hwndShell.ToInt64():X}, primary={isPrimaryTaskbar}, DPI={taskbarDpi}, Width={WidgetHostWidth}");
             positionPath = target.GetPositionPath();
+            orderPath = positionPath + ".order";
+            activityPositionPath = positionPath + ".activity";
+            activityManualPositionPath = positionPath + ".activity.manual";
 
             taskbarWatcher = new TaskbarStructureWatcher(hwndShell, hwndReBar);
             classicTaskbarReservation = new ClassicTaskbarSpaceReservation(hwndShell);
@@ -256,10 +314,13 @@ namespace TaskbarQuota.Taskbar
             hostContent = new Microsoft.UI.Xaml.Controls.Grid
             {
                 Children = { summaryPanel },
-                Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Colors.Transparent)
+                Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Colors.Transparent),
+                RenderTransform = new Microsoft.UI.Xaml.Media.CompositeTransform(),
             };
             host.Content = hostContent;
             ResizeWidgetHost(WidgetWidthForMode(WidgetSettingsService.Current));
+
+            InitializeActivityHost(taskbarRect);
 
             InjectIntoTaskbar();
             QueuePositionUpdate(TaskbarChangeReason.None);
@@ -272,6 +333,61 @@ namespace TaskbarQuota.Taskbar
             // same "no panel yet" early-out on every health tick. That left the host injected with every
             // tile still collapsed — an invisible widget for the life of the process.
             ApplyPendingDisplayProviders();
+        }
+
+        private void InitializeActivityHost(RECT taskbarRect)
+        {
+            activityHost = new DesktopWindowXamlSource();
+            activityHwnd = CreateHostWindow(hwndShell);
+            var activityId = Win32Interop.GetWindowIdFromWindow(activityHwnd);
+            activityAppWindow = AppWindow.GetFromWindowId(activityId);
+            activityAppWindow.IsShownInSwitchers = false;
+            activityAppWindow.Destroying += ActivityAppWindow_Destroying;
+            activityAppWindow.ResizeClient(new SizeInt32(ActivityHostWidth, taskbarRect.bottom - taskbarRect.top));
+            activityHost.Initialize(activityId);
+            activityHost.SiteBridge.ResizePolicy = Microsoft.UI.Content.ContentSizePolicy.ResizeContentToParentWindow;
+            activitySummary = CreateActivitySummary();
+            activityHostContent = new Microsoft.UI.Xaml.Controls.Grid
+            {
+                Children = { activitySummary },
+                Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Colors.Transparent),
+                RenderTransform = new Microsoft.UI.Xaml.Media.CompositeTransform(),
+            };
+            activityHost.Content = activityHostContent;
+            User32.SetParent(activityHwnd, hwndShell);
+            if (User32.GetAncestor(activityHwnd, GetAncestorFlags.GA_PARENT) != hwndShell)
+                throw new InvalidOperationException("Could not inject the activity widget into the taskbar.");
+            activityAppWindow.Hide();
+            LoadWidgetOrder();
+            LoadActivityPosition();
+        }
+
+        private AgentActivitySummary CreateActivitySummary()
+        {
+            var summary = new AgentActivitySummary
+            {
+                Visibility = Microsoft.UI.Xaml.Visibility.Collapsed,
+                HorizontalAlignment = Microsoft.UI.Xaml.HorizontalAlignment.Center,
+                VerticalAlignment = Microsoft.UI.Xaml.VerticalAlignment.Stretch,
+            };
+            // Listen even when a child button marks the press handled. Dragging starts only after the
+            // movement threshold, so a normal click still activates the button while the whole surface
+            // remains draggable.
+            summary.AddHandler(
+                Microsoft.UI.Xaml.UIElement.PointerPressedEvent,
+                new Microsoft.UI.Xaml.Input.PointerEventHandler(WidgetSummary_PointerPressed),
+                true);
+            summary.PointerMoved += WidgetSummary_PointerMoved;
+            summary.PointerReleased += WidgetSummary_PointerReleased;
+            summary.PointerCanceled += WidgetSummary_PointerCanceled;
+            summary.Clicked += OnActivityClicked;
+            return summary;
+        }
+
+        private void ActivityAppWindow_Destroying(AppWindow sender, object args)
+        {
+            if (activityAppWindow is not null)
+                activityAppWindow.Destroying -= ActivityAppWindow_Destroying;
         }
 
         /// <summary>Replays the provider set that arrived before <see cref="Initialize"/> built the panel.</summary>
@@ -345,6 +461,8 @@ namespace TaskbarQuota.Taskbar
                     hostContent.Opacity = 0;
                 appWindow.Show(false);
                 AnimateHostOpacity(1);
+                if (isActivityVisible)
+                    activityAppWindow?.Show(false);
                 return;
             }
 
@@ -355,6 +473,7 @@ namespace TaskbarQuota.Taskbar
             {
                 classicTaskbarReservation.Restore();
                 appWindow.Hide();
+                activityAppWindow?.Hide();
                 return;
             }
 
@@ -366,6 +485,7 @@ namespace TaskbarQuota.Taskbar
 
                 classicTaskbarReservation.Restore();
                 appWindow.Hide();
+                activityAppWindow?.Hide();
                 // Leave the content opaque again so the next Show has nothing to undo if it takes the
                 // no-animation path (e.g. the host was rebuilt in between).
                 if (hostContent is { } content)
@@ -426,8 +546,37 @@ namespace TaskbarQuota.Taskbar
         public void UpdatePosition(bool resetManualPosition = false)
         {
             if (resetManualPosition)
+            {
                 SaveCustomPosition(-1);
+                widgetOrder = TaskbarWidgetOrder.QuotaFirst;
+                SaveWidgetOrder();
+                activityOffsetX = int.MinValue;
+                hasManualActivityPosition = false;
+                try { if (File.Exists(activityPositionPath)) File.Delete(activityPositionPath); }
+                catch (Exception ex) { Log.Warning(ex, "Could not clear detached activity position"); }
+                try { if (File.Exists(activityManualPositionPath)) File.Delete(activityManualPositionPath); }
+                catch (Exception ex) { Log.Warning(ex, "Could not clear manual activity position marker"); }
+            }
             QueuePositionUpdate(TaskbarChangeReason.None);
+        }
+
+        /// <summary>Shows or hides only the quota host, leaving the independent activity host untouched.</summary>
+        public void SetQuotaVisible(bool visible)
+        {
+            if (appWindow is null || isVisible == visible && appWindow.IsVisible == visible)
+                return;
+
+            isVisible = visible;
+            if (visible)
+            {
+                QueuePositionUpdate(TaskbarChangeReason.None);
+                appWindow.Show(false);
+            }
+            else
+            {
+                classicTaskbarReservation.Restore();
+                appWindow.Hide();
+            }
         }
 
         private Microsoft.UI.Xaml.Controls.StackPanel BuildSummaryPanel()
@@ -489,7 +638,54 @@ namespace TaskbarQuota.Taskbar
 
         private void OnTileClicked() => Clicked?.Invoke();
 
+        private void OnActivityClicked(AgentActivityItem? item) => ActivityClicked?.Invoke(item);
+
         private void WidgetSummary_DesiredHostWidthChanged(int logicalWidth) => RecomputeLayout();
+
+        public void SetActivitySnapshot(AgentActivitySnapshot snapshot)
+        {
+            if (snapshot.Primary is null && activitySnapshot.Primary is not null)
+            {
+                // Discovery can publish an empty intermediate snapshot while transcript sources are being
+                // rescanned. Keep the visible activity island for a short grace period instead of hiding
+                // and recreating the native host on the next non-empty publish.
+                pendingEmptyActivitySnapshot = snapshot;
+                activityEmptySnapshotTimer.Stop();
+                activityEmptySnapshotTimer.Start();
+                return;
+            }
+
+            activityEmptySnapshotTimer.Stop();
+            pendingEmptyActivitySnapshot = null;
+            ApplyActivitySnapshot(snapshot);
+        }
+
+        private void ActivityEmptySnapshotTimer_Tick(object? sender, object e)
+        {
+            activityEmptySnapshotTimer.Stop();
+            if (pendingEmptyActivitySnapshot is not { } snapshot)
+                return;
+            if (IsUserRepositioning)
+                return;
+
+            pendingEmptyActivitySnapshot = null;
+            ApplyActivitySnapshot(snapshot);
+        }
+
+        private void ApplyActivitySnapshot(AgentActivitySnapshot snapshot)
+        {
+            activitySnapshot = snapshot;
+            // Transcript discovery publishes about once per second. Rebuilding and resizing the separate
+            // activity island while its pointer is captured makes the native drag visibly stutter and can
+            // change which gap fits underneath the cursor. Keep the newest snapshot and render it as soon
+            // as the drag settles instead.
+            if (IsUserRepositioning)
+                return;
+            activitySummary?.Apply(snapshot, activeTileProvider);
+            foreach (var tile in tiles)
+                tile?.SetAgentActivity(snapshot);
+            RecomputeLayout(forceReposition: true);
+        }
 
         /// <summary>
         /// Binds the tile slots to <paramref name="providers"/> in order (leftmost first) and re-lays out.
@@ -498,6 +694,11 @@ namespace TaskbarQuota.Taskbar
         /// </summary>
         public void SetDisplayProviders(IReadOnlyList<ProviderId> providers, ProviderId? activeProvider)
         {
+            // A stale reconciliation callback must never bind the same provider into two slots. The
+            // coordinator normally guarantees uniqueness, but normalizing at the widget boundary keeps
+            // an out-of-order foreground update from briefly rendering duplicate quota tiles.
+            providers = providers.Distinct().Take(UsageCoordinator.MaxWidgetTiles).ToArray();
+
             // Before Initialize() there are no tiles to bind. Hold the set instead of dropping it — the
             // manager re-sends only on a change, so a dropped first set never came back and the widget
             // stayed empty forever.
@@ -509,6 +710,7 @@ namespace TaskbarQuota.Taskbar
             }
 
             activeTileProvider = activeProvider;
+            activitySummary?.Apply(activitySnapshot, activeTileProvider);
 
             bool changed = false;
             for (int i = 0; i < tiles.Length; i++)
@@ -595,6 +797,10 @@ namespace TaskbarQuota.Taskbar
             isRecomputingLayout = true;
             try
             {
+                bool showActivity = WidgetSettingsService.ShowAgentActivityInWidget
+                    && activitySnapshot.Primary is not null
+                    && activityAppWindow is not null;
+
                 Array.Clear(tileSuppressed);
 
                 // Slot and width buffers are fields, not locals: at most three tiles, and this pass runs on
@@ -606,7 +812,10 @@ namespace TaskbarQuota.Taskbar
                         layoutSlots[count++] = i;
                 }
 
-                count = HoldBackTilesThatDoNotFit(layoutSlots, count);
+                int minimumActivityWidth = showActivity
+                    ? AgentActivitySummary.MinimumLogicalWidth + ActivitySummaryMarginLogicalPx
+                    : 0;
+                count = HoldBackTilesThatDoNotFit(layoutSlots, count, minimumActivityWidth);
 
                 // Widths are measured, never rendered — MeasureDesiredWidth is a pure calculation.
                 // Rendering to measure made the tile restart its refresh animation on every usage publish,
@@ -622,6 +831,28 @@ namespace TaskbarQuota.Taskbar
                         TaskbarSpace.RecordTileWidth(measuredProvider, width);
                     total += width + TileHorizontalMarginLogicalPx + (n > 0 ? TileSeparatorLogicalPx : 0);
                 }
+
+                // The activity island is placed independently from the quota island. Keep its current
+                // width during layout/drag; the resting-position solver below expands it against the exact
+                // free lane it occupies, rather than an approximate shared-row budget.
+                int activityWidth = 0;
+                if (showActivity && activitySummary is not null)
+                {
+                    if (availableLogicalWidth < AgentActivitySummary.MinimumLogicalWidth)
+                        showActivity = false;
+                    else
+                    {
+                        activityWidth = Math.Clamp(
+                            (int)Math.Floor(ActivityHostWidth / dpiScale),
+                            AgentActivitySummary.MinimumLogicalWidth,
+                            AgentActivitySummary.DesiredLogicalWidth);
+                        activitySummary.SetLogicalWidth(activityWidth);
+                    }
+                }
+
+                if (activitySummary is not null && showActivity)
+                    activitySummary.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+                bool activityVisibilityChanged = SetActivityHostVisible(showActivity);
 
                 for (int i = 0; i < tiles.Length; i++)
                 {
@@ -654,7 +885,8 @@ namespace TaskbarQuota.Taskbar
                 }
 
                 bool resized = ResizeWidgetHost(count == 0 ? DefaultWidgetHostWidth : total);
-                if (resized || forceReposition)
+                bool activityResized = ResizeActivityHost(activityWidth);
+                if (resized || activityResized || activityVisibilityChanged || forceReposition)
                     UpdatePosition();
             }
             catch (Exception ex)
@@ -714,7 +946,7 @@ namespace TaskbarQuota.Taskbar
         /// straight back when you switch away, so a pin still guarantees presence the rest of the time.
         /// </summary>
         /// <param name="slots">Occupied slot indices; compacted in place. Returns how many survive.</param>
-        private int HoldBackTilesThatDoNotFit(int[] slots, int count)
+        private int HoldBackTilesThatDoNotFit(int[] slots, int count, int reservedWidth)
         {
             if (count <= 1)
                 return count;
@@ -725,7 +957,7 @@ namespace TaskbarQuota.Taskbar
             // a linear scan rather than an ordered projection: at most three tiles, and this runs on every
             // usage publish, so the LINQ pipeline it replaces was allocating a dictionary, a lambda closure
             // and two lists per pass to sort three items.
-            while (count > 1 && MeasureRow(slots, count) > availableLogicalWidth)
+            while (count > 1 && reservedWidth + MeasureRow(slots, count) > availableLogicalWidth)
             {
                 int worstAt = -1;
                 int worstRecency = int.MinValue;
@@ -876,7 +1108,164 @@ namespace TaskbarQuota.Taskbar
 
             WidgetHostWidth = width;
             appWindow.ResizeClient(new SizeInt32(WidgetHostWidth, appWindow.Size.Height));
+            AnimateLayoutSurface(hostContent, ref quotaLayoutStoryboard, 0);
             return true;
+        }
+
+        private bool ResizeActivityHost(int logicalWidth)
+        {
+            if (activityAppWindow is null || logicalWidth <= 0)
+                return false;
+
+            int width = (int)Math.Ceiling(dpiScale * logicalWidth);
+            if (ActivityHostWidth != width)
+            {
+                ActivityHostWidth = width;
+                activityAppWindow.ResizeClient(new SizeInt32(width, activityAppWindow.Size.Height));
+                AnimateLayoutSurface(activityHostContent, ref activityLayoutStoryboard, 0);
+                return true;
+            }
+            return false;
+        }
+
+        private static void AnimateLayoutSurface(
+            Microsoft.UI.Xaml.FrameworkElement? content,
+            ref Anim.Storyboard? storyboard,
+            int travel)
+        {
+            if (content?.RenderTransform is not Microsoft.UI.Xaml.Media.CompositeTransform transform)
+                return;
+
+            storyboard?.Stop();
+            transform.TranslateX = travel;
+            transform.ScaleX = 0.985;
+            content.Opacity = Math.Min(content.Opacity <= 0 ? 1 : content.Opacity, 0.94);
+
+            var easing = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut };
+            var slide = new Anim.DoubleAnimation
+            {
+                To = 0,
+                Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(LayoutTransitionMilliseconds)),
+                EasingFunction = easing,
+                EnableDependentAnimation = true,
+            };
+            Anim.Storyboard.SetTarget(slide, transform);
+            Anim.Storyboard.SetTargetProperty(slide, "TranslateX");
+
+            var scale = new Anim.DoubleAnimation
+            {
+                To = 1,
+                Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(LayoutTransitionMilliseconds)),
+                EasingFunction = easing,
+            };
+            Anim.Storyboard.SetTarget(scale, transform);
+            Anim.Storyboard.SetTargetProperty(scale, "ScaleX");
+
+            var fade = new Anim.DoubleAnimation
+            {
+                To = 1,
+                Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(LayoutTransitionMilliseconds)),
+                EasingFunction = easing,
+            };
+            Anim.Storyboard.SetTarget(fade, content);
+            Anim.Storyboard.SetTargetProperty(fade, "Opacity");
+
+            var next = new Anim.Storyboard();
+            next.Children.Add(slide);
+            next.Children.Add(scale);
+            next.Children.Add(fade);
+            storyboard = next;
+            next.Begin();
+        }
+
+        private bool SetActivityHostVisible(bool visible)
+        {
+            if (activityAppWindow is null || activityHostContent is null)
+                return false;
+            if (visible == isActivityVisible && activityAppWindow.IsVisible == visible)
+                return false;
+
+            activityFadeGeneration++;
+            int generation = activityFadeGeneration;
+            isActivityVisible = visible;
+            if (visible)
+            {
+                activitySummary!.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+                activityAppWindow.Show(false);
+                AnimateActivityHostOpacity(1);
+            }
+            else
+            {
+                AnimateActivityHostOpacity(0, () =>
+                {
+                    if (generation != activityFadeGeneration || disposedValue)
+                        return;
+                    activityAppWindow.Hide();
+                    activitySummary!.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
+                    activityHostContent.Opacity = 1;
+                });
+            }
+            return true;
+        }
+
+        private void AnimateActivityHostOpacity(double to, Action? completed = null)
+        {
+            if (activityHostContent is not { } content)
+            {
+                completed?.Invoke();
+                return;
+            }
+
+            activityFadeStoryboard?.Stop();
+            double from = content.Opacity;
+            bool skip = Math.Abs(from - to) < 0.01 && to > 0.5;
+            if (skip)
+            {
+                content.Opacity = to;
+                completed?.Invoke();
+                return;
+            }
+
+            content.Opacity = to;
+            var animation = new Anim.DoubleAnimation
+            {
+                From = from < 0.01 ? 0.15 : from,
+                To = to,
+                Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(HostFadeMilliseconds)),
+                EasingFunction = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut },
+            };
+            Anim.Storyboard.SetTarget(animation, content);
+            Anim.Storyboard.SetTargetProperty(animation, "Opacity");
+
+            var storyboard = new Anim.Storyboard();
+            storyboard.Children.Add(animation);
+            if (completed is not null)
+                storyboard.Completed += (_, _) => completed();
+            activityFadeStoryboard = storyboard;
+            storyboard.Begin();
+        }
+
+        private void SetActivityLogicalWidthOnUiThread(int logicalWidth, int physicalWidth)
+        {
+            var summary = activitySummary;
+            if (summary is null)
+                return;
+
+            var dispatcher = summary.DispatcherQueue;
+            if (dispatcher.HasThreadAccess)
+            {
+                summary.SetLogicalWidth(logicalWidth);
+                return;
+            }
+
+            if (!dispatcher.TryEnqueue(() =>
+                {
+                    if (!disposedValue && ActivityHostWidth == physicalWidth)
+                        summary.SetLogicalWidth(logicalWidth);
+                }))
+            {
+                Log.Warning("Could not enqueue adaptive activity width on the UI thread");
+            }
         }
 
         private static int WidgetWidthForMode(WidgetDisplayMode mode) => mode switch
@@ -1027,7 +1416,69 @@ namespace TaskbarQuota.Taskbar
                 // it may occupy. That is the budget the tile-fit math trims against.
                 UpdateAvailableWidth(gaps);
 
-                int? placed = PlaceInFittingGap(preferredX, gaps, WidgetHostWidth);
+                // Solve the two native windows together. Using the activity window's previous rectangle as
+                // an obstacle made a wider quota tile chase stale bounds; the quota would jump first, then
+                // the activity solver could no longer find a lane and hid its window. Only the activity
+                // width is flexible, so the quota anchor and the user's chosen left/right order stay stable.
+                int activityGap = (int)Math.Ceiling(ActivitySummaryMarginLogicalPx * dpiScale);
+                int minimumActivityWidth = (int)Math.Ceiling(
+                    AgentActivitySummary.MinimumLogicalWidth * dpiScale);
+                int maximumActivityWidth = (int)Math.Ceiling(
+                    AgentActivitySummary.DesiredLogicalWidth * dpiScale);
+                bool activityUsesDifferentTaskbarLane = isActivityVisible
+                    && hasManualActivityPosition
+                    && activityOffsetX != int.MinValue
+                    && TaskbarWidgetPlacement.OccupyDifferentGaps(
+                        preferredX,
+                        WidgetHostWidth,
+                        activityOffsetX,
+                        ActivityHostWidth,
+                        gaps);
+
+                AdaptiveWidgetPairPlacement? pairPlacement = null;
+                if (activityUsesDifferentTaskbarLane)
+                {
+                    int? detachedQuotaX = PlaceInFittingGap(preferredX, gaps, WidgetHostWidth);
+                    AdaptiveWidgetPlacement? detachedActivity = TaskbarWidgetPlacement.PlaceAdaptive(
+                        activityOffsetX,
+                        ActivityHostWidth,
+                        minimumActivityWidth,
+                        maximumActivityWidth,
+                        anchorRight: false,
+                        gaps);
+                    if (detachedQuotaX is { } quotaX
+                        && detachedActivity is { } activity
+                        && TaskbarWidgetPlacement.OccupyDifferentGaps(
+                            quotaX,
+                            WidgetHostWidth,
+                            activity.X,
+                            activity.Width,
+                            gaps))
+                    {
+                        pairPlacement = new AdaptiveWidgetPairPlacement(
+                            quotaX,
+                            activity.X,
+                            activity.Width,
+                            WidgetHostWidth + activity.Width);
+                    }
+                }
+
+                pairPlacement ??= isActivityVisible
+                    ? TaskbarWidgetPlacement.PlaceAdaptivePair(
+                        preferredX,
+                        WidgetHostWidth,
+                        minimumActivityWidth,
+                        maximumActivityWidth,
+                        activityGap,
+                        widgetOrder,
+                        gaps,
+                        hasManualActivityPosition ? activityOffsetX : int.MinValue,
+                        ActivityHostWidth)
+                    : null;
+
+                int? placed = pairPlacement is { } pair
+                    ? pair.QuotaX
+                    : PlaceInFittingGap(preferredX, gaps, WidgetHostWidth);
                 if (placed is not { } fitX)
                 {
                     if (currentOffsetX != int.MinValue)
@@ -1037,6 +1488,20 @@ namespace TaskbarQuota.Taskbar
                 else
                 {
                     offsetX = fitX;
+                }
+
+                if (pairPlacement is { } adaptivePair)
+                {
+                    int logicalWidth = Math.Clamp(
+                        (int)Math.Floor(adaptivePair.ActivityWidth / dpiScale),
+                        AgentActivitySummary.MinimumLogicalWidth,
+                        AgentActivitySummary.DesiredLogicalWidth);
+                    int physicalWidth = (int)Math.Ceiling(logicalWidth * dpiScale);
+                    bool widthChanged = ActivityHostWidth != physicalWidth;
+                    ActivityHostWidth = physicalWidth;
+                    SetActivityLogicalWidthOnUiThread(logicalWidth, physicalWidth);
+                    if (widthChanged)
+                        Log.Debug($"activity width adapted to {logicalWidth} logical px beside quota");
                 }
 
                 offsetX = ClampToTaskbarMonitor(
@@ -1054,6 +1519,7 @@ namespace TaskbarQuota.Taskbar
                 if (disposedValue || targetAppWindow is null || !IsAlive)
                     return;
 
+                int previousQuotaOffsetX = currentOffsetX;
                 if (currentOffsetY != offsetY)
                 {
                     targetAppWindow.MoveAndResize(new RectInt32(offsetX, offsetY, WidgetHostWidth, barRect.bottom - barRect.top));
@@ -1063,6 +1529,30 @@ namespace TaskbarQuota.Taskbar
                 {
                     targetAppWindow.Move(new PointInt32(offsetX, offsetY));
                     currentOffsetX = offsetX;
+                }
+                if (previousQuotaOffsetX != int.MinValue && previousQuotaOffsetX != offsetX)
+                    AnimateLayoutSurface(hostContent, ref quotaLayoutStoryboard, previousQuotaOffsetX - offsetX);
+
+                if (isActivityVisible && activityAppWindow is not null)
+                {
+                    if (pairPlacement is null)
+                    {
+                        Log.Debug("activity hidden: no taskbar lane can fit quota plus the minimum activity width");
+                        SetActivityHostVisible(false);
+                        return;
+                    }
+
+                    var resolvedPair = pairPlacement.Value;
+                    // Keep the solver's saved/detached activity coordinate. If the final monitor clamp
+                    // nudged the quota by a few pixels, carry that same delta to the activity window so
+                    // the pair remains separated without collapsing back beside quota.
+                    int activityX = resolvedPair.ActivityX + (offsetX - resolvedPair.QuotaX);
+                    int previousActivityOffsetX = activityOffsetX;
+                    activityAppWindow.MoveAndResize(new RectInt32(
+                        activityX, offsetY, ActivityHostWidth, barRect.bottom - barRect.top));
+                    activityOffsetX = activityX;
+                    if (previousActivityOffsetX != int.MinValue && previousActivityOffsetX != activityX)
+                        AnimateLayoutSurface(activityHostContent, ref activityLayoutStoryboard, previousActivityOffsetX - activityX);
                 }
             }
             catch (OperationCanceledException)
@@ -1093,6 +1583,8 @@ namespace TaskbarQuota.Taskbar
         public void StartDragging()
         {
             if (isDragging || appWindow is null || hostContent is null || summaryPanel is null) return;
+            draggingActivity = false;
+            CaptureDragOrigins();
             BeginUserRepositioning();
             isDragging = true;
             SetVisible(true);
@@ -1112,29 +1604,31 @@ namespace TaskbarQuota.Taskbar
 
         public void EndDragging(bool revert)
         {
-            if (!isDragging || appWindow is null || hostContent is null || summaryPanel is null)
+            StopDragPolling();
+            var dragWindow = DragAppWindow;
+            var dragContent = DragContent;
+            if (!isDragging || dragWindow is null || dragContent is null || summaryPanel is null)
             {
                 if (!isDragging && !isPointerTracking && !isDirectDrag)
                     EndUserRepositioning();
                 return;
             }
             isDragging = false;
-            hostContent.ReleasePointerCaptures();
-            hostContent.KeyUp -= Content_KeyUp;
-            hostContent.PointerMoved -= Content_PointerMoved;
-            hostContent.PointerPressed -= Content_PointerPressed;
-            hostContent.PointerReleased -= Content_PointerReleased;
+            dragContent.ReleasePointerCaptures();
+            dragContent.KeyUp -= Content_KeyUp;
+            dragContent.PointerMoved -= Content_PointerMoved;
+            dragContent.PointerPressed -= Content_PointerPressed;
+            dragContent.PointerReleased -= Content_PointerReleased;
             SetTilesHitTestVisible(true);
             if (revert)
             {
-                dragPreviewX = null;
-                activeDragGap = null;
-                appWindow.Move(new PointInt32(currentOffsetX, currentOffsetY));
+                RestoreDragOrigins();
                 QueuePositionUpdate(TaskbarChangeReason.None);
                 EndUserRepositioning();
+                RenderDeferredActivitySnapshot();
                 return;
             }
-            _ = SnapToValidPositionAsync(dragPreviewX ?? appWindow.Position.X);
+            _ = SnapToValidPositionAsync(dragPreviewX ?? dragWindow.Position.X);
         }
 
         private void Content_KeyUp(object sender, KeyRoutedEventArgs e)
@@ -1145,84 +1639,208 @@ namespace TaskbarQuota.Taskbar
 
         private void Content_PointerPressed(object sender, PointerRoutedEventArgs e)
         {
-            if (appWindow is null || hostContent is null) return;
+            var dragWindow = DragAppWindow;
+            var dragContent = DragContent;
+            if (dragWindow is null || dragContent is null) return;
             e.Handled = true;
-            hostContent.PointerMoved += Content_PointerMoved;
-            hostContent.CapturePointer(e.Pointer);
+            dragContent.PointerMoved += Content_PointerMoved;
+            dragContent.CapturePointer(e.Pointer);
             User32.GetCursorPos(out var point);
             lastCursorPositionX = point.x;
             User32.GetWindowRect(hwndShell, out var taskbarRect);
-            draggingInnerOffsetX = point.x - taskbarRect.left - appWindow.Position.X;
+            draggingInnerOffsetX = point.x - taskbarRect.left - dragWindow.Position.X;
+            StartDragPolling();
         }
 
-        private void Content_PointerReleased(object sender, PointerRoutedEventArgs e) => EndDragging(false);
+        private void Content_PointerReleased(object sender, PointerRoutedEventArgs e)
+        {
+            StopDragPolling();
+            EndDragging(false);
+        }
 
         private void Content_PointerMoved(object sender, PointerRoutedEventArgs e)
         {
             if (appWindow is null || hostContent is null) return;
-            User32.GetCursorPos(out var point);
-            MoveWidgetWithCursor(point.x);
             hostContent.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
         }
 
         private void WidgetSummary_PointerPressed(object sender, PointerRoutedEventArgs e)
         {
-            if (appWindow is null || sender is not WidgetSummary summary) return;
+            var dragWindow = ReferenceEquals(sender, activitySummary) ? activityAppWindow : appWindow;
+            if (dragWindow is null || sender is not Microsoft.UI.Xaml.UIElement element) return;
+            draggingActivity = ReferenceEquals(sender, activitySummary);
+            CaptureDragOrigins();
             BeginUserRepositioning();
             isPointerTracking = true;
             isDirectDrag = false;
             PrimeObstacleCacheForDrag();
-            summary.CapturePointer(e.Pointer);
+            element.CapturePointer(e.Pointer);
             User32.GetCursorPos(out var point);
             pressCursorPositionX = point.x;
             lastCursorPositionX = point.x;
             User32.GetWindowRect(hwndShell, out var taskbarRect);
-            draggingInnerOffsetX = point.x - taskbarRect.left - appWindow.Position.X;
+            draggingInnerOffsetX = point.x - taskbarRect.left - dragWindow.Position.X;
+            StartDragPolling();
         }
 
         private void WidgetSummary_PointerMoved(object sender, PointerRoutedEventArgs e)
         {
-            if (!isPointerTracking || appWindow is null || sender is not WidgetSummary) return;
+            if (!isPointerTracking || DragAppWindow is null || sender is not Microsoft.UI.Xaml.UIElement) return;
             User32.GetCursorPos(out var point);
             if (!isDirectDrag)
             {
                 if (Math.Abs(point.x - pressCursorPositionX) < Math.Ceiling(4 * dpiScale))
                     return;
-                isDirectDrag = true;
-                classicTaskbarReservation.Restore();
-                SuppressTileClicks();
+                BeginDirectDrag();
                 e.Handled = true;
             }
 
-            MoveWidgetWithCursor(point.x);
             SuppressTileClicks();
         }
 
         private void WidgetSummary_PointerReleased(object sender, PointerRoutedEventArgs e)
         {
+            StopDragPolling();
+            if (!isPointerTracking)
+                return;
             bool wasDirectDrag = isDirectDrag;
-            (sender as WidgetSummary)?.ReleasePointerCaptures();
-            if (wasDirectDrag && appWindow is not null)
+            (sender as Microsoft.UI.Xaml.UIElement)?.ReleasePointerCaptures();
+            if (wasDirectDrag && DragAppWindow is not null)
             {
-                _ = SnapToValidPositionAsync(dragPreviewX ?? appWindow.Position.X);
+                _ = SnapToValidPositionAsync(dragPreviewX ?? DragAppWindow.Position.X);
                 SuppressTileClicks();
                 e.Handled = true;
             }
             isPointerTracking = false;
             isDirectDrag = false;
             if (!wasDirectDrag)
+            {
+                draggingActivity = false;
                 EndUserRepositioning();
+            }
         }
 
         private void WidgetSummary_PointerCanceled(object sender, PointerRoutedEventArgs e)
         {
+            StopDragPolling();
+            if (!isPointerTracking)
+                return;
             bool wasDirectDrag = isDirectDrag;
             isPointerTracking = false;
             isDirectDrag = false;
-            (sender as WidgetSummary)?.ReleasePointerCaptures();
+            (sender as Microsoft.UI.Xaml.UIElement)?.ReleasePointerCaptures();
             if (wasDirectDrag)
+            {
+                RestoreDragOrigins();
                 QueuePositionUpdate(TaskbarChangeReason.None);
+            }
+            draggingActivity = false;
             EndUserRepositioning();
+            RenderDeferredActivitySnapshot();
+        }
+
+        private void StartDragPolling()
+        {
+            dragPollTimer ??= new Microsoft.UI.Xaml.DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(16),
+            };
+            dragPollTimer.Tick -= DragPollTimer_Tick;
+            dragPollTimer.Tick += DragPollTimer_Tick;
+            dragPollTimer.Start();
+        }
+
+        private void StopDragPolling()
+        {
+            if (dragPollTimer is null)
+                return;
+            dragPollTimer.Stop();
+            dragPollTimer.Tick -= DragPollTimer_Tick;
+        }
+
+        private void DragPollTimer_Tick(object? sender, object e)
+        {
+            if (!isDragging && !isPointerTracking)
+            {
+                StopDragPolling();
+                return;
+            }
+
+            bool leftButtonDown = (User32.GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+            if (!leftButtonDown)
+            {
+                StopDragPolling();
+                if (isDragging)
+                {
+                    EndDragging(false);
+                    return;
+                }
+
+                FinishDirectDragFromPolling();
+                return;
+            }
+
+            if (!User32.GetCursorPos(out var point))
+                return;
+
+            if (isPointerTracking && !isDirectDrag)
+            {
+                if (Math.Abs(point.x - pressCursorPositionX) < Math.Ceiling(4 * dpiScale))
+                    return;
+                BeginDirectDrag();
+            }
+
+            // Pointer events and the polling timer used to solve and move the native window in parallel.
+            // Polling is now the single clock; skip an unchanged sample unless a partner exchange is still
+            // easing to its destination.
+            if (point.x == lastCursorPositionX && pendingSwapDraggedX is null)
+                return;
+
+            MoveWidgetWithCursor(point.x);
+        }
+
+        private void BeginDirectDrag()
+        {
+            isDirectDrag = true;
+            if (draggingActivity)
+                CompactActivityForDrag();
+            classicTaskbarReservation.Restore();
+            SuppressTileClicks();
+        }
+
+        private void CompactActivityForDrag()
+        {
+            int dragLogicalWidth = Math.Clamp(
+                ActivityDragLogicalWidth,
+                AgentActivitySummary.MinimumLogicalWidth,
+                AgentActivitySummary.DesiredLogicalWidth);
+            activitySummary?.SetLogicalWidth(dragLogicalWidth);
+            ResizeActivityHost(dragLogicalWidth);
+            // A drag may begin from the far-right side of the expanded summary. Once compacted, keep the
+            // cursor's grab point inside the native window so crossing the centred icon cluster stays smooth.
+            draggingInnerOffsetX = Math.Clamp(draggingInnerOffsetX, 0, ActivityHostWidth);
+        }
+
+        private void FinishDirectDragFromPolling()
+        {
+            bool wasDirectDrag = isDirectDrag;
+            activitySummary?.ReleasePointerCaptures();
+            foreach (var tile in tiles)
+                tile?.ReleasePointerCaptures();
+
+            isPointerTracking = false;
+            isDirectDrag = false;
+            if (wasDirectDrag && DragAppWindow is not null)
+            {
+                _ = SnapToValidPositionAsync(dragPreviewX ?? DragAppWindow.Position.X);
+                SuppressTileClicks();
+            }
+            else
+            {
+                draggingActivity = false;
+                EndUserRepositioning();
+                RenderDeferredActivitySnapshot();
+            }
         }
 
         private void BeginUserRepositioning()
@@ -1243,6 +1861,43 @@ namespace TaskbarQuota.Taskbar
             Interlocked.Decrement(ref userRepositioningCount);
         }
 
+        private void CaptureDragOrigins()
+        {
+            dragOriginX = DragCurrentOffsetX != int.MinValue
+                ? DragCurrentOffsetX
+                : DragAppWindow?.Position.X ?? 0;
+            dragPartnerOriginX = draggingActivity ? currentOffsetX : activityOffsetX;
+            dragOriginOrder = widgetOrder;
+            pendingSwapDraggedX = null;
+            pendingSwapVisual = null;
+        }
+
+        private void RestoreDragOrigins()
+        {
+            if (draggingActivity)
+            {
+                activityAppWindow?.Move(new PointInt32(dragOriginX, currentOffsetY));
+                if (dragPartnerOriginX != int.MinValue)
+                    appWindow?.Move(new PointInt32(dragPartnerOriginX, currentOffsetY));
+                activityOffsetX = dragOriginX;
+                currentOffsetX = dragPartnerOriginX;
+            }
+            else
+            {
+                appWindow?.Move(new PointInt32(dragOriginX, currentOffsetY));
+                if (dragPartnerOriginX != int.MinValue)
+                    activityAppWindow?.Move(new PointInt32(dragPartnerOriginX, currentOffsetY));
+                currentOffsetX = dragOriginX;
+                activityOffsetX = dragPartnerOriginX;
+            }
+
+            widgetOrder = dragOriginOrder;
+            pendingSwapDraggedX = null;
+            pendingSwapVisual = null;
+            dragPreviewX = null;
+            activeDragGap = null;
+        }
+
         private void SetTilesHitTestVisible(bool visible)
         {
             foreach (var tile in tiles)
@@ -1250,6 +1905,8 @@ namespace TaskbarQuota.Taskbar
                 if (tile is not null)
                     tile.IsHitTestVisible = visible;
             }
+            if (activitySummary is not null)
+                activitySummary.IsHitTestVisible = visible;
         }
 
         // A drag can cross tiles, so every tile swallows the click that ends it — otherwise releasing over
@@ -1261,6 +1918,8 @@ namespace TaskbarQuota.Taskbar
                 if (tile is not null)
                     tile.SuppressNextClick = true;
             }
+            if (activitySummary is not null)
+                activitySummary.SuppressNextClick = true;
         }
 
         /// <summary>
@@ -1275,7 +1934,8 @@ namespace TaskbarQuota.Taskbar
         /// </summary>
         private void MoveWidgetWithCursor(int cursorX)
         {
-            if (appWindow is null) return;
+            var dragWindow = DragAppWindow;
+            if (dragWindow is null) return;
             if (!TryGetLayoutRects(
                     out RECT taskbarRect,
                     out RECT notificationRect,
@@ -1298,8 +1958,16 @@ namespace TaskbarQuota.Taskbar
             int cursorClientX = cursorX - taskbarRect.left;
             int desiredX = cursorClientX - draggingInnerOffsetX;
 
-            var gap = SelectDragGap(gaps, cursorClientX, desiredX, WidgetHostWidth, activeDragGap);
-            if (gap is not { } zone)
+            var gap = SelectDragGap(gaps, cursorClientX, desiredX, DragWidth, activeDragGap);
+            // A separated pair can share one shell lane. While the pointer crosses the partner, the
+            // current lane is still the correct lane even if its cached bounds moved by a pixel or its
+            // width is temporarily tight. Keep the drag alive long enough for the partner swap to start.
+            if (gap is null && activeDragGap is { } rememberedGap
+                && rememberedGap.end - rememberedGap.start >= DragWidth)
+            {
+                gap = rememberedGap;
+            }
+            if (gap is not { } selectedZone)
             {
                 // No gap can hold the widget at all (very crowded bar): leave it where it is.
                 LogDragState(cursorClientX, desiredX, leftBound, rightBound, gaps, obstacles, null, currentOffsetX);
@@ -1307,14 +1975,144 @@ namespace TaskbarQuota.Taskbar
                 return;
             }
 
-            activeDragGap = zone;
-            int targetX = Math.Clamp(desiredX, zone.start, zone.end - WidgetHostWidth);
+            activeDragGap = selectedZone;
+            UpdatePartnerSwap(desiredX, gaps);
+            var swapVisual = pendingSwapVisual;
+            int targetX = pendingSwapDraggedX
+                ?? Math.Clamp(desiredX, selectedZone.start, selectedZone.end - DragWidth);
+            pendingSwapDraggedX = null;
 
-            LogDragState(cursorClientX, desiredX, leftBound, rightBound, gaps, obstacles, zone, targetX);
-            appWindow.Move(new PointInt32(targetX, currentOffsetY));
+            // Never allow the two native windows to occupy the same pixels. A pointer crossing the
+            // partner is held at the nearest separated edge until the atomic pair swap takes over.
+            int partnerX = draggingActivity ? currentOffsetX : activityOffsetX;
+            int partnerWidth = draggingActivity ? WidgetHostWidth : ActivityHostWidth;
+            if (partnerX != int.MinValue
+                && targetX < partnerX + partnerWidth
+                && targetX + DragWidth > partnerX)
+            {
+                int separation = (int)Math.Ceiling(ActivitySummaryMarginLogicalPx * dpiScale);
+                bool draggedGoesLeft = desiredX + DragWidth / 2 < partnerX + partnerWidth / 2;
+                int separatedX = draggedGoesLeft
+                    ? partnerX - separation - DragWidth
+                    : partnerX + partnerWidth + separation;
+                targetX = separatedX >= selectedZone.start
+                    && separatedX + DragWidth <= selectedZone.end
+                    ? separatedX
+                    : (DragCurrentOffsetX != int.MinValue ? DragCurrentOffsetX : targetX);
+            }
+
+            if (draggingActivity && partnerX != int.MinValue
+                && TaskbarWidgetPlacement.SnapNextToPartner(
+                    targetX,
+                    DragWidth,
+                    partnerX,
+                    partnerWidth,
+                    (int)Math.Ceiling(ActivitySummaryMarginLogicalPx * dpiScale),
+                    (int)Math.Ceiling(PartnerSnapLogicalPx * dpiScale),
+                    gaps) is { } liveSnapX)
+            {
+                targetX = liveSnapX;
+            }
+
+            LogDragState(cursorClientX, desiredX, leftBound, rightBound, gaps, obstacles, selectedZone, targetX);
+            dragWindow.Move(new PointInt32(targetX, currentOffsetY));
             dragPreviewX = targetX;
+            if (swapVisual is { } visual)
+                AnimatePairSwapVisual(visual.quotaOld, visual.quotaNew, visual.activityOld, visual.activityNew);
+            pendingSwapVisual = null;
             ResyncGrabPoint(cursorClientX, targetX, desiredX);
             lastCursorPositionX = cursorX;
+        }
+
+        private void UpdatePartnerSwap(int draggedX, List<(int start, int end)> gaps)
+        {
+            int partnerX = draggingActivity ? currentOffsetX : activityOffsetX;
+            if (partnerX == int.MinValue)
+                return;
+
+            var nextOrder = TaskbarWidgetPlacement.OrderForDraggedWidget(
+                draggingActivity ? TaskbarWidgetRole.Activity : TaskbarWidgetRole.Quota,
+                draggedX,
+                DragWidth,
+                partnerX,
+                draggingActivity ? WidgetHostWidth : ActivityHostWidth,
+                widgetOrder,
+                (int)Math.Ceiling(12 * dpiScale));
+            if (nextOrder != widgetOrder)
+            {
+                int anchor = Math.Min(dragOriginX, dragPartnerOriginX);
+                int separation = (int)Math.Ceiling(ActivitySummaryMarginLogicalPx * dpiScale);
+                var pair = TaskbarWidgetPlacement.PlacePair(
+                    anchor,
+                    WidgetHostWidth,
+                    ActivityHostWidth,
+                    separation,
+                    nextOrder,
+                    gaps);
+                if (pair is not { } placement)
+                    return;
+
+                int oldQuotaX = currentOffsetX;
+                int oldActivityX = activityOffsetX;
+                int partnerTarget = draggingActivity ? placement.QuotaX : placement.ActivityX;
+                int draggedTarget = draggingActivity ? placement.ActivityX : placement.QuotaX;
+                if (draggingActivity)
+                {
+                    appWindow?.Move(new PointInt32(partnerTarget, currentOffsetY));
+                    currentOffsetX = partnerTarget;
+                }
+                else
+                {
+                    activityAppWindow?.Move(new PointInt32(partnerTarget, currentOffsetY));
+                    activityOffsetX = partnerTarget;
+                }
+
+                widgetOrder = nextOrder;
+                pendingSwapDraggedX = draggedTarget;
+                if (oldQuotaX != int.MinValue && oldActivityX != int.MinValue)
+                    pendingSwapVisual = (oldQuotaX, placement.QuotaX, oldActivityX, placement.ActivityX);
+            }
+        }
+
+        private void AnimatePairSwapVisual(int quotaOldX, int quotaNewX, int activityOldX, int activityNewX)
+        {
+            if (hostContent is null || activityHostContent is null)
+                return;
+
+            var quotaTransform = hostContent.RenderTransform as Microsoft.UI.Xaml.Media.CompositeTransform;
+            var activityTransform = activityHostContent.RenderTransform as Microsoft.UI.Xaml.Media.CompositeTransform;
+            if (quotaTransform is null || activityTransform is null)
+                return;
+
+            swapVisualStoryboard?.Stop();
+            quotaTransform.TranslateX = quotaOldX - quotaNewX;
+            activityTransform.TranslateX = activityOldX - activityNewX;
+
+            var storyboard = new Anim.Storyboard();
+            var quotaSlide = new Anim.DoubleAnimation
+            {
+                To = 0,
+                Duration = TimeSpan.FromMilliseconds(180),
+                EasingFunction = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut },
+                EnableDependentAnimation = true,
+            };
+            Anim.Storyboard.SetTarget(quotaSlide, quotaTransform);
+            Anim.Storyboard.SetTargetProperty(quotaSlide, "TranslateX");
+
+            var activitySlide = new Anim.DoubleAnimation
+            {
+                To = 0,
+                Duration = TimeSpan.FromMilliseconds(180),
+                EasingFunction = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut },
+                EnableDependentAnimation = true,
+            };
+            Anim.Storyboard.SetTarget(activitySlide, activityTransform);
+            Anim.Storyboard.SetTargetProperty(activitySlide, "TranslateX");
+
+            storyboard.Children.Add(quotaSlide);
+            storyboard.Children.Add(activitySlide);
+            swapVisualStoryboard = storyboard;
+            storyboard.Begin();
         }
 
         /// <summary>
@@ -1349,7 +2147,7 @@ namespace TaskbarQuota.Taskbar
             text.Append("drag solve: cursor=").Append(cursorClientX)
                 .Append(" grab=").Append(draggingInnerOffsetX)
                 .Append(" desired=").Append(desiredX)
-                .Append(" width=").Append(WidgetHostWidth)
+                .Append(" width=").Append(DragWidth)
                 .Append(" bounds=[").Append(leftBound).Append(',').Append(rightBound).Append(')')
                 .Append(" zone=");
             if (zone is { } z)
@@ -1409,7 +2207,7 @@ namespace TaskbarQuota.Taskbar
             if (desiredX == targetX)
                 return;
 
-            draggingInnerOffsetX = Math.Clamp(cursorClientX - targetX, 0, WidgetHostWidth);
+            draggingInnerOffsetX = Math.Clamp(cursorClientX - targetX, 0, DragWidth);
         }
 
         /// <summary>
@@ -1423,6 +2221,7 @@ namespace TaskbarQuota.Taskbar
         {
             (int start, int end)? underCursor = null;
             (int start, int end)? sticky = null;
+            (int start, int end)? directionalHandoff = null;
             (int start, int end)? nearest = null;
             long nearestDistance = long.MaxValue;
 
@@ -1447,7 +2246,38 @@ namespace TaskbarQuota.Taskbar
                 }
             }
 
-            return underCursor ?? sticky ?? nearest;
+            // While the pointer crosses an occupied center, hand off at the midpoint between the current
+            // lane and the next lane in the direction of travel. This gives one predictable snap and then
+            // continuous tracking, instead of pinning the widget until the pointer reaches the far lane.
+            if (sticky is { } currentGap)
+            {
+                if (cursorX >= currentGap.end)
+                {
+                    var nextCandidates = gaps
+                        .Where(gap => gap.end - gap.start >= width && gap.start >= currentGap.end)
+                        .OrderBy(gap => gap.start);
+                    if (nextCandidates.Any())
+                    {
+                        var next = nextCandidates.First();
+                        if (cursorX > currentGap.end + (next.start - currentGap.end) / 2)
+                            directionalHandoff = next;
+                    }
+                }
+                else if (cursorX < currentGap.start)
+                {
+                    var previousCandidates = gaps
+                        .Where(gap => gap.end - gap.start >= width && gap.end <= currentGap.start)
+                        .OrderByDescending(gap => gap.end);
+                    if (previousCandidates.Any())
+                    {
+                        var previous = previousCandidates.First();
+                        if (cursorX < previous.end + (currentGap.start - previous.end) / 2)
+                            directionalHandoff = previous;
+                    }
+                }
+            }
+
+            return underCursor ?? directionalHandoff ?? sticky ?? nearest;
         }
 
         /// <summary>
@@ -1458,12 +2288,13 @@ namespace TaskbarQuota.Taskbar
         /// </summary>
         private async Task SnapToValidPositionAsync(int droppedX)
         {
-            if (appWindow is null)
+            if (DragAppWindow is null)
             {
                 EndUserRepositioning();
                 return;
             }
 
+            bool activityWasDragged = draggingActivity;
             isSettling = true;
             try
             {
@@ -1495,14 +2326,76 @@ namespace TaskbarQuota.Taskbar
                     IsRtlUI);
                 var gaps = ComputeFreeGaps(leftBound, rightBound, obstacles);
 
-                int settledX = PlaceInFittingGap(droppedX, gaps, WidgetHostWidth)
-                    ?? (currentOffsetX != int.MinValue ? currentOffsetX : ClampToSpan(droppedX, leftBound, rightBound, WidgetHostWidth));
+                int snapGap = (int)Math.Ceiling(ActivitySummaryMarginLogicalPx * dpiScale);
+                var independentObstacles = new List<RECT>(obstacles);
+                if (draggingActivity && currentOffsetX != int.MinValue)
+                {
+                    independentObstacles.Add(new RECT
+                    {
+                        left = currentOffsetX - snapGap,
+                        right = currentOffsetX + WidgetHostWidth + snapGap,
+                        top = 0,
+                        bottom = taskbarRect.bottom,
+                    });
+                }
+                else if (!draggingActivity && activityOffsetX != int.MinValue)
+                {
+                    independentObstacles.Add(new RECT
+                    {
+                        left = activityOffsetX - snapGap,
+                        right = activityOffsetX + ActivityHostWidth + snapGap,
+                        top = 0,
+                        bottom = taskbarRect.bottom,
+                    });
+                }
+                var independentGaps = ComputeFreeGaps(leftBound, rightBound, independentObstacles);
+                int settledX = PlaceInFittingGap(droppedX, independentGaps, DragWidth)
+                    ?? (DragCurrentOffsetX != int.MinValue
+                        ? DragCurrentOffsetX
+                        : ClampToSpan(droppedX, leftBound, rightBound, DragWidth));
+                bool activitySnappedToQuota = false;
+                if (activityWasDragged && currentOffsetX != int.MinValue
+                    && TaskbarWidgetPlacement.SnapNextToPartner(
+                        droppedX,
+                        DragWidth,
+                        currentOffsetX,
+                        WidgetHostWidth,
+                        snapGap,
+                        (int)Math.Ceiling(PartnerSnapLogicalPx * dpiScale),
+                        independentGaps) is { } partnerSnapX)
+                {
+                    settledX = partnerSnapX;
+                    activitySnappedToQuota = true;
+                    widgetOrder = settledX < currentOffsetX
+                        ? TaskbarWidgetOrder.ActivityFirst
+                        : TaskbarWidgetOrder.QuotaFirst;
+                }
 
-                appWindow.Move(new PointInt32(settledX, currentOffsetY));
-                currentOffsetX = settledX;
+                DragAppWindow!.Move(new PointInt32(settledX, currentOffsetY));
+                if (draggingActivity)
+                {
+                    activityOffsetX = settledX;
+                }
+                else
+                {
+                    currentOffsetX = settledX;
+                }
+                if (currentOffsetX != int.MinValue)
+                    SaveCustomPosition(currentOffsetX);
+                if (activitySnappedToQuota)
+                {
+                    ClearManualActivityPosition();
+                }
+                else if (activityOffsetX != int.MinValue
+                    && (activityWasDragged || hasManualActivityPosition))
+                {
+                    SaveActivityPosition(activityOffsetX);
+                }
                 dragPreviewX = null;
                 activeDragGap = null;
-                SaveCustomPosition(settledX);
+                pendingSwapDraggedX = null;
+                pendingSwapVisual = null;
+                SaveWidgetOrder();
             }
             catch (Exception ex)
             {
@@ -1511,9 +2404,31 @@ namespace TaskbarQuota.Taskbar
             finally
             {
                 isSettling = false;
+                draggingActivity = false;
                 if (!isDragging && !isPointerTracking && !isDirectDrag)
+                {
                     EndUserRepositioning();
+                    RenderDeferredActivitySnapshot();
+                    if (activityWasDragged)
+                        QueuePositionUpdate(TaskbarChangeReason.None);
+                }
             }
+        }
+
+        private void RenderDeferredActivitySnapshot()
+        {
+            if (disposedValue || activitySummary is null)
+                return;
+            if (pendingEmptyActivitySnapshot is { } pending)
+            {
+                pendingEmptyActivitySnapshot = null;
+                activityEmptySnapshotTimer.Stop();
+                activitySnapshot = pending;
+            }
+            activitySummary.Apply(activitySnapshot, activeTileProvider);
+            foreach (var tile in tiles)
+                tile?.SetAgentActivity(activitySnapshot);
+            RecomputeLayout(forceReposition: true);
         }
 
         /// <summary>
@@ -2011,6 +2926,71 @@ namespace TaskbarQuota.Taskbar
             }
         }
 
+        private void LoadWidgetOrder()
+        {
+            try
+            {
+                if (File.Exists(orderPath)
+                    && Enum.TryParse<TaskbarWidgetOrder>(File.ReadAllText(orderPath), true, out var order))
+                    widgetOrder = order;
+            }
+            catch (Exception ex) { Log.Warning(ex, "Could not read widget order"); }
+        }
+
+        private void SaveWidgetOrder()
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(orderPath)!);
+                File.WriteAllText(orderPath, widgetOrder.ToString());
+            }
+            catch (Exception ex) { Log.Warning(ex, "Could not save widget order"); }
+        }
+
+        private void LoadActivityPosition()
+        {
+            try
+            {
+                // Older builds wrote .activity while settling either widget, so that file by itself does
+                // not prove the user positioned Activity. Only coordinates accompanied by the explicit
+                // marker introduced with manual-position ownership are authoritative.
+                if (File.Exists(activityManualPositionPath)
+                    && File.Exists(activityPositionPath)
+                    && int.TryParse(File.ReadAllText(activityPositionPath), NumberStyles.Integer,
+                        CultureInfo.InvariantCulture, out var offset))
+                {
+                    activityOffsetX = offset;
+                    hasManualActivityPosition = true;
+                    int minimumWidth = (int)Math.Ceiling(AgentActivitySummary.MinimumLogicalWidth * dpiScale);
+                    ActivityHostWidth = minimumWidth;
+                    activitySummary?.SetLogicalWidth(AgentActivitySummary.MinimumLogicalWidth);
+                    activityAppWindow?.ResizeClient(new SizeInt32(minimumWidth, activityAppWindow.Size.Height));
+                }
+            }
+            catch (Exception ex) { Log.Warning(ex, "Could not read detached activity position"); }
+        }
+
+        private void SaveActivityPosition(int offset)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(activityPositionPath)!);
+                File.WriteAllText(activityPositionPath, offset.ToString(CultureInfo.InvariantCulture));
+                File.WriteAllText(activityManualPositionPath, "1");
+                hasManualActivityPosition = true;
+            }
+            catch (Exception ex) { Log.Warning(ex, "Could not save detached activity position"); }
+        }
+
+        private void ClearManualActivityPosition()
+        {
+            hasManualActivityPosition = false;
+            try { if (File.Exists(activityPositionPath)) File.Delete(activityPositionPath); }
+            catch (Exception ex) { Log.Warning(ex, "Could not clear detached activity position"); }
+            try { if (File.Exists(activityManualPositionPath)) File.Delete(activityManualPositionPath); }
+            catch (Exception ex) { Log.Warning(ex, "Could not clear manual activity position marker"); }
+        }
+
 
         private IntPtr CreateHostWindow(IntPtr parent)
         {
@@ -2044,8 +3024,11 @@ namespace TaskbarQuota.Taskbar
                     windowClassRegistered = true;
                 }
 
-                windowClassUsers++;
-                windowClassAcquired = true;
+                if (!windowClassAcquired)
+                {
+                    windowClassUsers++;
+                    windowClassAcquired = true;
+                }
             }
         }
 
@@ -2085,7 +3068,7 @@ namespace TaskbarQuota.Taskbar
 
         private bool EnumWindow(IntPtr hWnd, IntPtr lParam)
         {
-            if (hWnd != hwnd
+            if (hWnd != hwnd && hWnd != activityHwnd
                 && User32.IsWindowVisible(hWnd)
                 && User32.GetAncestor(hWnd, GetAncestorFlags.GA_PARENT) == hwndShell)
             {
@@ -2111,6 +3094,7 @@ namespace TaskbarQuota.Taskbar
                 return;
 
             disposedValue = true;
+            StopDragPolling();
             EndUserRepositioning();
             initialized = false;
             isVisible = false;
@@ -2208,12 +3192,32 @@ namespace TaskbarQuota.Taskbar
             {
                 Log.Warning(ex, "Failed to destroy the taskbar widget window");
             }
+            try { activityAppWindow?.Destroy(); }
+            catch (Exception ex) { Log.Warning(ex, "Failed to destroy the activity widget window"); }
             try { host?.Dispose(); }
             catch (Exception ex) { Log.Warning(ex, "Failed to dispose the taskbar XAML host"); }
+            try { activityHost?.Dispose(); }
+            catch (Exception ex) { Log.Warning(ex, "Failed to dispose the activity XAML host"); }
             appWindow = null;
+            activityAppWindow = null;
+            activityHwnd = IntPtr.Zero;
             host = null;
+            activityHost = null;
             hostContent = null;
+            activityHostContent = null;
             summaryPanel = null;
+            if (activitySummary is not null)
+            {
+                activitySummary.RemoveHandler(
+                    Microsoft.UI.Xaml.UIElement.PointerPressedEvent,
+                    new Microsoft.UI.Xaml.Input.PointerEventHandler(WidgetSummary_PointerPressed));
+                activitySummary.PointerMoved -= WidgetSummary_PointerMoved;
+                activitySummary.PointerReleased -= WidgetSummary_PointerReleased;
+                activitySummary.PointerCanceled -= WidgetSummary_PointerCanceled;
+                activitySummary.Clicked -= OnActivityClicked;
+            }
+            ActivityClicked = null;
+            activitySummary = null;
             pendingProviders = null;
             pendingActiveProvider = null;
             Array.Clear(tiles);

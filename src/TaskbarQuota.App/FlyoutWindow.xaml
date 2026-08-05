@@ -20,6 +20,58 @@
                VerticalAlignment="Stretch"
                VerticalContentAlignment="Stretch"/>
 
+        <Grid x:Name="ActivityPanel"
+              Grid.Row="0"
+              Padding="16,12,16,8"
+              Visibility="Collapsed">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+                <TextBlock Text="Agent activity"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           VerticalAlignment="Center"/>
+                <ToggleButton x:Name="ActivityMonitoringButton"
+                              Grid.Column="1"
+                              MinWidth="88"
+                              VerticalAlignment="Center"
+                              Click="ActivityMonitoringButton_Click"
+                              AutomationProperties.Name="Monitor local agent activity"
+                              AutomationProperties.AutomationId="FlyoutActivityMonitoringButton"
+                              ToolTipService.ToolTip="Monitor local agent activity">
+                    <TextBlock Text="Monitoring"/>
+                </ToggleButton>
+                <ToggleButton x:Name="ActivityWidgetButton"
+                              Grid.Column="2"
+                              MinWidth="76"
+                              VerticalAlignment="Center"
+                              Click="ActivityWidgetButton_Click"
+                              AutomationProperties.Name="Show agent activity in taskbar widget"
+                              AutomationProperties.AutomationId="FlyoutActivityWidgetButton"
+                              ToolTipService.ToolTip="Show agent activity in taskbar widget">
+                    <TextBlock Text="Activity Widget"/>
+                </ToggleButton>
+            </Grid>
+            <TextBlock x:Name="ActivityEmptyState"
+                       Grid.Row="2"
+                       Margin="0,24,0,0"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Top"
+                       Text="No recent agent activity"
+                       Style="{StaticResource BodyTextBlockStyle}"/>
+            <ScrollViewer x:Name="ActivityScrollViewer"
+                          Grid.Row="2"
+                          Margin="0,12,0,0"
+                          AutomationProperties.Name="Agent activity list"
+                          AutomationProperties.AutomationId="FlyoutActivityList"
+                          AutomationProperties.LiveSetting="Polite"
+                          VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="ActivityList" Spacing="8"/>
+            </ScrollViewer>
+        </Grid>
+
         <controls:UpdateActionBar x:Name="UpdateBar"
                                   Grid.Row="1"
                                   Margin="12,0,12,8"/>
@@ -39,6 +91,28 @@
                 <StackPanel x:Name="ProviderStrip"
                             MinHeight="48"
                             Orientation="Horizontal"/>
+            </Border>
+
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8">
+                <Button x:Name="ActivityButton"
+                        Width="48"
+                        Height="48"
+                        MinWidth="0"
+                        MinHeight="0"
+                        Padding="0"
+                        BorderThickness="0"
+                        Background="Transparent"
+                        AutomationProperties.Name="Agent activity"
+                        AutomationProperties.AutomationId="FlyoutActivityButton"
+                        Click="ActivityButton_Click"
+                        ToolTipService.ToolTip="Agent activity">
+                    <FontIcon Glyph="&#xE7F4;"
+                              FontSize="16"
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                </Button>
             </Border>
 
             <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"

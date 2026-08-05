@@ -167,6 +167,24 @@ public class TaskBarWidgetGapTests
     }
 
     [Fact]
+    public void SelectDragGap_CursorPassesLaneMidpoint_HandsOverWithoutWaitingForFarLane()
+    {
+        var gap = TaskBarWidget.SelectDragGap(CentredLayout, cursorX: 501, desiredX: 451, width: 172,
+            current: (0, 400));
+
+        Assert.Equal((600, 1000), gap);
+    }
+
+    [Fact]
+    public void SelectDragGap_CursorMovesBackPastLaneMidpoint_ReturnsToPreviousLane()
+    {
+        var gap = TaskBarWidget.SelectDragGap(CentredLayout, cursorX: 499, desiredX: 549, width: 172,
+            current: (600, 1000));
+
+        Assert.Equal((0, 400), gap);
+    }
+
+    [Fact]
     public void SelectDragGap_StickyZoneSurvivesObstacleRectsShiftingByAPixel()
     {
         var relaidOut = new List<(int start, int end)> { (0, 398), (602, 1000) };

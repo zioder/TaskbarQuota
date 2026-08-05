@@ -60,6 +60,11 @@ public static class WidgetSettingsService
     private static readonly string HideWhenUnfocusedPath =
         Path.Combine(AppStorage.AppDataDirectory, "hide-when-unfocused.txt");
 
+    private static readonly string ShowAgentActivityInWidgetPath =
+        Path.Combine(AppStorage.AppDataDirectory, "show-agent-activity-in-widget.txt");
+    private static readonly string EnableAgentActivityMonitoringPath =
+        Path.Combine(AppStorage.AppDataDirectory, "enable-agent-activity-monitoring.txt");
+
     private static readonly Dictionary<string, bool> RowVisibility = LoadRowVisibility();
     private static readonly Dictionary<string, bool> ProviderVisibility = LoadProviderVisibility();
     private static readonly Dictionary<string, bool> DashboardProviderVisibility = LoadDashboardProviderVisibility();
@@ -75,6 +80,10 @@ public static class WidgetSettingsService
     /// are never affected — a pin is an explicit "always show this" request.
     /// </summary>
     public static bool HideWhenProviderUnfocused { get; private set; } = LoadHideWhenUnfocused();
+    /// <summary>Whether the separate Agent Activity island is shown on the taskbar. Enabled by default.</summary>
+    public static bool ShowAgentActivityInWidget { get; private set; } = LoadShowAgentActivityInWidget();
+    /// <summary>Whether local agent processes and transcript stores are inspected for activity visualization.</summary>
+    public static bool EnableAgentActivityMonitoring { get; private set; } = LoadEnableAgentActivityMonitoring();
     public static event EventHandler? Changed;
     public static event EventHandler? DashboardCompositionChanged;
     public static event EventHandler? PercentageModeChanged;
@@ -244,6 +253,29 @@ public static class WidgetSettingsService
 
         HideWhenProviderUnfocused = enabled;
         Save(HideWhenUnfocusedPath, enabled ? 1 : 0);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ApplyShowAgentActivityInWidget(bool enabled)
+    {
+        if (ShowAgentActivityInWidget == enabled)
+            return;
+
+        ShowAgentActivityInWidget = enabled;
+        Save(ShowAgentActivityInWidgetPath, enabled ? 1 : 0);
+        // Activity shares the taskbar area with quota tiles. Rebalance pins immediately so enabling it
+        // leaves room for the active quota tile plus one pinned tile (the normal cap is three quota tiles).
+        Services.PinBudgetService.EnforceBudget(notify: false);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ApplyEnableAgentActivityMonitoring(bool enabled)
+    {
+        if (EnableAgentActivityMonitoring == enabled)
+            return;
+
+        EnableAgentActivityMonitoring = enabled;
+        Save(EnableAgentActivityMonitoringPath, enabled ? 1 : 0);
         Changed?.Invoke(null, EventArgs.Empty);
     }
 
@@ -638,6 +670,40 @@ public static class WidgetSettingsService
         catch
         {
             return false;
+        }
+    }
+
+    private static bool LoadShowAgentActivityInWidget()
+    {
+        try
+        {
+            if (!File.Exists(ShowAgentActivityInWidgetPath))
+                return true;
+
+            string raw = File.ReadAllText(ShowAgentActivityInWidgetPath);
+            return !int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value)
+                || value != 0;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    private static bool LoadEnableAgentActivityMonitoring()
+    {
+        try
+        {
+            if (!File.Exists(EnableAgentActivityMonitoringPath))
+                return true;
+
+            string raw = File.ReadAllText(EnableAgentActivityMonitoringPath);
+            return !int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value)
+                || value != 0;
+        }
+        catch
+        {
+            return true;
         }
     }
 

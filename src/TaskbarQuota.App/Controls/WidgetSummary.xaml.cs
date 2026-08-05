@@ -11,6 +11,7 @@ using Microsoft.UI.Xaml.Shapes;
 using Windows.Foundation;
 using Windows.UI;
 using TaskbarQuota.ActiveApp;
+using TaskbarQuota.AgentActivity;
 using TaskbarQuota.Services;
 using TaskbarQuota.Usage;
 using TaskbarQuota.Usage.Providers;
@@ -73,6 +74,8 @@ namespace TaskbarQuota.Controls
         private bool _forcePercentagesOnly;
         private UsageResult? _lastResult;
         private ProviderId? _lastAppliedProvider;
+        private AgentActivityStatus? _agentStatus;
+        private AgentActivitySnapshot _lastActivitySnapshot = new(Array.Empty<AgentActivityItem>());
         private string? _lastRenderSignature;
         private bool _hasRevealed;
         private bool _isActiveToolVisible = true;
@@ -156,7 +159,7 @@ namespace TaskbarQuota.Controls
                 row.Track.Background = track;
                 row.Value.Foreground = Foreground;
             }
-            BadgeGlyph.Fill = Foreground;
+            UpdateBadgeFill();
         }
 
         public void Apply(UsageResult result, bool force = false)
@@ -174,6 +177,7 @@ namespace TaskbarQuota.Controls
             var isFirstReveal = !_hasRevealed;
             var providerChanged = _lastAppliedProvider != result.Id;
             _lastAppliedProvider = result.Id;
+            UpdateActivityStatus();
             _lastRenderSignature = signature;
             _lastResult = result;
             ApplyTaskbarForeground();
@@ -187,7 +191,7 @@ namespace TaskbarQuota.Controls
             var glyph = TaskbarQuota.ViewModels.Ui.Glyph(result.Id);
             if (glyph != null)
             {
-                SetNormalizedGlyph(BadgeGlyph, glyph, Foreground);
+                SetNormalizedGlyph(BadgeGlyph, glyph, BadgeGlyph.Fill as Brush ?? Foreground);
                 BadgeGlyphBox.Visibility = Visibility.Visible;
                 BadgeText.Visibility = Visibility.Collapsed;
             }
@@ -296,6 +300,47 @@ namespace TaskbarQuota.Controls
                     ? $"{WidgetTooltipTitle(widgetName, result.Source)}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}"
                     : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}");
         }
+
+        /// <summary>Colors this provider glyph from its own independently-discovered agent tasks.</summary>
+        public void SetAgentActivity(AgentActivitySnapshot snapshot)
+        {
+            _lastActivitySnapshot = snapshot;
+            UpdateActivityStatus();
+        }
+
+        private void UpdateActivityStatus()
+        {
+            var activity = _lastAppliedProvider is { } provider
+                ? _lastActivitySnapshot.TrackedItems
+                    .Where(item => AreActivityProvidersEquivalent(item.Provider, provider))
+                    .OrderByDescending(item => item.IsLive)
+                    .ThenByDescending(item => ActivityStatusPriority(item.Status))
+                    .ThenByDescending(item => item.UpdatedAt)
+                    .FirstOrDefault()
+                : null;
+            _agentStatus = activity?.Status;
+            UpdateBadgeFill();
+        }
+
+        private static bool AreActivityProvidersEquivalent(ProviderId left, ProviderId right)
+            => left == right
+                || left is ProviderId.Cline or ProviderId.ClinePass
+                    && right is ProviderId.Cline or ProviderId.ClinePass
+                || left is ProviderId.OpenCode or ProviderId.OpenCodeGo
+                    && right is ProviderId.OpenCode or ProviderId.OpenCodeGo;
+
+        private static int ActivityStatusPriority(AgentActivityStatus status) => status switch
+        {
+            AgentActivityStatus.Working => 5,
+            AgentActivityStatus.Waiting => 4,
+            AgentActivityStatus.Idle => 3,
+            AgentActivityStatus.Failed => 2,
+            AgentActivityStatus.Completed => 1,
+            _ => 0,
+        };
+
+        private void UpdateBadgeFill()
+            => BadgeGlyph.Fill = AgentActivityVisuals.StatusBrush(_agentStatus, Foreground);
 
         /// <summary>
         /// Badge the provider glyph with its active source (browser, host app, terminal, desktop app).
@@ -933,13 +978,11 @@ namespace TaskbarQuota.Controls
 
         private void AnimateSoftRefresh()
         {
-            // Start below the resting value so the refresh still reads as a pulse, but never brighten
-            // past it — a stale snapshot must stay dimmed once the animation settles.
-            double targetOpacity = RestingPanelOpacity;
-            double startOpacity = Math.Min(0.72, targetOpacity);
-            Panel.Opacity = startOpacity;
-
-            AnimatePanelOpacity(startOpacity, targetOpacity, 180);
+            // A refresh replaces the row elements in-place. Dimming the entire panel here made every
+            // quota poll flash, especially when providers publish a stale snapshot followed by a live
+            // result a moment later. Keep the resting opacity stable; first reveal and provider switches
+            // still use their dedicated transitions.
+            Panel.Opacity = RestingPanelOpacity;
         }
 
         /// <summary>

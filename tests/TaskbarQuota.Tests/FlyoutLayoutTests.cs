@@ -25,7 +25,7 @@ public class FlyoutLayoutTests
     public void ComputeLogicalWidth_GrowsWithInstalledProviders()
     {
         int width = FlyoutLayout.ComputeLogicalWidth(stripIconCount: 9, detailContentWidth: 300);
-        Assert.Equal(532, width);
+        Assert.Equal(582, width);
     }
 
     [Fact]

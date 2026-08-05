@@ -8,12 +8,14 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Shapes;
 
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Windows.Foundation;
 using Windows.Graphics;
 using TaskbarQuota.Controls;
+using TaskbarQuota.AgentActivity;
 using TaskbarQuota.Interop;
 using TaskbarQuota.Services;
 using TaskbarQuota.Usage;
@@ -32,6 +34,8 @@ namespace TaskbarQuota
         private bool _shown;
         private bool _prewarmed;
         private bool _dashboardLoaded;
+        private string? _selectedActivityId;
+        private bool _showingActivity;
         private bool _sizeHooksRegistered;
         private bool _applyingBounds;
         private DispatcherQueueTimer? _boundsUpdateTimer;
@@ -47,6 +51,7 @@ namespace TaskbarQuota
         public FlyoutWindow()
         {
             InitializeComponent();
+            UpdateActivityControls();
             _dashboardViewModel = DashboardPage.SharedViewModel ?? new DashboardViewModel(DispatcherQueue);
             DashboardPage.SharedViewModel = _dashboardViewModel;
             _dashboardViewModel.Cards.CollectionChanged += DashboardCards_CollectionChanged;
@@ -55,6 +60,7 @@ namespace TaskbarQuota
             _dashboardViewModel.DetailContentHeightChanged += DashboardDetailContentHeightChanged;
             ProviderStrip.Loaded += (_, _) => RebuildProviderStrip();
             WidgetSettingsService.Changed += OnWidgetSettingsChanged;
+            AgentActivityService.Instance.Changed += OnActivityChanged;
 
             SystemBackdrop = new DesktopAcrylicBackdrop();
             ThemeService.Register(Root);
@@ -69,7 +75,12 @@ namespace TaskbarQuota
 
             var presenter = OverlappedPresenter.CreateForContextMenu();
             presenter.IsAlwaysOnTop = true;
-            GetAppWindow().SetPresenter(presenter);
+            var appWindow = GetAppWindow();
+            // The flyout is transient taskbar UI, not an application window. Keep it out of the
+            // taskbar/Alt+Tab representation; the main window opts in only when Settings or the app
+            // itself is explicitly opened.
+            appWindow.IsShownInSwitchers = false;
+            appWindow.SetPresenter(presenter);
 
             Activated += OnActivated;
             Closed += OnClosed;
@@ -86,16 +97,21 @@ namespace TaskbarQuota
             Closed -= OnClosed;
             Activated -= OnActivated;
             WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
+            AgentActivityService.Instance.Changed -= OnActivityChanged;
             _dashboardViewModel.Cards.CollectionChanged -= DashboardCards_CollectionChanged;
             _dashboardViewModel.SelectedCardChanged -= DashboardSelectedCardChanged;
             _dashboardViewModel.DetailContentWidthChanged -= DashboardDetailContentWidthChanged;
             _dashboardViewModel.DetailContentHeightChanged -= DashboardDetailContentHeightChanged;
-            _boundsUpdateTimer.Stop();
+            _boundsUpdateTimer?.Stop();
             _providerStripItems.Clear();
         }
 
         private void OnWidgetSettingsChanged(object? sender, EventArgs e)
-            => DispatcherQueue.TryEnqueue(SyncProviderStripPins);
+            => DispatcherQueue.TryEnqueue(() =>
+            {
+                SyncProviderStripPins();
+                UpdateActivityControls();
+            });
 
         private void OnActivated(object sender, WindowActivatedEventArgs args)
         {
@@ -109,8 +125,24 @@ namespace TaskbarQuota
 
         public void ToggleAbove(IntPtr widgetHandle)
         {
-            if (_shown) { Hide(); return; }
+            if (_shown && !_showingActivity)
+            {
+                Hide();
+                return;
+            }
+
             ShowAbove(widgetHandle);
+        }
+
+        public void ToggleActivityAbove(IntPtr widgetHandle, string? selectedActivityId = null)
+        {
+            if (_shown && _showingActivity && _selectedActivityId == selectedActivityId)
+            {
+                Hide();
+                return;
+            }
+
+            ShowActivityAbove(widgetHandle, selectedActivityId);
         }
 
         /// <summary>
@@ -143,9 +175,21 @@ namespace TaskbarQuota
         }
 
         public void ShowAbove(IntPtr widgetHandle)
+            => ShowSurfaceAbove(widgetHandle, showActivity: false, selectedActivityId: null);
+
+        public void ShowActivityAbove(IntPtr widgetHandle, string? selectedActivityId = null)
+            => ShowSurfaceAbove(widgetHandle, showActivity: true, selectedActivityId);
+
+        private void ShowSurfaceAbove(IntPtr widgetHandle, bool showActivity, string? selectedActivityId)
         {
             _widgetHandle = widgetHandle;
+            _selectedActivityId = showActivity ? selectedActivityId : null;
             EnsureDashboardLoaded();
+            if (showActivity)
+                ShowActivityPanel();
+            else
+                ShowProviderDashboard();
+            RenderActivity(AgentActivityService.Instance.Snapshot);
 
             // Sync the strip selection to the provider the taskbar widget is currently showing,
             // so opening the tray highlights/details that provider rather than a stale selection.
@@ -155,10 +199,238 @@ namespace TaskbarQuota
             _shown = true;
             ApplyFlyoutBounds();
             GetAppWindow().Show();
-            Activate();
+            ActivateFlyout();
             ScheduleFlyoutBoundsUpdate();
 
             _ = UpdateAvailabilityService.Instance.CheckSilentlyAsync();
+        }
+
+        private void ActivateFlyout()
+        {
+            Activate();
+
+            // Activity can be opened directly from the injected taskbar island. In that path WinUI's
+            // Activate() is not always enough to transfer foreground ownership from Explorer, leaving
+            // DesktopAcrylic in its inactive/transparent state until the user clicks the flyout again.
+            // Quota normally gets this transfer as a side effect of its provider interaction, so make it
+            // explicit for the shared path instead.
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            if (hwnd == IntPtr.Zero)
+                return;
+
+            var foreground = User32.GetForegroundWindow();
+            var foregroundThread = foreground == IntPtr.Zero
+                ? 0u
+                : User32.GetWindowThreadProcessId(foreground, out _);
+            var currentThread = User32.GetCurrentThreadId();
+            bool attached = foregroundThread != 0
+                && foregroundThread != currentThread
+                && User32.AttachThreadInput(foregroundThread, currentThread, true);
+            try
+            {
+                if (User32.GetForegroundWindow() != hwnd)
+                    User32.SetForegroundWindow(hwnd);
+                User32.SetActiveWindow(hwnd);
+                User32.SetFocus(hwnd);
+            }
+            finally
+            {
+                if (attached)
+                    User32.AttachThreadInput(foregroundThread, currentThread, false);
+            }
+        }
+
+        private void ShowProviderDashboard()
+        {
+            if (_showingActivity)
+                AgentActivityService.Instance.AcknowledgeAll();
+            _showingActivity = false;
+            ActivityPanel.Visibility = Visibility.Collapsed;
+            ContentFrame.Visibility = Visibility.Visible;
+        }
+
+        private void ShowActivityPanel()
+        {
+            _showingActivity = true;
+            ActivityPanel.Visibility = Visibility.Visible;
+            ContentFrame.Visibility = Visibility.Collapsed;
+            UpdateActivityControls();
+        }
+
+        private void UpdateActivityControls()
+        {
+            bool widgetEnabled = WidgetSettingsService.ShowAgentActivityInWidget;
+            bool monitoringEnabled = WidgetSettingsService.EnableAgentActivityMonitoring;
+            ActivityWidgetButton.IsChecked = widgetEnabled;
+            ActivityWidgetButton.IsEnabled = monitoringEnabled;
+            ActivityMonitoringButton.IsChecked = monitoringEnabled;
+            ToolTipService.SetToolTip(ActivityWidgetButton,
+                widgetEnabled ? "Hide agent activity from taskbar widget" : "Show agent activity in taskbar widget");
+            AutomationProperties.SetName(ActivityWidgetButton,
+                widgetEnabled ? "Hide agent activity from taskbar widget" : "Show agent activity in taskbar widget");
+            ToolTipService.SetToolTip(ActivityMonitoringButton,
+                monitoringEnabled ? "Stop monitoring local agent activity" : "Start monitoring local agent activity");
+            AutomationProperties.SetName(ActivityMonitoringButton,
+                monitoringEnabled ? "Stop monitoring local agent activity" : "Start monitoring local agent activity");
+        }
+
+        private void OnActivityChanged(AgentActivitySnapshot snapshot)
+            => DispatcherQueue.TryEnqueue(() => RenderActivity(snapshot));
+
+        private void RenderActivity(AgentActivitySnapshot snapshot)
+        {
+            ActivityList.Children.Clear();
+            var items = snapshot.ItemsForDisplay(_selectedActivityId);
+            bool monitoringEnabled = WidgetSettingsService.EnableAgentActivityMonitoring;
+            ActivityEmptyState.Text = monitoringEnabled ? "No recent agent activity" : "Agent activity monitoring is off";
+            ActivityEmptyState.Visibility = items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            ActivityScrollViewer.Visibility = items.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            FrameworkElement? selectedCard = null;
+
+            foreach (var item in items)
+            {
+                var statusBrush = AgentActivityVisuals.StatusBrush(
+                    item.Status,
+                    (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"]);
+                var card = new Border
+                {
+                    Padding = new Thickness(12, 8, 12, 8),
+                    CornerRadius = new CornerRadius(8),
+                    Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
+                    BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
+                    BorderThickness = new Thickness(1),
+                };
+                var accessibleName = $"{ActivityTitle(item)}, {ActivityProviderLabel(item)}, {item.StatusText}. {item.Step}";
+                AutomationProperties.SetName(card, accessibleName);
+                AutomationProperties.SetAutomationId(card, $"AgentActivityCard_{ActivityList.Children.Count}");
+                if (item.Id == _selectedActivityId)
+                {
+                    card.BorderBrush = (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"];
+                    card.BorderThickness = new Thickness(2);
+                    selectedCard = card;
+                    AutomationProperties.SetName(ActivityScrollViewer, $"Selected agent activity. {accessibleName}");
+                }
+                var row = new Grid { ColumnSpacing = 10 };
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(32) });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                row.Children.Add(CreateActivityProviderVisual(item));
+                var text = new StackPanel { Spacing = 2 };
+                text.Children.Add(new TextBlock { Text = ActivityTitle(item), Style = (Style)Application.Current.Resources["BodyStrongTextBlockStyle"] });
+                var metadata = string.IsNullOrWhiteSpace(item.Model)
+                    ? $"{ActivityProviderLabel(item)} · {item.StatusText}"
+                    : $"{ActivityProviderLabel(item)} · {item.Model} · {item.StatusText}";
+                var mutedTextBrush = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
+                text.Children.Add(new TextBlock { Text = metadata, Foreground = mutedTextBrush, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
+                text.Children.Add(new TextBlock { Text = item.Step, Foreground = mutedTextBrush, TextTrimming = TextTrimming.CharacterEllipsis, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
+                if (item.SubagentCount > 0)
+                    text.Children.Add(new TextBlock { Text = $"▸ {item.SubagentCount} subagents", Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
+                Grid.SetColumn(text, 1);
+                row.Children.Add(text);
+                card.Child = row;
+                ActivityList.Children.Add(card);
+            }
+
+            if (_showingActivity && selectedCard is not null)
+            {
+                DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+                {
+                    selectedCard.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = true });
+                    ActivityScrollViewer.Focus(FocusState.Programmatic);
+                });
+            }
+        }
+
+        private static string ActivityProviderDisplayName(ProviderId provider) => provider switch
+        {
+            ProviderId.ClinePass => "Cline Pass",
+            ProviderId.OpenCodeGo => "OpenCode Go",
+            ProviderId.Copilot => "GitHub Copilot",
+            _ => provider.ToString(),
+        };
+
+        private static string ActivityProviderLabel(AgentActivityItem item)
+        {
+            var provider = ActivityProviderDisplayName(item.Provider);
+            return string.IsNullOrWhiteSpace(item.Host) ? provider : $"{provider} through {item.Host}";
+        }
+
+        private static string ActivityTitle(AgentActivityItem item)
+            => !string.IsNullOrWhiteSpace(item.Host)
+                && string.Equals(item.Title, ActivityProviderDisplayName(item.Provider), StringComparison.OrdinalIgnoreCase)
+                ? ActivityProviderLabel(item)
+                : item.Title;
+
+        private static FrameworkElement CreateActivityProviderVisual(AgentActivityItem item)
+        {
+            var visual = new Grid { Width = 30, Height = 24 };
+            var foreground = AgentActivityVisuals.StatusBrush(
+                item.Status,
+                (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"]);
+            var avatar = new ProviderAvatar
+            {
+                Width = 22,
+                Height = 22,
+                ProviderId = item.Provider,
+                Initial = ActivityProviderDisplayName(item.Provider) is { Length: > 0 } name ? name[0].ToString() : "?",
+                ForegroundBrush = foreground,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            visual.Children.Add(avatar);
+
+            var dot = new Border
+            {
+                Width = 6,
+                Height = 6,
+                CornerRadius = new CornerRadius(3),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Bottom,
+                Background = foreground,
+            };
+            visual.Children.Add(dot);
+
+            if (string.Equals(item.Host, "T3 Code", StringComparison.OrdinalIgnoreCase)
+                && Ui.ParseFreshGeometry(ProviderGlyphs.T3Code) is { } t3Glyph)
+            {
+                var hostMark = new Path
+                {
+                    Width = 11,
+                    Height = 11,
+                    Data = t3Glyph,
+                    Stretch = Stretch.Uniform,
+                    Fill = new SolidColorBrush(Colors.White),
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    VerticalAlignment = VerticalAlignment.Bottom,
+                };
+                visual.Children.Add(hostMark);
+            }
+
+            ToolTipService.SetToolTip(visual, ActivityProviderLabel(item));
+            Grid.SetColumn(visual, 0);
+            return visual;
+        }
+
+        private void ActivityButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_showingActivity)
+                ShowProviderDashboard();
+            else
+                ShowActivityPanel();
+        }
+
+        private void ActivityWidgetButton_Click(object sender, RoutedEventArgs e)
+        {
+            WidgetSettingsService.ApplyShowAgentActivityInWidget(
+                !WidgetSettingsService.ShowAgentActivityInWidget);
+            UpdateActivityControls();
+        }
+
+        private void ActivityMonitoringButton_Click(object sender, RoutedEventArgs e)
+        {
+            WidgetSettingsService.ApplyEnableAgentActivityMonitoring(
+                !WidgetSettingsService.EnableAgentActivityMonitoring);
+            UpdateActivityControls();
+            RenderActivity(AgentActivityService.Instance.Snapshot);
         }
 
         private void RegisterWindowSizeHooks()
@@ -289,6 +561,8 @@ namespace TaskbarQuota
             _shown = false;
             _lastAppliedBounds = null;
             GetAppWindow().Hide();
+            if (_showingActivity)
+                AgentActivityService.Instance.AcknowledgeAll();
         }
 
         private void DashboardCards_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -433,7 +707,10 @@ namespace TaskbarQuota
         private void ProviderStripButton_Click(object sender, RoutedEventArgs e)
         {
             if (sender is Button { Tag: ProviderId providerId })
+            {
+                ShowProviderDashboard();
                 _dashboardViewModel.SelectProvider(providerId);
+            }
         }
 
         private void SettingsButton_Click(object sender, RoutedEventArgs e)

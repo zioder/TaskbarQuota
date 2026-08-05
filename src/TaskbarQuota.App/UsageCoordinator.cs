@@ -48,6 +48,12 @@ namespace TaskbarQuota
         private const int SynaraStableMaxAttempts = 4;
         private static readonly TimeSpan SynaraStableDelay = TimeSpan.FromMilliseconds(8);
         private ProviderId? _lastActive;
+        // A foreground process can briefly report a sibling provider while a GUI window is being raised.
+        // Do not publish a one-sample provider switch: that makes the taskbar animate a foreign quota tile
+        // in and back out even though the user never left the current app.
+        private ProviderId? _pendingDetectedProvider;
+        private int _pendingDetectedProviderSamples;
+        private const int RequiredProviderSwitchSamples = 2;
         private ProviderId? _lastLogged;
         private ProviderId? _synaraHoldProvider;
         private DateTime _synaraHoldUntilUtc = DateTime.MinValue;
@@ -117,11 +123,14 @@ namespace TaskbarQuota
         }
 
         /// <summary>
-        /// Hard cap on taskbar tiles. Three is the most that fits beside the tray on a normal bar even in
-        /// the narrow display modes; <see cref="Taskbar.TaskBarWidget"/> trims further when the measured
-        /// widths don't fit the free gap it actually has.
+        /// Maximum number of quota tile slots allocated by the widget. The effective display cap is lower
+        /// while the activity widget is enabled because the activity island occupies the same taskbar area.
         /// </summary>
         public const int MaxWidgetTiles = 3;
+
+        /// <summary>Effective quota-tile cap: active + two pinned tiles normally, active + one pinned with activity.</summary>
+        public static int MaxDisplayedWidgetTiles =>
+            WidgetSettingsService.ShowAgentActivityInWidget ? 2 : MaxWidgetTiles;
 
         /// <summary>
         /// Every provider the taskbar widget should render as its own tile, left to right: the ACTIVE
@@ -140,7 +149,8 @@ namespace TaskbarQuota
                 Enum.GetValues<ProviderId>(),
                 WidgetSettingsService.IsProviderPinned,
                 WidgetSettingsService.IsProviderVisible,
-                IsProviderAvailable);
+                IsProviderAvailable,
+                WidgetSettingsService.ShowAgentActivityInWidget);
 
         /// <summary>Pure, testable core of <see cref="WidgetDisplayProviders"/>.</summary>
         internal static IReadOnlyList<ProviderId> ComputeWidgetDisplayProviders(
@@ -150,7 +160,8 @@ namespace TaskbarQuota
             IReadOnlyList<ProviderId> ordered,
             Func<ProviderId, bool> isPinned,
             Func<ProviderId, bool> isVisible,
-            Func<ProviderId, bool> isAvailable)
+            Func<ProviderId, bool> isAvailable,
+            bool activityWidgetEnabled = false)
         {
             var result = new List<ProviderId>();
 
@@ -169,8 +180,9 @@ namespace TaskbarQuota
                 .ToList();
             result.AddRange(pinned);
 
-            if (result.Count > MaxWidgetTiles)
-                result.RemoveRange(MaxWidgetTiles, result.Count - MaxWidgetTiles);
+            int maxTiles = activityWidgetEnabled ? 2 : MaxWidgetTiles;
+            if (result.Count > maxTiles)
+                result.RemoveRange(maxTiles, result.Count - maxTiles);
             return result;
         }
 
@@ -493,6 +505,8 @@ namespace TaskbarQuota
                 HoldSynaraProvider(provider);
                 var previous = _lastActive;
                 var providerChanged = previous != provider;
+                if (providerChanged)
+                    ClearPendingDetectedProvider();
                 var hostChanged = !SameSynaraSelection(previousHost, host);
                 _lastActive = provider;
                 if (providerChanged)
@@ -660,6 +674,8 @@ namespace TaskbarQuota
                 }
 
                 var previous = _lastActive;
+                if (previous != target)
+                    ClearPendingDetectedProvider();
                 _lastActive = target;
                 _activeProviderSource = foregroundSource;
                 PromoteRecentProvider(target);
@@ -800,6 +816,8 @@ namespace TaskbarQuota
                     return;
 
                 var previous = _lastActive;
+                if (previous != target)
+                    ClearPendingDetectedProvider();
                 _lastActive = target;
                 _activeProviderSource = _detector.ActiveSource;
                 PromoteRecentProvider(target);
@@ -1026,6 +1044,8 @@ namespace TaskbarQuota
                 // Foreground bookkeeping runs on every tick, including the ones that end in the no-tool
                 // early-out below, so the hide grace period keeps counting while nothing is detected.
                 UpdateProviderForeground(detected is not null);
+                if (detected is null)
+                    ClearPendingDetectedProvider();
 
                 var hasDetectedTool = detected != null || ShouldAssumeToolStillRunning() || ProbeToolPresence();
                 if (!hasDetectedTool)
@@ -1036,6 +1056,7 @@ namespace TaskbarQuota
                         _lastActive = null;
                         _lastLogged = null;
                         _activeProviderSource = ProviderSource.Unknown;
+                        ClearPendingDetectedProvider();
                         ActiveSynaraHost = null;
                         ClearSynaraHold(force: true);
                         ActiveToolPresenceChanged?.Invoke(false);
@@ -1044,7 +1065,11 @@ namespace TaskbarQuota
                 }
 
                 ProviderId? previousActive = _lastActive;
-                if (detected is ProviderId p)
+                if (detected is ProviderId matchingActive && previousActive == matchingActive)
+                    ClearPendingDetectedProvider();
+                if (detected is ProviderId p
+                    && (previousActive == p
+                        || AcceptDetectedProvider(p)))
                 {
                     _lastActive = p;
                     _activeProviderSource = detectedSource;
@@ -1142,6 +1167,45 @@ namespace TaskbarQuota
 
         private ProviderSource SourceFor(ProviderId provider)
             => _lastActive == provider ? _activeProviderSource : ProviderSource.Unknown;
+
+        private bool AcceptDetectedProvider(ProviderId provider)
+            => ShouldAcceptDetectedProvider(
+                ref _pendingDetectedProvider,
+                ref _pendingDetectedProviderSamples,
+                provider,
+                RequiredProviderSwitchSamples);
+
+        internal static bool ShouldAcceptDetectedProvider(
+            ref ProviderId? pendingProvider,
+            ref int pendingSamples,
+            ProviderId provider,
+            int requiredSamples)
+        {
+            if (pendingProvider != provider)
+            {
+                pendingProvider = provider;
+                pendingSamples = 1;
+                if (requiredSamples > 1)
+                    return false;
+                pendingProvider = null;
+                pendingSamples = 0;
+                return true;
+            }
+
+            pendingSamples++;
+            if (pendingSamples < requiredSamples)
+                return false;
+
+            pendingProvider = null;
+            pendingSamples = 0;
+            return true;
+        }
+
+        private void ClearPendingDetectedProvider()
+        {
+            _pendingDetectedProvider = null;
+            _pendingDetectedProviderSamples = 0;
+        }
 
         private static ProviderSource SynaraSource(HostApp host)
             => new(
