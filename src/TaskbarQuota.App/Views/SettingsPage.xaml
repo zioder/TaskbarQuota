@@ -30,6 +30,42 @@
                           Margin="0,0,0,4"/>
 
             <TextBlock Text="Appearance" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,8,0,2"/>
+
+            <!-- Surface mode first so taskbar vs floating is easy to find (not buried under Theme). -->
+            <tk:SettingsCard Header="Where to show usage"
+                             Description="Taskbar places the compact widget next to the tray. Floating window uses a semi-transparent always-on-top HUD with the same layout.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE8A7;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <ComboBox x:Name="WidgetSurfaceCombo"
+                          SelectionChanged="OnWidgetSurfaceChanged"
+                          MinWidth="200"
+                          AutomationProperties.Name="Where to show usage"
+                          AutomationProperties.AutomationId="WidgetSurfaceCombo">
+                    <ComboBoxItem Content="In the taskbar" Tag="Taskbar"/>
+                    <ComboBoxItem Content="Floating always-on-top window" Tag="Floating"/>
+                </ComboBox>
+            </tk:SettingsCard>
+
+            <tk:SettingsCard x:Name="FloatingOpacityCard"
+                             Header="Floating window opacity"
+                             Description="How solid the always-on-top usage window is (lower values show more of the desktop behind it).">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE790;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                    <!-- Slider range is applied in code — XAML Minimum/Maximum on RangeBase is unsafe. -->
+                    <Grid x:Name="FloatingOpacitySliderHost"
+                          Width="180"
+                          VerticalAlignment="Center"
+                          AutomationProperties.Name="Floating window opacity"/>
+                    <TextBlock x:Name="FloatingOpacityLabel"
+                               VerticalAlignment="Center"
+                               MinWidth="40"
+                               Style="{StaticResource BodyTextBlockStyle}"/>
+                </StackPanel>
+            </tk:SettingsCard>
+
             <tk:SettingsCard Header="Theme" Description="Choose how TaskbarQuota looks.">
                 <tk:SettingsCard.HeaderIcon>
                     <FontIcon Glyph="&#xE771;"/>
@@ -41,7 +77,7 @@
                 </ComboBox>
             </tk:SettingsCard>
 
-            <tk:SettingsCard Header="Taskbar widget" Description="Choose the compact usage layout shown beside the tray.">
+            <tk:SettingsCard Header="Widget layout" Description="Choose the compact usage layout (bars, percentages, or both).">
                 <tk:SettingsCard.HeaderIcon>
                     <FontIcon Glyph="&#xE71D;"/>
                 </tk:SettingsCard.HeaderIcon>

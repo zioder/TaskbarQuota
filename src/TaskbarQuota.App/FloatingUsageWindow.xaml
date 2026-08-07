@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="TaskbarQuota.FloatingUsageWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:TaskbarQuota.Controls">
+
+    <Grid x:Name="Root" Background="Transparent">
+        <!-- Fill opacity is user-adjustable; content sits above so text stays fully opaque. -->
+        <Border x:Name="ChromeFill"
+                CornerRadius="8"
+                Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                IsHitTestVisible="False"/>
+        <Border x:Name="Chrome"
+                CornerRadius="8"
+                BorderThickness="1"
+                Padding="6,4"
+                Background="Transparent"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+            <controls:QuotaWidgetContent x:Name="ContentHost"
+                                         VerticalAlignment="Center"
+                                         HorizontalAlignment="Left"/>
+        </Border>
+    </Grid>
+</Window>

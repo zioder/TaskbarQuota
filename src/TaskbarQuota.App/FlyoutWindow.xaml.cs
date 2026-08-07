@@ -38,12 +38,14 @@ namespace TaskbarQuota
         private bool _showingActivity;
         private bool _sizeHooksRegistered;
         private bool _applyingBounds;
+        private bool _suppressSurfaceControlEvents;
         private DispatcherQueueTimer? _boundsUpdateTimer;
         private RectInt32? _lastAppliedBounds;
         private double _lastObservedScale = -1;
         private readonly DashboardViewModel _dashboardViewModel;
         private readonly Dictionary<ProviderId, FlyoutProviderStripItem> _providerStripItems = new();
         private int _stripIconCount;
+        private Slider? _floatingOpacitySlider;
         private static readonly TimeSpan BoundsCoalesceDelay = TimeSpan.FromMilliseconds(80);
 
         public bool IsShown => _shown;
@@ -51,7 +53,9 @@ namespace TaskbarQuota
         public FlyoutWindow()
         {
             InitializeComponent();
+            BuildFloatingOpacitySlider();
             UpdateActivityControls();
+            UpdateSurfaceControls();
             _dashboardViewModel = DashboardPage.SharedViewModel ?? new DashboardViewModel(DispatcherQueue);
             DashboardPage.SharedViewModel = _dashboardViewModel;
             _dashboardViewModel.Cards.CollectionChanged += DashboardCards_CollectionChanged;
@@ -96,6 +100,7 @@ namespace TaskbarQuota
         {
             Closed -= OnClosed;
             Activated -= OnActivated;
+            ThemeService.Unregister(Root);
             WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
             AgentActivityService.Instance.Changed -= OnActivityChanged;
             _dashboardViewModel.Cards.CollectionChanged -= DashboardCards_CollectionChanged;
@@ -111,6 +116,7 @@ namespace TaskbarQuota
             {
                 SyncProviderStripPins();
                 UpdateActivityControls();
+                UpdateSurfaceControls();
             });
 
         private void OnActivated(object sender, WindowActivatedEventArgs args)
@@ -197,6 +203,7 @@ namespace TaskbarQuota
                 _dashboardViewModel.SelectProvider(active);
 
             _shown = true;
+            UpdateSurfaceControls();
             ApplyFlyoutBounds();
             GetAppWindow().Show();
             ActivateFlyout();
@@ -272,6 +279,95 @@ namespace TaskbarQuota
                 monitoringEnabled ? "Stop monitoring local agent activity" : "Start monitoring local agent activity");
             AutomationProperties.SetName(ActivityMonitoringButton,
                 monitoringEnabled ? "Stop monitoring local agent activity" : "Start monitoring local agent activity");
+        }
+
+        /// <summary>
+        /// Builds the opacity slider in code. WinUI RangeBase defaults Maximum=1; assigning Minimum=35
+        /// from XAML throws XamlParseException regardless of attribute order.
+        /// </summary>
+        private void BuildFloatingOpacitySlider()
+        {
+            if (_floatingOpacitySlider is not null)
+                return;
+
+            var slider = new Slider
+            {
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Center,
+                StepFrequency = 1,
+            };
+            // Order matters: raise Maximum first, then Minimum, then Value.
+            slider.Maximum = 100;
+            slider.Minimum = 35;
+            slider.Value = Math.Clamp(
+                Math.Round(WidgetSettingsService.FloatingOpacity * 100),
+                35,
+                100);
+            AutomationProperties.SetName(slider, "Floating window opacity");
+            AutomationProperties.SetAutomationId(slider, "FlyoutFloatingOpacitySlider");
+            ToolTipService.SetToolTip(slider, "Floating window opacity (lower shows more of the desktop)");
+            slider.ValueChanged += FloatingOpacitySlider_ValueChanged;
+
+            FloatingOpacitySliderHost.Children.Clear();
+            FloatingOpacitySliderHost.Children.Add(slider);
+            _floatingOpacitySlider = slider;
+        }
+
+        private void UpdateSurfaceControls()
+        {
+            _suppressSurfaceControlEvents = true;
+            try
+            {
+                bool floating = WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Floating;
+                FloatingSurfaceButton.IsChecked = floating;
+                FloatingSurfaceButtonLabel.Text = floating ? "Floating" : "Taskbar";
+                ToolTipService.SetToolTip(FloatingSurfaceButton,
+                    floating
+                        ? "Switch back to the taskbar widget"
+                        : "Show usage as a floating always-on-top window");
+                AutomationProperties.SetName(FloatingSurfaceButton,
+                    floating
+                        ? "Show usage in the taskbar"
+                        : "Show usage as floating window");
+
+                int percent = (int)Math.Round(WidgetSettingsService.FloatingOpacity * 100);
+                if (_floatingOpacitySlider is { } slider)
+                {
+                    slider.Value = percent;
+                    slider.IsEnabled = floating;
+                    ToolTipService.SetToolTip(slider,
+                        floating
+                            ? "Floating window opacity"
+                            : "Opacity applies when floating window mode is on");
+                }
+                FloatingOpacityLabel.Text = $"{percent}%";
+                FloatingOpacityLabel.Opacity = floating ? 0.9 : 0.45;
+            }
+            finally
+            {
+                _suppressSurfaceControlEvents = false;
+            }
+        }
+
+        private void FloatingSurfaceButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_suppressSurfaceControlEvents)
+                return;
+
+            bool wantFloating = FloatingSurfaceButton.IsChecked == true;
+            WidgetSettingsService.ApplySurface(
+                wantFloating ? WidgetSurfaceMode.Floating : WidgetSurfaceMode.Taskbar);
+            UpdateSurfaceControls();
+        }
+
+        private void FloatingOpacitySlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+        {
+            if (_suppressSurfaceControlEvents)
+                return;
+
+            int percent = (int)Math.Round(e.NewValue);
+            FloatingOpacityLabel.Text = $"{percent}%";
+            WidgetSettingsService.ApplyFloatingOpacity(percent / 100d);
         }
 
         private void OnActivityChanged(AgentActivitySnapshot snapshot)
