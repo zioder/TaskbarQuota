@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Windows.UI;
 using TaskbarQuota.AgentActivity;
 using TaskbarQuota.Usage;
 
@@ -135,7 +137,7 @@ public sealed partial class QuotaWidgetContent : UserControl
         return summary;
     }
 
-    private static TextBlock CreateSeparator() => new()
+    private TextBlock CreateSeparator() => new()
     {
         Text = "|",
         Width = TileSeparatorLogicalPx,
@@ -146,8 +148,17 @@ public sealed partial class QuotaWidgetContent : UserControl
         VerticalAlignment = VerticalAlignment.Center,
         Visibility = Visibility.Collapsed,
         IsHitTestVisible = false,
-        Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+        Foreground = SeparatorBrush(),
     };
+
+    /// <summary>
+    /// Separator color from the floating window chrome theme — not Application.Current resources,
+    /// which resolve against app/system theme and go light-on-light when the HUD is light.
+    /// </summary>
+    private Brush SeparatorBrush()
+        => new SolidColorBrush(ThemeService.IsLightChrome(this)
+            ? Color.FromArgb(255, 28, 28, 28)
+            : Colors.White);
 
     private void OnActivityClicked(AgentActivityItem? item) => ActivityClicked?.Invoke(item);
 
@@ -233,11 +244,12 @@ public sealed partial class QuotaWidgetContent : UserControl
             shownCount++;
         }
 
+        var separatorBrush = SeparatorBrush();
         for (int i = 0; i < _separators.Length; i++)
         {
             bool showSep = _tileProviders[i] is not null && _tileProviders[i + 1] is not null;
             _separators[i].Visibility = showSep ? Visibility.Visible : Visibility.Collapsed;
-            _separators[i].Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
+            _separators[i].Foreground = separatorBrush;
         }
 
         if (showActivity)

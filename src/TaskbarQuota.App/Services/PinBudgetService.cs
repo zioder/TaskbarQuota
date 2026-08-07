@@ -23,8 +23,10 @@ public static class PinBudgetService
     public static event Action<IReadOnlyList<ProviderId>>? ProvidersUnpinned;
 
     /// <summary>
-    /// Free width assumed when the usage UI is a floating window rather than a taskbar island. Wide enough
-    /// that pins are limited by <see cref="UsageCoordinator.MaxDisplayedWidgetTiles"/>, not by the tray gap.
+    /// Free width for the floating surface pin budget, in logical px of <em>tile content</em>
+    /// (not including the floating window's chrome padding). Wide enough that pins are limited by
+    /// <see cref="UsageCoordinator.MaxDisplayedWidgetTiles"/>, not by a tray gap.
+    /// Matches what <c>QuotaWidgetContent</c> sums when sizing tiles; host padding is applied outside this.
     /// </summary>
     public const int FloatingAvailableLogicalWidth = 1200;
 
@@ -121,10 +123,12 @@ public static class PinBudgetService
 
         var pinned = PinnedProviders();
         string name = ProviderName(provider);
+        bool floating = WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Floating;
+        string surfaceNoun = floating ? "floating widget" : "taskbar";
 
         if (pinned.Count >= UsageCoordinator.MaxDisplayedWidgetTiles)
         {
-            reason = $"The taskbar can show at most {UsageCoordinator.MaxDisplayedWidgetTiles} quota providers at once, and you already "
+            reason = $"The {surfaceNoun} can show at most {UsageCoordinator.MaxDisplayedWidgetTiles} quota providers at once, and you already "
                 + $"have {string.Join(", ", pinned.Select(ProviderName))} pinned. Unpin one of those to make room for {name}.";
             return false;
         }
@@ -140,7 +144,6 @@ public static class PinBudgetService
                 + $"row={RowWidth(candidate.Select(TileWidth).ToList())} "
                 + $"available={available}");
 
-            bool floating = WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Floating;
             reason = floating
                 ? $"There isn't room in the floating widget for {name} ({Describe(provider)}) next to "
                   + $"{string.Join(" and ", pinned.Select(p => $"{ProviderName(p)} ({Describe(p)})"))}. "

@@ -56,11 +56,31 @@ namespace TaskbarQuota.Controls
 
         public bool SuppressNextClick { get; set; }
 
+        private bool _useApplicationChromeColors;
+
         /// <summary>
         /// When true, tile colors follow the app theme (floating window chrome) instead of the system
         /// taskbar light/dark palette used by the injected taskbar island.
         /// </summary>
-        public bool UseApplicationChromeColors { get; set; }
+        public bool UseApplicationChromeColors
+        {
+            get => _useApplicationChromeColors;
+            set
+            {
+                if (_useApplicationChromeColors == value)
+                    return;
+                _useApplicationChromeColors = value;
+                // Re-color if the flag flips after construction (tiles already rendered).
+                if (_hasRevealed || _lastResult is not null || _renderedRows.Count > 0)
+                {
+                    ApplyTaskbarForeground();
+                    if (_lastResult is { } result)
+                        Apply(result, force: true);
+                    else
+                        RenderRows();
+                }
+            }
+        }
 
         /// <summary>
         /// Skips the cross-fade on the next render. Set when a tile is taking over another provider as part

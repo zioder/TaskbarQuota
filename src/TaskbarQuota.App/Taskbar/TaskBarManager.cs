@@ -146,10 +146,14 @@ namespace TaskbarQuota.Taskbar
             Widgets.Clear();
         }
 
-        private static void SyncFloatingState()
+        /// <summary>
+        /// Pushes providers, activity, and visibility into the floating window.
+        /// Returns false when the surface is unavailable or has nothing to show.
+        /// </summary>
+        private static bool SyncFloatingSurface()
         {
             if (_floatingWindow is not { IsAlive: true })
-                return;
+                return false;
 
             var coordinator = UsageCoordinator.Instance;
             var providers = coordinator.WidgetDisplayProviders;
@@ -162,11 +166,21 @@ namespace TaskbarQuota.Taskbar
             {
                 _floatingWindow.SetDisplayProviders(Array.Empty<ProviderId>(), coordinator.ActiveProvider);
                 _floatingWindow.SetVisible(false);
-                return;
+                return false;
             }
 
             _floatingWindow.SetDisplayProviders(providers, coordinator.ActiveProvider);
             _floatingWindow.SetVisible(true);
+            return true;
+        }
+
+        private static void SyncFloatingState()
+        {
+            if (!SyncFloatingSurface())
+                return;
+
+            var coordinator = UsageCoordinator.Instance;
+            var providers = coordinator.WidgetDisplayProviders;
 
             bool needsFetch = false;
             foreach (var provider in providers)
@@ -174,7 +188,7 @@ namespace TaskbarQuota.Taskbar
                 var toApply = HydrateResult(coordinator, provider);
                 if (toApply is { } result)
                 {
-                    _floatingWindow.ApplyResult(result, force: true);
+                    _floatingWindow!.ApplyResult(result, force: true);
                     LogWidgetApply(result.Id, "floating-sync");
                 }
 
@@ -632,24 +646,10 @@ namespace TaskbarQuota.Taskbar
 
             if (IsFloatingSurface)
             {
-                if (_floatingWindow is not { IsAlive: true })
+                if (!SyncFloatingSurface() || !isDisplayed)
                     return;
 
-                _floatingWindow.SetActivitySnapshot(activity);
-                if (providers.Count == 0
-                    && !(WidgetSettingsService.ShowAgentActivityInWidget && activity.Primary is not null))
-                {
-                    _floatingWindow.SetDisplayProviders(Array.Empty<ProviderId>(), coordinator.ActiveProvider);
-                    _floatingWindow.SetVisible(false);
-                    return;
-                }
-
-                _floatingWindow.SetDisplayProviders(providers, coordinator.ActiveProvider);
-                _floatingWindow.SetVisible(true);
-                if (!isDisplayed)
-                    return;
-
-                _floatingWindow.ApplyResult(result);
+                _floatingWindow!.ApplyResult(result);
                 LogWidgetApply(result.Id, "floating-state");
                 return;
             }

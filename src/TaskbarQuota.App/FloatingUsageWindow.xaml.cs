@@ -392,13 +392,11 @@ public sealed partial class FloatingUsageWindow : Window
         int w = WindowDpi.ToPhysical(_logicalWidth, scale);
         int h = WindowDpi.ToPhysical(_logicalHeight, scale);
 
-        var pos = _appWindow.Position;
         if (!_hasManualPosition && !_shown)
             PlaceAtDefault();
-        else
-            ClampToWorkArea(ref pos, w, h);
 
-        pos = _appWindow.Position;
+        // Clamp once from the current position, then move+resize in a single call.
+        var pos = _appWindow.Position;
         ClampToWorkArea(ref pos, w, h);
         _appWindow.MoveAndResize(new RectInt32(pos.X, pos.Y, w, h));
 
@@ -406,21 +404,20 @@ public sealed partial class FloatingUsageWindow : Window
             _appWindow.Show(false);
     }
 
+    /// <summary>Pure clamp: updates <paramref name="pos"/> only; does not move the window.</summary>
     private void ClampToWorkArea(ref PointInt32 pos, int width, int height)
     {
         int x = pos.X;
         int y = pos.Y;
         ClampToWorkArea(ref x, ref y, width, height);
         pos = new PointInt32(x, y);
-        _appWindow?.Move(pos);
     }
 
     private void ClampToWorkArea(ref int x, ref int y, int width, int height)
     {
-        var hwnd = Handle;
-        var monitor = hwnd != IntPtr.Zero
-            ? User32.MonitorFromWindow(hwnd, MonitorFromFlags.MONITOR_DEFAULTTONEAREST)
-            : User32.MonitorFromPoint(new POINT { x = x, y = y }, MonitorFromFlags.MONITOR_DEFAULTTONEAREST);
+        // Use the candidate rectangle, not the current window, so a drag can cross monitors.
+        var center = new POINT { x = x + (width / 2), y = y + (height / 2) };
+        var monitor = User32.MonitorFromPoint(center, MonitorFromFlags.MONITOR_DEFAULTTONEAREST);
         var info = MONITORINFO.Create();
         if (monitor == IntPtr.Zero || !User32.GetMonitorInfo(monitor, ref info))
             return;
