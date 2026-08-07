@@ -45,8 +45,11 @@ namespace TaskbarQuota
         /// <summary>Largest dashboard content height before scrolling takes over.</summary>
         public const int MaxLogicalContentHeight = 760;
 
-        /// <summary>Frame padding + scroll padding + bottom chrome (update bar is optional / collapsed).</summary>
-        public const int ChromeLogicalHeight = 122;
+        /// <summary>
+        /// Frame padding + scroll padding + bottom chrome (update bar is optional / collapsed).
+        /// Includes the quick surface/opacity bar above the provider strip (~52px).
+        /// </summary>
+        public const int ChromeLogicalHeight = 174;
 
         public const int HeightMeasureBuffer = 40;
         public const string ForceMinWidthEnvironmentVariable = "TASKBARQUOTA_FORCE_MIN_FLYOUT_WIDTH";

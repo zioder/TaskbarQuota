@@ -1,8 +1,10 @@
 using System.Collections.Generic;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
+using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Helpers;
 using TaskbarQuota.Services;
 using TaskbarQuota.Usage;
@@ -16,6 +18,7 @@ namespace TaskbarQuota.Views
         private bool _isInitializing;
         // Suppresses the Toggled handlers while a row's toggles are synced programmatically.
         private bool _suppressProviderToggleEvents;
+        private Slider? _floatingOpacitySlider;
         // Per-provider toggles, so changing one updates only its own row instead of rebuilding the list.
         private readonly Dictionary<ProviderId, ProviderToggleRow> _providerRows = new();
 
@@ -30,12 +33,19 @@ namespace TaskbarQuota.Views
         {
             _isInitializing = true;
             InitializeComponent();
+            BuildFloatingOpacitySlider();
             ThemeCombo.SelectedIndex = ThemeService.Current switch
             {
                 ElementTheme.Light => 1,
                 ElementTheme.Dark => 2,
                 _ => 0,
             };
+            WidgetSurfaceCombo.SelectedIndex = WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Floating ? 1 : 0;
+            int opacityPercent = (int)System.Math.Round(WidgetSettingsService.FloatingOpacity * 100);
+            if (_floatingOpacitySlider is { } slider)
+                slider.Value = opacityPercent;
+            FloatingOpacityLabel.Text = $"{opacityPercent}%";
+            FloatingOpacityCard.IsEnabled = WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Floating;
             WidgetModeCombo.SelectedIndex = WidgetSettingsService.Current switch
             {
                 WidgetDisplayMode.PercentagesOnly => 1,
@@ -52,6 +62,8 @@ namespace TaskbarQuota.Views
             VersionLabel.Text = $"Version {AppVersion.GetDisplayLabel()}";
             Loaded += (_, _) =>
             {
+                Log.Information(
+                    $"Settings page loaded (surface={WidgetSettingsService.CurrentSurface}, layout={WidgetSettingsService.Current})");
                 ViewModel.ReloadProviders();
                 RebuildProviderSettings();
             };
@@ -239,6 +251,61 @@ namespace TaskbarQuota.Views
                 };
                 ThemeService.Apply(theme);
             }
+        }
+
+        private void OnWidgetSurfaceChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            if (WidgetSurfaceCombo.SelectedItem is ComboBoxItem item && item.Tag is string tag)
+            {
+                var mode = tag == "Floating"
+                    ? WidgetSurfaceMode.Floating
+                    : WidgetSurfaceMode.Taskbar;
+                WidgetSettingsService.ApplySurface(mode);
+                FloatingOpacityCard.IsEnabled = mode == WidgetSurfaceMode.Floating;
+            }
+        }
+
+        /// <summary>
+        /// Builds the opacity slider in code. WinUI RangeBase defaults Maximum=1; assigning Minimum=35
+        /// from XAML throws XamlParseException regardless of attribute order.
+        /// </summary>
+        private void BuildFloatingOpacitySlider()
+        {
+            if (_floatingOpacitySlider is not null)
+                return;
+
+            var slider = new Slider
+            {
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Center,
+                StepFrequency = 1,
+            };
+            slider.Maximum = 100;
+            slider.Minimum = 35;
+            slider.Value = System.Math.Clamp(
+                System.Math.Round(WidgetSettingsService.FloatingOpacity * 100),
+                35,
+                100);
+            AutomationProperties.SetName(slider, "Floating window opacity");
+            AutomationProperties.SetAutomationId(slider, "SettingsFloatingOpacitySlider");
+            slider.ValueChanged += OnFloatingOpacityChanged;
+
+            FloatingOpacitySliderHost.Children.Clear();
+            FloatingOpacitySliderHost.Children.Add(slider);
+            _floatingOpacitySlider = slider;
+        }
+
+        private void OnFloatingOpacityChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            int percent = (int)System.Math.Round(e.NewValue);
+            FloatingOpacityLabel.Text = $"{percent}%";
+            WidgetSettingsService.ApplyFloatingOpacity(percent / 100d);
         }
 
         private void OnWidgetModeChanged(object sender, SelectionChangedEventArgs e)

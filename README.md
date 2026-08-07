@@ -129,6 +129,7 @@ After detection, usage is fetched from **local credentials** or **provider APIs*
 ### Taskbar widget
 
 - **In-taskbar compact UI** — usage bars and/or percentages injected beside the system tray (reparents a layered WinUI island into `Shell_TrayWnd`).
+- **Floating window option** — alternatively, show the same compact layout in a single semi-transparent always-on-top window (Settings → Appearance → Where to show usage). Modes are exclusive; layout, rows, pins, and agent activity apply to both.
 - **All taskbars** — creates a widget on the primary taskbar and every Windows secondary taskbar, with a separately saved drag position for each display.
 - **Follows taskbar layout** — recenters when the taskbar moves, centers, or when Widgets / tray geometry changes.
 - **Draggable placement** — drag to reposition; offset is saved under `%LOCALAPPDATA%\TaskbarQuota\`.
