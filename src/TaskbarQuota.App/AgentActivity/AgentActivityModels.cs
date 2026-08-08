@@ -44,8 +44,6 @@ public sealed record AgentActivityItem(
 public sealed record AgentActivitySnapshot(IReadOnlyList<AgentActivityItem> Items, IReadOnlyList<AgentActivityItem>? RunItems = null)
 {
     public static readonly TimeSpan CompletedRetention = TimeSpan.FromMinutes(1);
-    public static readonly TimeSpan IdleWaitingRetention = TimeSpan.FromSeconds(90);
-    public static readonly TimeSpan IdleCompletedRetention = TimeSpan.FromSeconds(120);
     public static readonly TimeSpan FailedRetention = TimeSpan.FromMinutes(5);
 
     private IReadOnlyList<AgentActivityItem> SourceItems => RunItems is { Count: > 0 } ? RunItems : Items;
@@ -80,19 +78,13 @@ public sealed record AgentActivitySnapshot(IReadOnlyList<AgentActivityItem> Item
 
     private static AgentActivityItem? ToCompactItem(AgentActivityItem item)
     {
-        if (item.Status is AgentActivityStatus.Working or AgentActivityStatus.Waiting)
+        // Every live state is process-backed. The scanner changes an item to Completed when its process
+        // disappears, so expiring Idle by transcript age hid a still-running agent until it happened to
+        // emit another recognized event.
+        if (item.IsLive)
             return item;
 
         var age = DateTimeOffset.UtcNow - item.UpdatedAt.ToUniversalTime();
-        if (item.Status == AgentActivityStatus.Idle)
-        {
-            if (age <= IdleWaitingRetention)
-                return item;
-            if (age <= IdleCompletedRetention)
-                return item with { Status = AgentActivityStatus.Completed, Step = "Completed" };
-            return null;
-        }
-
         var retention = item.Status switch
         {
             AgentActivityStatus.Failed => FailedRetention,

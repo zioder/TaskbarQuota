@@ -160,16 +160,17 @@ namespace TaskbarQuota.Taskbar
             var activity = AgentActivityService.Instance.Snapshot;
 
             _floatingWindow.SetActivitySnapshot(activity);
+            _floatingWindow.SetDisplayProviders(providers, coordinator.ActiveProvider);
 
-            if (providers.Count == 0
-                && !(WidgetSettingsService.ShowAgentActivityInWidget && activity.Primary is not null))
+            // Consult the content actually applied by the floating host. A transient empty scan may be
+            // held for a short grace period; using the raw snapshot here hid the entire window anyway and
+            // defeated that protection.
+            if (!_floatingWindow.HasVisibleContent)
             {
-                _floatingWindow.SetDisplayProviders(Array.Empty<ProviderId>(), coordinator.ActiveProvider);
                 _floatingWindow.SetVisible(false);
                 return false;
             }
 
-            _floatingWindow.SetDisplayProviders(providers, coordinator.ActiveProvider);
             _floatingWindow.SetVisible(true);
             return true;
         }
@@ -211,9 +212,7 @@ namespace TaskbarQuota.Taskbar
 
             var coordinator = UsageCoordinator.Instance;
             var providers = coordinator.WidgetDisplayProviders;
-            var activity = AgentActivityService.Instance.Snapshot;
-            bool shouldShow = providers.Count > 0
-                || (WidgetSettingsService.ShowAgentActivityInWidget && activity.Primary is not null);
+            bool shouldShow = providers.Count > 0 || _floatingWindow.HasVisibleContent;
 
             return shouldShow && !_floatingWindow.IsShown;
         }
@@ -225,7 +224,9 @@ namespace TaskbarQuota.Taskbar
 
             _activityCts = new CancellationTokenSource();
             var cancellationToken = _activityCts.Token;
-            _activityTimer = new DispatcherTimer { Interval = IdleActivityInterval };
+            // Start fast so a transcript created just after launch is not held behind the ten-second idle
+            // interval. The first completed timer refresh selects the normal active/idle cadence.
+            _activityTimer = new DispatcherTimer { Interval = ActiveActivityInterval };
             _activityTimer.Tick += async (_, _) =>
             {
                 await AgentActivityService.Instance.RefreshFromTranscriptsAsync(cancellationToken);
@@ -483,7 +484,7 @@ namespace TaskbarQuota.Taskbar
             if (providers.Count == 0)
             {
                 widget.SetDisplayProviders(Array.Empty<ProviderId>(), coordinator.ActiveProvider);
-                if (WidgetSettingsService.ShowAgentActivityInWidget && activity.Primary is not null)
+                if (widget.HasVisibleActivity)
                     widget.SetQuotaVisible(false);
                 else
                     widget.SetVisible(false);
@@ -669,7 +670,7 @@ namespace TaskbarQuota.Taskbar
                 if (providers.Count == 0)
                 {
                     widget.SetDisplayProviders(Array.Empty<ProviderId>(), coordinator.ActiveProvider);
-                    if (WidgetSettingsService.ShowAgentActivityInWidget && activity.Primary is not null)
+                    if (widget.HasVisibleActivity)
                         widget.SetQuotaVisible(false);
                     else
                         widget.SetVisible(false);
@@ -755,7 +756,7 @@ namespace TaskbarQuota.Taskbar
                     if (providers.Count == 0)
                     {
                         widget.SetDisplayProviders(Array.Empty<ProviderId>(), UsageCoordinator.Instance.ActiveProvider);
-                        if (WidgetSettingsService.ShowAgentActivityInWidget && snapshot.Primary is not null)
+                        if (widget.HasVisibleActivity)
                             widget.SetQuotaVisible(false);
                         else
                             widget.SetVisible(false);

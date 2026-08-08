@@ -88,4 +88,33 @@ public class WidgetSurfaceModeTests
             WidgetSettingsService.ApplyFloatingOpacity(WidgetSettingsService.FloatingOpacityDefault);
         });
     }
+
+    [Fact]
+    public void StepOpacityFromWheel_steps_by_five_percent_and_clamps()
+    {
+        Assert.Equal(0.55, FloatingUsageWindow.StepOpacityFromWheel(0.50, +120), precision: 2);
+        Assert.Equal(0.45, FloatingUsageWindow.StepOpacityFromWheel(0.50, -120), precision: 2);
+        Assert.Equal(WidgetSettingsService.FloatingOpacityMax,
+            FloatingUsageWindow.StepOpacityFromWheel(0.98, +120), precision: 2);
+        Assert.Equal(WidgetSettingsService.FloatingOpacityMin,
+            FloatingUsageWindow.StepOpacityFromWheel(0.36, -120), precision: 2);
+        // Sub-notch deltas still count as one step (precision touchpad).
+        Assert.Equal(0.55, FloatingUsageWindow.StepOpacityFromWheel(0.50, +40), precision: 2);
+    }
+
+    [Fact]
+    public void ComputeAcrylicMaterial_clamps_and_preserves_native_material_at_maximum()
+    {
+        var minimum = FloatingUsageWindow.ComputeAcrylicMaterial(0);
+        var middle = FloatingUsageWindow.ComputeAcrylicMaterial(0.675);
+        var maximum = FloatingUsageWindow.ComputeAcrylicMaterial(2);
+
+        Assert.Equal(0.25f, minimum.TintOpacity, precision: 3);
+        Assert.Equal(0.45f, minimum.LuminosityOpacity, precision: 3);
+        Assert.InRange(middle.TintOpacity, minimum.TintOpacity, maximum.TintOpacity);
+        Assert.InRange(middle.LuminosityOpacity, minimum.LuminosityOpacity, maximum.LuminosityOpacity);
+        Assert.Equal(0.80f, maximum.TintOpacity, precision: 3);
+        Assert.Equal(0.80f, maximum.LuminosityOpacity, precision: 3);
+        Assert.True(maximum.TintOpacity < 1, "Maximum strength must still reveal the native Acrylic material.");
+    }
 }

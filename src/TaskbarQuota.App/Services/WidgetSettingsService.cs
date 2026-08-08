@@ -86,16 +86,16 @@ public static class WidgetSettingsService
     private static readonly Dictionary<string, bool> DashboardProviderVisibility = LoadDashboardProviderVisibility();
     private static readonly Dictionary<string, bool> ProviderPins = LoadProviderPins();
 
-    /// <summary>Minimum opacity for the floating usage window (35%).</summary>
+    /// <summary>Minimum material strength for the floating usage window (35%).</summary>
     public const double FloatingOpacityMin = 0.35;
-    /// <summary>Maximum opacity for the floating usage window (fully solid).</summary>
+    /// <summary>Maximum material strength for the floating usage window.</summary>
     public const double FloatingOpacityMax = 1.0;
-    /// <summary>Default floating chrome opacity.</summary>
+    /// <summary>Default floating Acrylic strength.</summary>
     public const double FloatingOpacityDefault = 0.90;
 
     public static WidgetDisplayMode Current { get; private set; } = LoadWidgetDisplayMode();
     public static WidgetSurfaceMode CurrentSurface { get; private set; } = LoadWidgetSurfaceMode();
-    /// <summary>Floating window chrome opacity in the range [<see cref="FloatingOpacityMin"/>, <see cref="FloatingOpacityMax"/>].</summary>
+    /// <summary>Floating window Acrylic strength in the range [<see cref="FloatingOpacityMin"/>, <see cref="FloatingOpacityMax"/>].</summary>
     public static double FloatingOpacity { get; private set; } = LoadFloatingOpacity();
     public static PercentageDisplayMode CurrentPercentageMode { get; private set; } = LoadPercentageDisplayMode();
     public static bool AutoHideUnavailable { get; private set; } = LoadAutoHideUnavailable();
@@ -138,7 +138,7 @@ public static class WidgetSettingsService
     }
 
     /// <summary>
-    /// Sets floating window chrome opacity. Values outside
+    /// Sets floating window Acrylic strength. Values outside
     /// [<see cref="FloatingOpacityMin"/>, <see cref="FloatingOpacityMax"/>] are clamped.
     /// </summary>
     public static void ApplyFloatingOpacity(double opacity)

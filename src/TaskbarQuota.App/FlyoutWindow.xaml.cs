@@ -303,9 +303,9 @@ namespace TaskbarQuota
                 Math.Round(WidgetSettingsService.FloatingOpacity * 100),
                 35,
                 100);
-            AutomationProperties.SetName(slider, "Floating window opacity");
+            AutomationProperties.SetName(slider, "Floating acrylic strength");
             AutomationProperties.SetAutomationId(slider, "FlyoutFloatingOpacitySlider");
-            ToolTipService.SetToolTip(slider, "Floating window opacity (lower shows more of the desktop)");
+            ToolTipService.SetToolTip(slider, "Floating Acrylic strength (or scroll the floating window). Lower reveals more of the blurred desktop.");
             slider.ValueChanged += FloatingOpacitySlider_ValueChanged;
 
             FloatingOpacitySliderHost.Children.Clear();
@@ -337,8 +337,8 @@ namespace TaskbarQuota
                     slider.IsEnabled = floating;
                     ToolTipService.SetToolTip(slider,
                         floating
-                            ? "Floating window opacity"
-                            : "Opacity applies when floating window mode is on");
+                            ? "Floating acrylic strength"
+                            : "Acrylic strength applies when floating window mode is on");
                 }
                 FloatingOpacityLabel.Text = $"{percent}%";
                 FloatingOpacityLabel.Opacity = floating ? 0.9 : 0.45;
@@ -586,29 +586,29 @@ namespace TaskbarQuota
                     return;
 
                 int gap = WindowDpi.ToPhysical(8, scale);
-                int maxHeight = Math.Max(WindowDpi.ToPhysical(320, scale), wr.top - gap);
-                h = Math.Min(h, maxHeight);
 
-                // Right-align the flyout to the widget, floating just above the taskbar.
-                int x = wr.right - w;
-                int y = wr.top - h - gap;
-
-                // Confine the flyout to the monitor that hosts the widget so it never straddles a
-                // monitor boundary on multi-display setups (issue #10).
-                if (TryGetWorkArea(_widgetHandle, out RECT work))
+                // Confine to the monitor that hosts the widget so it never straddles a display
+                // (issue #10). Prefer above the anchor; flip below when the top would crush height
+                // (floating window near the top of the screen).
+                RECT work;
+                if (!TryGetWorkArea(_widgetHandle, out work))
                 {
-                    w = Math.Min(w, work.right - work.left);
-                    h = Math.Min(h, work.bottom - work.top);
-                    x = Math.Clamp(wr.right - w, work.left, work.right - w);
-                    y = Math.Clamp(y, work.top, work.bottom - h);
-                }
-                else
-                {
-                    if (y < 0) y = 0;
-                    if (x < 0) x = 0;
+                    work = new RECT
+                    {
+                        left = 0,
+                        top = 0,
+                        right = Math.Max(w, wr.right),
+                        bottom = Math.Max(h + wr.bottom, wr.bottom + h),
+                    };
                 }
 
-                var bounds = new RectInt32(x, y, w, h);
+                var placement = FlyoutLayout.ComputePlacement(
+                    wr.left, wr.top, wr.right, wr.bottom,
+                    work.left, work.top, work.right, work.bottom,
+                    w, h, gap);
+
+                var bounds = new RectInt32(
+                    placement.X, placement.Y, placement.Width, placement.Height);
                 if (_lastAppliedBounds is { } last
                     && last.X == bounds.X
                     && last.Y == bounds.Y

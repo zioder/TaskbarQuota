@@ -21,15 +21,29 @@ public sealed partial class QuotaWidgetContent : UserControl
     private const int TileSeparatorLogicalPx = 7;
     private const int ActivitySummaryMarginLogicalPx = 8;
     private const int DefaultHostLogicalWidth = 172;
-    private const int HostLogicalHeight = 40;
-    private const int ActivityLogicalWidth = 200;
+    /// <summary>Floating host has room for multi-row tiles + activity lines; taskbar stays ~40.</summary>
+    private const int HostLogicalHeight = 48;
+    /// <summary>Slack so measured glyphs/separators are not flush against the chrome edge.</summary>
+    private const int ContentWidthSlackLogicalPx = 8;
+    /// <summary>
+    /// Floating mode is not gap-constrained — use the full preferred activity width so text is not cut.
+    /// </summary>
+    private const int ActivityLogicalWidth = AgentActivitySummary.DesiredLogicalWidth;
+    /// <summary>
+    /// Discovery can publish an empty intermediate snapshot while rescanning. Match the taskbar
+    /// widget: keep the last non-empty activity visible briefly instead of blinking out.
+    /// </summary>
+    private static readonly TimeSpan EmptyActivityGrace = TimeSpan.FromMilliseconds(900);
 
     private readonly WidgetSummary[] _tiles = new WidgetSummary[UsageCoordinator.MaxWidgetTiles];
     private readonly TextBlock[] _separators = new TextBlock[UsageCoordinator.MaxWidgetTiles - 1];
     private readonly ProviderId?[] _tileProviders = new ProviderId?[UsageCoordinator.MaxWidgetTiles];
     private ProviderId? _activeProvider;
     private AgentActivitySnapshot _activitySnapshot = new(Array.Empty<AgentActivityItem>());
+    private AgentActivitySnapshot? _pendingEmptyActivitySnapshot;
+    private readonly DispatcherTimer _activityEmptySnapshotTimer;
     private int _desiredLogicalWidth = DefaultHostLogicalWidth;
+    private int _desiredLogicalHeight = HostLogicalHeight;
     private bool _built;
 
     public event Action? Clicked;
@@ -40,12 +54,23 @@ public sealed partial class QuotaWidgetContent : UserControl
     public Func<ProviderId, UsageResult?>? HydrateProvider { get; set; }
 
     public int DesiredLogicalWidth => _desiredLogicalWidth;
-    public int DesiredLogicalHeight => HostLogicalHeight;
+    public int DesiredLogicalHeight => _desiredLogicalHeight;
+    /// <summary>
+    /// True when the activity strip is backed by the snapshot currently applied to the control. This may
+    /// intentionally remain true during <see cref="EmptyActivityGrace"/> even when the latest service
+    /// snapshot is empty.
+    /// </summary>
+    public bool HasVisibleActivity => WidgetSettingsService.ShowAgentActivityInWidget
+        && _activitySnapshot.Primary is not null;
+    public bool HasVisibleContent => _tileProviders.Any(provider => provider is not null)
+        || HasVisibleActivity;
 
     public QuotaWidgetContent()
     {
         InitializeComponent();
         ActivitySummary.UseApplicationChromeColors = true;
+        _activityEmptySnapshotTimer = new DispatcherTimer { Interval = EmptyActivityGrace };
+        _activityEmptySnapshotTimer.Tick += ActivityEmptySnapshotTimer_Tick;
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
     }
@@ -79,17 +104,16 @@ public sealed partial class QuotaWidgetContent : UserControl
             _tiles[i].SetActiveToolVisible(true);
         }
 
-        bool showActivity = WidgetSettingsService.ShowAgentActivityInWidget
-            && _activitySnapshot.Primary is not null;
-        ActivitySummary.Visibility = showActivity ? Visibility.Visible : Visibility.Collapsed;
-        if (showActivity)
-            ActivitySummary.Apply(_activitySnapshot, _activeProvider);
+        ApplyActivityToControl();
+        // First show / hide thrash can leave the host sized to the empty default; re-measure now.
+        RecomputeLayout();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
         ActivitySummary.Clicked -= OnActivityClicked;
+        _activityEmptySnapshotTimer.Stop();
     }
 
     private void OnWidgetSettingsChanged(object? sender, EventArgs e)
@@ -162,6 +186,30 @@ public sealed partial class QuotaWidgetContent : UserControl
 
     private void OnActivityClicked(AgentActivityItem? item) => ActivityClicked?.Invoke(item);
 
+    /// <summary>
+    /// Call when a pointer gesture became a drag so child buttons/tiles do not fire Click after release.
+    /// </summary>
+    public void SuppressNextClicks()
+    {
+        ActivitySummary.SuppressNextClick = true;
+        for (int i = 0; i < _tiles.Length; i++)
+        {
+            if (_tiles[i] is { } tile)
+                tile.SuppressNextClick = true;
+        }
+    }
+
+    /// <summary>Clears drag-only click suppression after the release event has finished routing.</summary>
+    public void ClearSuppressedClicks()
+    {
+        ActivitySummary.SuppressNextClick = false;
+        for (int i = 0; i < _tiles.Length; i++)
+        {
+            if (_tiles[i] is { } tile)
+                tile.SuppressNextClick = false;
+        }
+    }
+
     public void SetDisplayProviders(IReadOnlyList<ProviderId> providers, ProviderId? activeProvider)
     {
         providers = providers.Distinct().Take(UsageCoordinator.MaxWidgetTiles).ToArray();
@@ -184,7 +232,7 @@ public sealed partial class QuotaWidgetContent : UserControl
             }
         }
 
-        ActivitySummary.Apply(_activitySnapshot, _activeProvider);
+        ApplyActivityToControl();
         RecomputeLayout();
     }
 
@@ -204,18 +252,91 @@ public sealed partial class QuotaWidgetContent : UserControl
 
     public void SetActivitySnapshot(AgentActivitySnapshot snapshot)
     {
+        if (!_built)
+            BuildTiles();
+
+        // Match TaskBarWidget: discovery can publish an empty intermediate scan. Keep the previous
+        // non-empty activity visible for a short grace period so the strip does not blink out.
+        if (snapshot.Primary is null && _activitySnapshot.Primary is not null)
+        {
+            _pendingEmptyActivitySnapshot = snapshot;
+            _activityEmptySnapshotTimer.Stop();
+            _activityEmptySnapshotTimer.Start();
+            return;
+        }
+
+        _activityEmptySnapshotTimer.Stop();
+        _pendingEmptyActivitySnapshot = null;
+        ApplyActivitySnapshot(snapshot);
+    }
+
+    private void ActivityEmptySnapshotTimer_Tick(object? sender, object e)
+    {
+        _activityEmptySnapshotTimer.Stop();
+        if (_pendingEmptyActivitySnapshot is not { } snapshot)
+            return;
+
+        _pendingEmptyActivitySnapshot = null;
+        ApplyActivitySnapshot(snapshot);
+    }
+
+    private void ApplyActivitySnapshot(AgentActivitySnapshot snapshot)
+    {
         _activitySnapshot = snapshot;
-        ActivitySummary.Apply(snapshot, _activeProvider);
+        ApplyActivityToControl();
         foreach (var tile in _tiles)
             tile?.SetAgentActivity(snapshot);
         RecomputeLayout();
+    }
+
+    private void ApplyActivityToControl()
+    {
+        bool showActivity = HasVisibleActivity;
+
+        if (!showActivity)
+        {
+            ActivitySummary.Visibility = Visibility.Collapsed;
+            // Drop any fixed width so a later measure cannot keep the previous activity reservation.
+            ActivitySummary.ClearValue(FrameworkElement.WidthProperty);
+            return;
+        }
+
+        // Apply first so the control sizes its content, then force Visible in case Apply raced.
+        ActivitySummary.Apply(_activitySnapshot, _activeProvider);
+        ActivitySummary.Visibility = Visibility.Visible;
+        ActivitySummary.SetLogicalWidth(ActivityLogicalWidth);
     }
 
     public void MeasureDesiredSize(out int logicalWidth, out int logicalHeight)
     {
         RecomputeLayout();
         logicalWidth = _desiredLogicalWidth;
-        logicalHeight = HostLogicalHeight;
+        logicalHeight = _desiredLogicalHeight;
+    }
+
+    /// <summary>
+    /// Pure content width for the floating host: tiles + optional activity + slack.
+    /// Does not consult <see cref="FrameworkElement.ActualWidth"/> so hiding activity can shrink the window.
+    /// </summary>
+    internal static int ComputeContentLogicalWidth(
+        IReadOnlyList<int> tileWidths,
+        bool showActivity,
+        int activityLogicalWidth = ActivityLogicalWidth)
+    {
+        int total = 0;
+        for (int i = 0; i < tileWidths.Count; i++)
+        {
+            total += tileWidths[i] + TileHorizontalMarginLogicalPx
+                + (i > 0 ? TileSeparatorLogicalPx : 0);
+        }
+
+        if (showActivity)
+            total += Math.Max(1, activityLogicalWidth) + ActivitySummaryMarginLogicalPx;
+
+        if (total <= 0)
+            total = DefaultHostLogicalWidth;
+
+        return total + ContentWidthSlackLogicalPx;
     }
 
     private void RecomputeLayout()
@@ -223,11 +344,9 @@ public sealed partial class QuotaWidgetContent : UserControl
         if (!_built)
             return;
 
-        bool showActivity = WidgetSettingsService.ShowAgentActivityInWidget
-            && _activitySnapshot.Primary is not null;
+        bool showActivity = HasVisibleActivity;
 
-        int total = 0;
-        int shownCount = 0;
+        var tileWidths = new List<int>(UsageCoordinator.MaxWidgetTiles);
         for (int i = 0; i < _tiles.Length; i++)
         {
             bool shown = _tileProviders[i] is not null;
@@ -240,8 +359,7 @@ public sealed partial class QuotaWidgetContent : UserControl
             if (_tileProviders[i] is { } provider)
                 Taskbar.TaskbarSpace.RecordTileWidth(provider, width);
 
-            total += width + TileHorizontalMarginLogicalPx + (shownCount > 0 ? TileSeparatorLogicalPx : 0);
-            shownCount++;
+            tileWidths.Add(width);
         }
 
         var separatorBrush = SeparatorBrush();
@@ -252,24 +370,20 @@ public sealed partial class QuotaWidgetContent : UserControl
             _separators[i].Foreground = separatorBrush;
         }
 
-        if (showActivity)
-        {
-            ActivitySummary.Visibility = Visibility.Visible;
-            ActivitySummary.SetLogicalWidth(ActivityLogicalWidth);
-            total += ActivityLogicalWidth + ActivitySummaryMarginLogicalPx;
-        }
-        else
-        {
-            ActivitySummary.Visibility = Visibility.Collapsed;
-        }
+        // Keep Apply + size in sync with visibility so the strip never reserves space for a
+        // collapsed control or shows a blank activity host.
+        ApplyActivityToControl();
 
-        if (total <= 0)
-            total = DefaultHostLogicalWidth;
+        // Model width only — never Math.Max against ActualWidth. That kept the previous (wider)
+        // layout after activity was hidden and blocked the floating window from shrinking.
+        int total = ComputeContentLogicalWidth(tileWidths, showActivity, ActivityLogicalWidth);
+        int height = HostLogicalHeight;
 
-        if (total == _desiredLogicalWidth)
+        if (total == _desiredLogicalWidth && height == _desiredLogicalHeight)
             return;
 
         _desiredLogicalWidth = total;
-        DesiredSizeChanged?.Invoke(_desiredLogicalWidth, HostLogicalHeight);
+        _desiredLogicalHeight = height;
+        DesiredSizeChanged?.Invoke(_desiredLogicalWidth, _desiredLogicalHeight);
     }
 }

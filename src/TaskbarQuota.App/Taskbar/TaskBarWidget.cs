@@ -248,6 +248,13 @@ namespace TaskbarQuota.Taskbar
         public event Action? Clicked;
         /// <summary>Raised when the agent activity summary is clicked, so its activity panel can open.</summary>
         public event Action<AgentActivityItem?>? ActivityClicked;
+
+        /// <summary>
+        /// Whether the activity island is backed by the snapshot currently applied to this widget. The
+        /// applied snapshot can intentionally lag a transient empty scan during the grace period.
+        /// </summary>
+        public bool HasVisibleActivity => WidgetSettingsService.ShowAgentActivityInWidget
+            && activitySnapshot.Primary is not null;
         public event EventHandler? Destroying;
 
         public TaskBarWidget(TaskbarWindowTarget target)

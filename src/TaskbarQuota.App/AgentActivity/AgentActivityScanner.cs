@@ -38,7 +38,6 @@ internal sealed class AgentActivityScanner
         var desktopApps = ScanDesktopAgentApps();
         var terminalAgents = ScanTerminalAgentCommands();
         var liveProviders = MergeLiveProviders(desktopApps, terminalAgents);
-        Log.Debug($"[activity] agent discovery: desktop={desktopApps.Values.Sum()}, terminal={terminalAgents.Values.Sum()}");
         var files = new List<(ProviderId Provider, string Path, DateTimeOffset Modified)>();
         bool discoverCandidates = DateTimeOffset.UtcNow - _lastCandidateDiscovery >= CandidateDiscoveryInterval;
         // Process discovery is intentionally the gate for transcript/database work. Most agent
@@ -147,11 +146,15 @@ internal sealed class AgentActivityScanner
             parsed.AddRange(candidateItems);
         }
 
-        return ApplyActiveHostFallback(GroupSessions(parsed))
+        var result = ApplyActiveHostFallback(GroupSessions(parsed))
             .Where(item => item.IsLive || DateTimeOffset.Now - item.UpdatedAt < RecentWindow)
             .OrderByDescending(item => item.IsLive)
             .ThenByDescending(item => item.UpdatedAt)
             .ToArray();
+        var compactCount = new AgentActivitySnapshot(result).CompactItems.Count;
+        Log.Debug($"[activity] scan: desktop={desktopApps.Values.Sum()}, terminal={terminalAgents.Values.Sum()}, "
+            + $"sessions={result.Length}, live={result.Count(item => item.IsLive)}, compact={compactCount}");
+        return result;
     }
 
     private void AddRememberedCandidates(

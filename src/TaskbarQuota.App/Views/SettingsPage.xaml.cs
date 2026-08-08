@@ -289,7 +289,7 @@ namespace TaskbarQuota.Views
                 System.Math.Round(WidgetSettingsService.FloatingOpacity * 100),
                 35,
                 100);
-            AutomationProperties.SetName(slider, "Floating window opacity");
+            AutomationProperties.SetName(slider, "Floating acrylic strength");
             AutomationProperties.SetAutomationId(slider, "SettingsFloatingOpacitySlider");
             slider.ValueChanged += OnFloatingOpacityChanged;
 

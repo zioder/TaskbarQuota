@@ -6,15 +6,15 @@
     xmlns:controls="using:TaskbarQuota.Controls">
 
     <Grid x:Name="Root" Background="Transparent">
-        <!-- Fill opacity is user-adjustable; content sits above so text stays fully opaque. -->
+        <!-- Solid fallback only. Desktop Acrylic is supplied by the native composition backdrop. -->
         <Border x:Name="ChromeFill"
-                CornerRadius="8"
+                CornerRadius="10"
                 Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
                 IsHitTestVisible="False"/>
         <Border x:Name="Chrome"
-                CornerRadius="8"
+                CornerRadius="10"
                 BorderThickness="1"
-                Padding="6,4"
+                Padding="10,6"
                 Background="Transparent"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
             <controls:QuotaWidgetContent x:Name="ContentHost"
