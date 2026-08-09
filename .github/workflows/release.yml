@@ -118,8 +118,10 @@ jobs:
             $requiredXbf = @(
               'MainWindow.xbf',
               'FlyoutWindow.xbf',
+              'FloatingUsageWindow.xbf',
               'Views\DashboardPage.xbf',
-              'Controls\WidgetSummary.xbf'
+              'Controls\WidgetSummary.xbf',
+              'Controls\QuotaWidgetContent.xbf'
             )
             foreach ($rel in $requiredXbf) {
               if (-not (Test-Path (Join-Path $publishDir $rel))) {

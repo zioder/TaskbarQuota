@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading;
 
 namespace TaskbarQuota;
 
@@ -9,8 +10,24 @@ public static class AppStorage
     public const string AppFolderName = "TaskbarQuota";
     private const string LegacyAppFolderName = "WinCheck";
 
-    public static string AppDataDirectory =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppFolderName);
+    private static string? _appDataDirectoryOverride;
+
+    public static string AppDataDirectory => _appDataDirectoryOverride
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppFolderName);
+
+    internal static IDisposable OverrideAppDataDirectoryForTesting(string directory)
+    {
+        var previous = _appDataDirectoryOverride;
+        _appDataDirectoryOverride = directory;
+        return new AppDataDirectoryOverride(() => _appDataDirectoryOverride = previous);
+    }
+
+    private sealed class AppDataDirectoryOverride(Action restore) : IDisposable
+    {
+        private Action? _restore = restore;
+
+        public void Dispose() => Interlocked.Exchange(ref _restore, null)?.Invoke();
+    }
 
     /// <summary>Copies files from %LOCALAPPDATA%\WinCheck when the new folder is empty.</summary>
     public static void MigrateLegacyDataIfNeeded()

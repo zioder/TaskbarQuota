@@ -147,6 +147,21 @@ namespace TaskbarQuota.Interop
         public static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr newStyle);
 
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern int GetWindowLong(IntPtr hwnd, int index);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
+
+        /// <summary>Sets opacity and/or color key for a WS_EX_LAYERED window.</summary>
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
+
+        public const int GWL_EXSTYLE = -20;
+        public const uint LWA_COLORKEY = 0x1;
+        public const uint LWA_ALPHA = 0x2;
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
         public const uint WM_SETICON = 0x0080;
@@ -240,6 +255,10 @@ namespace TaskbarQuota.Interop
     {
         Default = 0,
         WS_EX_LAYERED = 0x80000,
+        WS_EX_TOOLWINDOW = 0x00000080,
+        WS_EX_TOPMOST = 0x00000008,
+        WS_EX_NOACTIVATE = 0x08000000,
+        WS_EX_TRANSPARENT = 0x00000020,
     }
 
     [Flags]

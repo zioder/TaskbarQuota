@@ -22,6 +22,15 @@ public static class PinBudgetService
     /// <summary>Raised after the budget auto-unpins providers, so the UI can refresh and explain.</summary>
     public static event Action<IReadOnlyList<ProviderId>>? ProvidersUnpinned;
 
+    /// <summary>
+    /// Free width the pin budget uses for the current surface. Floating mode is constrained only by the
+    /// tile cap; its host scrolls horizontally when content is wider than the monitor work area.
+    /// </summary>
+    public static int AvailableLogicalWidth
+        => WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Floating
+            ? int.MaxValue
+            : Taskbar.TaskbarSpace.AvailableLogicalWidth;
+
     // Tile chrome, mirroring TaskBarWidget: 4px of margin per tile and a 7px divider between neighbours.
     private const int TileMarginLogicalPx = 4;
     private const int TileSeparatorLogicalPx = 7;
@@ -106,28 +115,35 @@ public static class PinBudgetService
 
         var pinned = PinnedProviders();
         string name = ProviderName(provider);
+        bool floating = WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Floating;
+        string surfaceNoun = floating ? "floating widget" : "taskbar";
 
         if (pinned.Count >= UsageCoordinator.MaxDisplayedWidgetTiles)
         {
-            reason = $"The taskbar can show at most {UsageCoordinator.MaxDisplayedWidgetTiles} quota providers at once, and you already "
+            reason = $"The {surfaceNoun} can show at most {UsageCoordinator.MaxDisplayedWidgetTiles} quota providers at once, and you already "
                 + $"have {string.Join(", ", pinned.Select(ProviderName))} pinned. Unpin one of those to make room for {name}.";
             return false;
         }
 
         var candidate = pinned.Append(provider).ToList();
-        if (!FitsTaskbar(candidate, Taskbar.TaskbarSpace.AvailableLogicalWidth))
+        int available = AvailableLogicalWidth;
+        if (!FitsTaskbar(candidate, available))
         {
             // A refusal the user did not expect is impossible to diagnose from the message alone, since it
             // turns on measurements they cannot see. Record what the decision was actually made from.
             Diagnostics.Log.Debug(
                 $"[pin] refused {provider}: tiles=[{string.Join(", ", candidate.Select(p => $"{p}:{TileWidth(p)}{(Taskbar.TaskbarSpace.TryGetTileWidth(p, out _) ? "" : "~")}"))}] "
                 + $"row={RowWidth(candidate.Select(TileWidth).ToList())} "
-                + $"available={Taskbar.TaskbarSpace.AvailableLogicalWidth}");
+                + $"available={available}");
 
-            reason = $"There isn't room on the taskbar for {name} ({Describe(provider)}) next to "
-                + $"{string.Join(" and ", pinned.Select(p => $"{ProviderName(p)} ({Describe(p)})"))}. "
-                + $"Turn off some rows for {name} or for a pinned provider, unpin one, or set the Windows "
-                + "taskbar to left alignment — that frees up a lot more room.";
+            reason = floating
+                ? $"There isn't room in the floating widget for {name} ({Describe(provider)}) next to "
+                  + $"{string.Join(" and ", pinned.Select(p => $"{ProviderName(p)} ({Describe(p)})"))}. "
+                  + $"Turn off some rows for {name} or for a pinned provider, or unpin one."
+                : $"There isn't room on the taskbar for {name} ({Describe(provider)}) next to "
+                  + $"{string.Join(" and ", pinned.Select(p => $"{ProviderName(p)} ({Describe(p)})"))}. "
+                  + $"Turn off some rows for {name} or for a pinned provider, unpin one, or set the Windows "
+                  + "taskbar to left alignment — that frees up a lot more room.";
             return false;
         }
 
@@ -178,10 +194,11 @@ public static class PinBudgetService
 
         var keeping = new List<ProviderId>(order);
         var dropped = new List<ProviderId>();
+        int available = AvailableLogicalWidth;
         foreach (var provider in order)
         {
             if (keeping.Count <= UsageCoordinator.MaxDisplayedWidgetTiles
-                && FitsTaskbar(keeping, Taskbar.TaskbarSpace.AvailableLogicalWidth))
+                && FitsTaskbar(keeping, available))
             {
                 break;
             }
@@ -215,7 +232,8 @@ public static class PinBudgetService
     private static int BudgetKey()
     {
         var hash = new HashCode();
-        hash.Add(Taskbar.TaskbarSpace.AvailableLogicalWidth);
+        hash.Add(AvailableLogicalWidth);
+        hash.Add((int)WidgetSettingsService.CurrentSurface);
         hash.Add(UsageCoordinator.MaxDisplayedWidgetTiles);
         foreach (var provider in AllProviders)
         {

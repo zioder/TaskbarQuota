@@ -26,6 +26,11 @@ public sealed partial class AgentActivitySummary : UserControl
     public const int MinimumLogicalWidth = 120;
     public event Action<AgentActivityItem?>? Clicked;
     public bool SuppressNextClick { get; set; }
+
+    /// <summary>
+    /// When true, colors follow the app/window theme (floating HUD) instead of the system taskbar palette.
+    /// </summary>
+    public bool UseApplicationChromeColors { get; set; }
     public AgentActivityItem? FollowedItem { get; private set; }
     private string? _followedId;
     private AgentActivitySnapshot _snapshot = new(Array.Empty<AgentActivityItem>());
@@ -52,6 +57,7 @@ public sealed partial class AgentActivitySummary : UserControl
             _wheelGestureActive = false;
         };
         Loaded += (_, _) => ApplyForeground();
+        ActualThemeChanged += (_, _) => ApplyForeground();
         PointerWheelChanged += AgentActivitySummary_PointerWheelChanged;
     }
 
@@ -308,9 +314,12 @@ public sealed partial class AgentActivitySummary : UserControl
 
     private void ApplyForeground()
     {
-        bool light = Interop.SystemInfos.IsSystemLightThemeUsed() == true;
+        bool light = UseApplicationChromeColors
+            ? ThemeService.IsLightChrome(this)
+            : Interop.SystemInfos.IsSystemLightThemeUsed() == true;
         var brush = new SolidColorBrush(light ? Color.FromArgb(255, 28, 28, 28) : Colors.White);
         StepText.Foreground = brush;
         TitleText.Foreground = brush;
+        AgentPositionText.Foreground = brush;
     }
 }

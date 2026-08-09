@@ -70,24 +70,22 @@ public sealed class AgentActivityTests
     }
 
     [Fact]
-    public void CompactItems_ShowsIdleThenCompletedThenExpires()
+    public void CompactItems_KeepsProcessBackedIdleAgentsRegardlessOfTranscriptAge()
     {
         var now = DateTimeOffset.UtcNow;
         var snapshot = new AgentActivitySnapshot(new[]
         {
             new AgentActivityItem("recent-idle", ProviderId.Codex, "Task", "Waiting for the next prompt",
                 AgentActivityStatus.Idle, now.AddSeconds(-30), now.AddSeconds(-30)),
-              new AgentActivityItem("completed-idle", ProviderId.Codex, "Completed task", "Waiting for the next prompt",
-                  AgentActivityStatus.Idle, now.AddSeconds(-100), now.AddSeconds(-100)),
-              new AgentActivityItem("old-idle", ProviderId.Codex, "Old task", "Waiting for the next prompt",
-                  AgentActivityStatus.Idle, now.AddSeconds(-130), now.AddSeconds(-130)),
-          });
+            new AgentActivityItem("completed-idle", ProviderId.Codex, "Completed task", "Waiting for the next prompt",
+                AgentActivityStatus.Idle, now.AddSeconds(-100), now.AddSeconds(-100)),
+            new AgentActivityItem("old-idle", ProviderId.Codex, "Old task", "Waiting for the next prompt",
+                AgentActivityStatus.Idle, now.AddSeconds(-130), now.AddSeconds(-130)),
+        });
 
-          Assert.Contains(snapshot.CompactItems, item => item.Id == "recent-idle");
-          var completed = Assert.Single(snapshot.CompactItems, item => item.Id == "completed-idle");
-          Assert.Equal(AgentActivityStatus.Completed, completed.Status);
-          Assert.Equal("Completed", completed.Step);
-          Assert.DoesNotContain(snapshot.CompactItems, item => item.Id == "old-idle");
+        Assert.Equal(3, snapshot.CompactItems.Count);
+        Assert.All(snapshot.CompactItems, item => Assert.Equal(AgentActivityStatus.Idle, item.Status));
+        Assert.Equal("recent-idle", snapshot.Primary?.Id);
     }
 
     [Theory]
@@ -314,6 +312,40 @@ public sealed class AgentActivityTests
             Assert.Equal("Run the build checks", item.Title);
             Assert.Equal("Ran tests", item.Step);
             Assert.Equal(AgentActivityStatus.Working, item.Status);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ClineSession_OlderThanHistoryWindow_RemainsIdleWhileProcessIsLive()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "taskbarquota-cline-old-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var lastActivity = DateTimeOffset.UtcNow.AddHours(-8);
+            var metadataPath = Path.Combine(root, "cline-old.json");
+            File.WriteAllText(metadataPath, $$"""
+                {
+                  "session_id": "cline-old",
+                  "started_at": "{{lastActivity:O}}",
+                  "updated_at": "{{lastActivity:O}}",
+                  "status": "running",
+                  "prompt": "Continue the long-running task"
+                }
+                """);
+            File.SetLastWriteTimeUtc(metadataPath, lastActivity.UtcDateTime);
+
+            var live = AgentActivityScanner.ReadClineForTesting(metadataPath, claimLive: true);
+            var closed = AgentActivityScanner.ReadClineForTesting(metadataPath, claimLive: false);
+
+            Assert.NotNull(live);
+            Assert.Equal(AgentActivityStatus.Idle, live.Status);
+            Assert.NotNull(closed);
+            Assert.Equal(AgentActivityStatus.Completed, closed.Status);
         }
         finally
         {
