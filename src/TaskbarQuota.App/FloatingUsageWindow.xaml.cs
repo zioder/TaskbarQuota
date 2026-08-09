@@ -47,6 +47,7 @@ public sealed partial class FloatingUsageWindow : Window
     private bool _shown;
     private bool _isDragging;
     private bool _isPointerTracking;
+    private bool _isTransferringPointerCapture;
     private POINT _pressCursor;
     private PointInt32 _pressWindowPos;
     private int _logicalWidth = DefaultLogicalWidth;
@@ -61,6 +62,7 @@ public sealed partial class FloatingUsageWindow : Window
     private readonly PointerEventHandler _rootPointerMoved;
     private readonly PointerEventHandler _rootPointerReleased;
     private readonly PointerEventHandler _rootPointerCanceled;
+    private readonly PointerEventHandler _rootPointerCaptureLost;
     private readonly PointerEventHandler _rootPointerWheelChanged;
 
     public event Action? Clicked;
@@ -108,6 +110,7 @@ public sealed partial class FloatingUsageWindow : Window
         _rootPointerMoved = Root_PointerMoved;
         _rootPointerReleased = Root_PointerReleased;
         _rootPointerCanceled = Root_PointerCanceled;
+        _rootPointerCaptureLost = Root_PointerCaptureLost;
         _rootPointerWheelChanged = Root_PointerWheelChanged;
 
         // Use the lower-level native controller rather than DesktopAcrylicBackdrop so this deliberately
@@ -145,7 +148,7 @@ public sealed partial class FloatingUsageWindow : Window
         Root.AddHandler(UIElement.PointerMovedEvent, _rootPointerMoved, handledEventsToo: true);
         Root.AddHandler(UIElement.PointerReleasedEvent, _rootPointerReleased, handledEventsToo: true);
         Root.AddHandler(UIElement.PointerCanceledEvent, _rootPointerCanceled, handledEventsToo: true);
-        Root.AddHandler(UIElement.PointerCaptureLostEvent, _rootPointerCanceled, handledEventsToo: true);
+        Root.AddHandler(UIElement.PointerCaptureLostEvent, _rootPointerCaptureLost, handledEventsToo: true);
         Root.AddHandler(UIElement.PointerWheelChangedEvent, _rootPointerWheelChanged, handledEventsToo: true);
         Root.RightTapped += Root_RightTapped;
 
@@ -165,7 +168,7 @@ public sealed partial class FloatingUsageWindow : Window
         Root.RemoveHandler(UIElement.PointerMovedEvent, _rootPointerMoved);
         Root.RemoveHandler(UIElement.PointerReleasedEvent, _rootPointerReleased);
         Root.RemoveHandler(UIElement.PointerCanceledEvent, _rootPointerCanceled);
-        Root.RemoveHandler(UIElement.PointerCaptureLostEvent, _rootPointerCanceled);
+        Root.RemoveHandler(UIElement.PointerCaptureLostEvent, _rootPointerCaptureLost);
         Root.RemoveHandler(UIElement.PointerWheelChangedEvent, _rootPointerWheelChanged);
         Root.RightTapped -= Root_RightTapped;
 
@@ -440,7 +443,12 @@ public sealed partial class FloatingUsageWindow : Window
                 return;
 
             _isDragging = true;
+            // A child Button normally owns capture at this point. Transferring it to Root raises
+            // PointerCaptureLost on that child synchronously; ignore only that expected routed event,
+            // while retaining normal cancellation when Root later loses capture for real.
+            _isTransferringPointerCapture = true;
             try { Root.CapturePointer(e.Pointer); } catch { }
+            finally { _isTransferringPointerCapture = false; }
             // Prevent the activity Open button (and quota tiles) from firing after a drag.
             ContentHost.SuppressNextClicks();
             e.Handled = true;
@@ -475,6 +483,14 @@ public sealed partial class FloatingUsageWindow : Window
             // only after routed input finishes so the next genuine single click is never discarded.
             DispatcherQueue.TryEnqueue(ContentHost.ClearSuppressedClicks);
         }
+    }
+
+    private void Root_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (_isTransferringPointerCapture && !ReferenceEquals(e.OriginalSource, Root))
+            return;
+
+        Root_PointerCanceled(sender, e);
     }
 
     private void Root_PointerCanceled(object sender, PointerRoutedEventArgs e)
