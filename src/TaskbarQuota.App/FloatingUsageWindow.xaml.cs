@@ -13,13 +13,13 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.Graphics;
 using Windows.UI;
-using Windows.UI.ViewManagement;
 using TaskbarQuota.AgentActivity;
 using TaskbarQuota.Controls;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Interop;
 using TaskbarQuota.Usage;
 using WinRT;
+using ThemeSettings = Microsoft.UI.System.ThemeSettings;
 
 namespace TaskbarQuota;
 
@@ -58,7 +58,7 @@ public sealed partial class FloatingUsageWindow : Window
     private bool _hasManualPosition;
     private DesktopAcrylicController? _acrylicController;
     private SystemBackdropConfiguration? _backdropConfiguration;
-    private AccessibilitySettings? _accessibilitySettings;
+    private ThemeSettings? _themeSettings;
 
     // Same instance for AddHandler/RemoveHandler; method-group casts would not match.
     private readonly PointerEventHandler _rootPointerPressed;
@@ -120,7 +120,6 @@ public sealed partial class FloatingUsageWindow : Window
         // non-activating HUD can keep its material active without stealing focus from the user's app.
         SystemBackdrop = null;
         ThemeService.Register(Root);
-        InitializeAcrylicBackdrop();
 
         var presenter = OverlappedPresenter.CreateForContextMenu();
         presenter.IsAlwaysOnTop = true;
@@ -132,6 +131,7 @@ public sealed partial class FloatingUsageWindow : Window
         _appWindow.IsShownInSwitchers = false;
         _appWindow.SetPresenter(presenter);
         _appWindow.Title = "TaskbarQuota";
+        InitializeAcrylicBackdrop();
 
         ContentHost.Clicked += OnContentClicked;
         ContentHost.ActivityClicked += item => ActivityClicked?.Invoke(item);
@@ -175,10 +175,10 @@ public sealed partial class FloatingUsageWindow : Window
         Root.RemoveHandler(UIElement.PointerWheelChangedEvent, _rootPointerWheelChanged);
         Root.RightTapped -= Root_RightTapped;
 
-        if (_accessibilitySettings is not null)
+        if (_themeSettings is not null)
         {
-            _accessibilitySettings.HighContrastChanged -= OnHighContrastChanged;
-            _accessibilitySettings = null;
+            _themeSettings.Changed -= OnThemeSettingsChanged;
+            _themeSettings = null;
         }
 
         if (_acrylicController is not null)
@@ -227,15 +227,15 @@ public sealed partial class FloatingUsageWindow : Window
             controller.SetSystemBackdropConfiguration(configuration);
             _backdropConfiguration = configuration;
 
-            _accessibilitySettings = new AccessibilitySettings();
-            _accessibilitySettings.HighContrastChanged += OnHighContrastChanged;
+            _themeSettings = ThemeSettings.CreateForWindowId(_appWindow!.Id);
+            _themeSettings.Changed += OnThemeSettingsChanged;
         }
         catch (Exception ex)
         {
-            if (_accessibilitySettings is not null)
+            if (_themeSettings is not null)
             {
-                _accessibilitySettings.HighContrastChanged -= OnHighContrastChanged;
-                _accessibilitySettings = null;
+                _themeSettings.Changed -= OnThemeSettingsChanged;
+                _themeSettings = null;
             }
             _acrylicController?.RemoveAllSystemBackdropTargets();
             _acrylicController?.Dispose();
@@ -293,7 +293,7 @@ public sealed partial class FloatingUsageWindow : Window
             ? SystemBackdropTheme.Light
             : SystemBackdropTheme.Dark;
         _backdropConfiguration.IsInputActive = true;
-        _backdropConfiguration.IsHighContrast = _accessibilitySettings?.HighContrast == true;
+        _backdropConfiguration.IsHighContrast = _themeSettings?.HighContrast == true;
         _backdropConfiguration.HighContrastBackgroundColor = tint;
     }
 
@@ -500,7 +500,7 @@ public sealed partial class FloatingUsageWindow : Window
         }
     }
 
-    private void OnHighContrastChanged(AccessibilitySettings sender, object args)
+    private void OnThemeSettingsChanged(ThemeSettings sender, object args)
         => DispatcherQueue.TryEnqueue(ApplyAcrylicMaterial);
 
     private void Root_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
