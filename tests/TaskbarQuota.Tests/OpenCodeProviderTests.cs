@@ -225,12 +225,21 @@ public class OpenCodeProviderTests
     }
 
     [Fact]
-    public void ExtractWindow_WithFractionalPercent_NormalizesToPercentage()
+    public void ExtractWindow_WithFractionalPercent_PreservesPercentage()
     {
         var text = "rollingUsage,usagePercent:0.653,resetInSec:14400";
         var window = OpenCodeProvider.ExtractWindow(text, 300, "rollingUsage");
         Assert.NotNull(window);
-        Assert.Equal(65.3, window!.UsedPercent, 1);
+        Assert.Equal(0.653, window!.UsedPercent, 3);
+    }
+
+    [Fact]
+    public void ExtractWindow_WithOnePercent_PreservesOnePercent()
+    {
+        var text = "monthlyUsage,usagePercent:1,resetInSec:2592000";
+        var window = OpenCodeProvider.ExtractWindow(text, 43200, "monthlyUsage");
+        Assert.NotNull(window);
+        Assert.Equal(1, window!.UsedPercent);
     }
 
     [Fact]

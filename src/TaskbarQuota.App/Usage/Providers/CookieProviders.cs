@@ -551,7 +551,9 @@ namespace TaskbarQuota.Usage.Providers
                 if (used is { } u && limit is { } l && l > 0) pct = u / l * 100.0;
             }
             if (pct is null) return null;
-            double p = pct.Value <= 1.0 ? pct.Value * 100.0 : pct.Value;
+            // OpenCode's usagePercent values are already percentages in the 0-100 range.
+            // Treating values <= 1 as fractions turns a legitimate 1% reading into 100%.
+            double p = pct.Value;
             var resetAt = ResetAt(obj);
             return new RateWindow(Math.Clamp(p, 0, 100), windowMinutes, resetAt, resetAt is null ? null : FormatTimeUntil(resetAt.Value));
         }
@@ -570,7 +572,9 @@ namespace TaskbarQuota.Usage.Providers
                 string resetPattern = $@"{Regex.Escape(name)}[^}}]*?(?:resetInSec|resetInSeconds|resetSeconds|reset_sec|reset_in_sec|resetsInSec|resetsInSeconds|resetIn|resetSec)\s*[:=]\s*([0-9]+)";
                 var resetSeconds = ExtractNumber(resetPattern, text);
                 DateTimeOffset? resetAt = resetSeconds is null ? null : DateTimeOffset.Now.AddSeconds(Math.Max(0, resetSeconds.Value));
-                var p = pct.Value <= 1.0 ? pct.Value * 100.0 : pct.Value;
+                // OpenCode's usagePercent values are already percentages in the 0-100 range.
+                // Treating values <= 1 as fractions turns a legitimate 1% reading into 100%.
+                var p = pct.Value;
                 return new RateWindow(Math.Clamp(p, 0, 100), windowMinutes, resetAt, resetAt is null ? null : FormatTimeUntil(resetAt.Value));
             }
             return null;
