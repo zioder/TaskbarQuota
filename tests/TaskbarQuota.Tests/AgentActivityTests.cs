@@ -320,6 +320,40 @@ public sealed class AgentActivityTests
     }
 
     [Fact]
+    public void ClineSession_OlderThanHistoryWindow_RemainsIdleWhileProcessIsLive()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "taskbarquota-cline-old-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var lastActivity = DateTimeOffset.UtcNow.AddHours(-8);
+            var metadataPath = Path.Combine(root, "cline-old.json");
+            File.WriteAllText(metadataPath, $$"""
+                {
+                  "session_id": "cline-old",
+                  "started_at": "{{lastActivity:O}}",
+                  "updated_at": "{{lastActivity:O}}",
+                  "status": "running",
+                  "prompt": "Continue the long-running task"
+                }
+                """);
+            File.SetLastWriteTimeUtc(metadataPath, lastActivity.UtcDateTime);
+
+            var live = AgentActivityScanner.ReadClineForTesting(metadataPath, claimLive: true);
+            var closed = AgentActivityScanner.ReadClineForTesting(metadataPath, claimLive: false);
+
+            Assert.NotNull(live);
+            Assert.Equal(AgentActivityStatus.Idle, live.Status);
+            Assert.NotNull(closed);
+            Assert.Equal(AgentActivityStatus.Completed, closed.Status);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void KimiSession_ExtractsTitleToolActionAndSubagentCount()
     {
         var root = Path.Combine(Path.GetTempPath(), "taskbarquota-kimi-" + Guid.NewGuid().ToString("N"));

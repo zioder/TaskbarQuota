@@ -84,7 +84,7 @@ internal sealed class AgentActivityScanner
         files.RemoveAll(file => file.Provider == ProviderId.Copilot);
         files.AddRange(copilotFiles);
 
-        AddRememberedCandidates(files);
+        AddRememberedCandidates(files, liveProviders);
         var candidates = SelectCandidates(files);
         RememberCandidates(candidates);
 
@@ -158,7 +158,8 @@ internal sealed class AgentActivityScanner
     }
 
     private void AddRememberedCandidates(
-        List<(ProviderId Provider, string Path, DateTimeOffset Modified)> files)
+        List<(ProviderId Provider, string Path, DateTimeOffset Modified)> files,
+        IReadOnlyDictionary<ProviderId, int> liveProviders)
     {
         lock (_candidateGate)
         {
@@ -172,7 +173,8 @@ internal sealed class AgentActivityScanner
                 }
                 var modifiedUtc = File.GetLastWriteTimeUtc(path);
                 var modified = new DateTimeOffset(modifiedUtc, TimeSpan.Zero).ToLocalTime();
-                if (DateTimeOffset.Now - modified > RecentWindow)
+                if (DateTimeOffset.Now - modified > RecentWindow
+                    && !liveProviders.ContainsKey(candidate.Provider))
                 {
                     _knownCandidates.Remove(path);
                     continue;
@@ -218,24 +220,55 @@ internal sealed class AgentActivityScanner
             .OrderByDescending(file => file.Modified)
             .ToArray();
 
+    private sealed class ProcessBackedCandidateAccumulator
+    {
+        private readonly List<(ProviderId Provider, string Path, DateTimeOffset Modified)> _output;
+        private (ProviderId Provider, string Path, DateTimeOffset Modified)? _latest;
+        private bool _addedRecent;
+
+        public ProcessBackedCandidateAccumulator(
+            List<(ProviderId Provider, string Path, DateTimeOffset Modified)> output)
+            => _output = output;
+
+        public void Add(ProviderId provider, string path, DateTime modifiedUtc)
+        {
+            var candidate = (provider, path,
+                new DateTimeOffset(modifiedUtc, TimeSpan.Zero).ToLocalTime());
+            if (_latest is null || candidate.Item3 > _latest.Value.Modified)
+                _latest = candidate;
+            if (DateTime.UtcNow - modifiedUtc <= RecentWindow)
+            {
+                _output.Add(candidate);
+                _addedRecent = true;
+            }
+        }
+
+        public void Complete()
+        {
+            if (!_addedRecent && _latest is { } latest)
+                _output.Add(latest);
+        }
+    }
+
     private void AddRecent(List<(ProviderId, string, DateTimeOffset)> output, string root,
         ProviderId provider, CancellationToken cancellationToken)
     {
         if (!Directory.Exists(root))
             return;
 
+        var candidates = new ProcessBackedCandidateAccumulator(output);
         try
         {
             foreach (var path in Directory.EnumerateFiles(root, "*.jsonl", SearchOption.AllDirectories))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var modified = File.GetLastWriteTimeUtc(path);
-                if (DateTime.UtcNow - modified <= RecentWindow)
-                    output.Add((provider, path, new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
+                candidates.Add(provider, path, modified);
             }
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+        candidates.Complete();
     }
 
     private void AddClineSessions(List<(ProviderId, string, DateTimeOffset)> output,
@@ -249,6 +282,7 @@ internal sealed class AgentActivityScanner
         if (!Directory.Exists(sessions))
             return;
 
+        var candidates = new ProcessBackedCandidateAccumulator(output);
         try
         {
             foreach (var path in Directory.EnumerateFiles(sessions, "*.json", SearchOption.AllDirectories))
@@ -268,18 +302,18 @@ internal sealed class AgentActivityScanner
                         modified = messagesModified;
                 }
 
-                if (DateTime.UtcNow - modified <= RecentWindow)
-                    output.Add((ProviderId.Cline, path,
-                        new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
+                candidates.Add(ProviderId.Cline, path, modified);
             }
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+        candidates.Complete();
     }
 
     private void AddKimiSessions(List<(ProviderId, string, DateTimeOffset)> output,
         CancellationToken cancellationToken)
     {
+        var candidates = new ProcessBackedCandidateAccumulator(output);
         foreach (var root in KimiHomeCandidates())
         {
             var sessions = Path.Combine(root, "sessions");
@@ -318,14 +352,13 @@ internal sealed class AgentActivityScanner
                         }
                     }
 
-                    if (DateTime.UtcNow - modified <= RecentWindow)
-                        output.Add((ProviderId.Kimi, statePath,
-                            new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
+                    candidates.Add(ProviderId.Kimi, statePath, modified);
                 }
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
         }
+        candidates.Complete();
     }
 
     private IEnumerable<string> KimiHomeCandidates()
@@ -345,6 +378,7 @@ internal sealed class AgentActivityScanner
     private void AddCopilotSessions(List<(ProviderId, string, DateTimeOffset)> output,
         CancellationToken cancellationToken)
     {
+        var candidates = new ProcessBackedCandidateAccumulator(output);
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         var configuredUserData = Environment.GetEnvironmentVariable("VSCODE_USER_DATA_DIR");
         var userRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -394,17 +428,14 @@ internal sealed class AgentActivityScanner
                             continue;
 
                         var modified = File.GetLastWriteTimeUtc(path);
-                        if (DateTime.UtcNow - modified <= RecentWindow)
-                        {
-                            output.Add((ProviderId.Copilot, path,
-                                new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
-                        }
+                        candidates.Add(ProviderId.Copilot, path, modified);
                     }
                 }
             }
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+        candidates.Complete();
     }
 
     internal static bool TryReadCopilotSession(string path, DateTimeOffset modified, bool claimLive,
@@ -693,6 +724,7 @@ internal sealed class AgentActivityScanner
         if (!Directory.Exists(root))
             return;
 
+        var candidates = new ProcessBackedCandidateAccumulator(output);
         try
         {
             foreach (var summaryPath in Directory.EnumerateFiles(root, "summary.json", SearchOption.AllDirectories))
@@ -714,13 +746,12 @@ internal sealed class AgentActivityScanner
                     }
                 }
 
-                if (DateTime.UtcNow - modified <= RecentWindow)
-                    output.Add((ProviderId.Grok, summaryPath,
-                        new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
+                candidates.Add(ProviderId.Grok, summaryPath, modified);
             }
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+        candidates.Complete();
     }
 
     private void AddAntigravityDatabases(List<(ProviderId, string, DateTimeOffset)> output,
@@ -731,6 +762,7 @@ internal sealed class AgentActivityScanner
         if (!Directory.Exists(conversations))
             return;
 
+        var candidates = new ProcessBackedCandidateAccumulator(output);
         try
         {
             foreach (var path in Directory.EnumerateFiles(conversations, "*.db", SearchOption.TopDirectoryOnly))
@@ -745,13 +777,12 @@ internal sealed class AgentActivityScanner
                         modified = walModified;
                 }
 
-                if (DateTime.UtcNow - modified <= RecentWindow)
-                    output.Add((ProviderId.Antigravity, path,
-                        new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
+                candidates.Add(ProviderId.Antigravity, path, modified);
             }
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+        candidates.Complete();
     }
 
     private static string GetAntigravityCliHome()
@@ -777,19 +808,19 @@ internal sealed class AgentActivityScanner
         if (!Directory.Exists(root))
             return;
 
+        var candidates = new ProcessBackedCandidateAccumulator(output);
         try
         {
             foreach (var path in Directory.EnumerateFiles(root, "transcript.jsonl", SearchOption.AllDirectories))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var modified = File.GetLastWriteTimeUtc(path);
-                if (DateTime.UtcNow - modified <= RecentWindow)
-                    output.Add((ProviderId.Antigravity, path,
-                        new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
+                candidates.Add(ProviderId.Antigravity, path, modified);
             }
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+        candidates.Complete();
     }
 
     private static bool IsAntigravityGuiTranscript(string path)
@@ -894,7 +925,7 @@ internal sealed class AgentActivityScanner
                 "parent_conversation_id", "parentConversationId", "parent_thread_id");
             var lastActivity = Max(modified, metadata?.UpdatedAt ?? modified);
             var fresh = DateTimeOffset.Now - lastActivity < BusyWindow;
-            var live = claimLive && modified > DateTimeOffset.Now - RecentWindow;
+            var live = claimLive;
             var waiting = AntigravityContainsAny(rows.Select(row => row.Permissions),
                 "permission", "approval", "confirmation", "waiting_for_user", "request_user_input")
                 || AntigravityContainsAny(blobs,
@@ -966,7 +997,7 @@ internal sealed class AgentActivityScanner
 
             var lastActivity = Max(modified, info.LastActivity ?? modified);
             var fresh = DateTimeOffset.Now - lastActivity < BusyWindow;
-            var live = claimLive && modified > DateTimeOffset.Now - RecentWindow;
+            var live = claimLive;
             var status = !live
                 ? info.State == TranscriptState.Failed ? AgentActivityStatus.Failed : AgentActivityStatus.Completed
                 : info.State == TranscriptState.Waiting
@@ -1424,8 +1455,8 @@ internal sealed class AgentActivityScanner
                             modified = companionModified;
                     }
                 }
-                if (DateTime.UtcNow - modified <= RecentWindow)
-                    output.Add((ProviderId.Zai, path, new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
+                output.Add((ProviderId.Zai, path,
+                    new DateTimeOffset(modified, TimeSpan.Zero).ToLocalTime()));
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
@@ -1453,11 +1484,12 @@ internal sealed class AgentActivityScanner
                 SELECT id, parent_id, title, time_created, time_updated,
                        COALESCE((SELECT status FROM session_target st WHERE st.session_id = session.id), '')
                 FROM session
-                WHERE COALESCE(time_updated, time_created, 0) >= $cutoff
+                WHERE $claimLive = 1 OR COALESCE(time_updated, time_created, 0) >= $cutoff
                 ORDER BY time_updated DESC, time_created DESC
                 LIMIT 80;
                 """;
             command.Parameters.AddWithValue("$cutoff", DateTimeOffset.Now.Add(-RecentWindow).ToUnixTimeMilliseconds());
+            command.Parameters.AddWithValue("$claimLive", claimLive ? 1 : 0);
 
             var sessions = new List<ZcodeSessionRow>();
             using (var reader = command.ExecuteReader())
@@ -1609,7 +1641,7 @@ internal sealed class AgentActivityScanner
             bool freshAgentEvent = info.LastActivity is { } activity && DateTimeOffset.Now - activity < BusyWindow;
             // One desktop provider process can host several concurrent threads. The process claim marks
             // the session live; transcript timestamps then distinguish working from quiet/idle.
-            bool live = claimLive && modified > DateTimeOffset.Now - RecentWindow;
+            bool live = claimLive;
             bool busy = live && freshAgentEvent;
             // Process liveness is authoritative: a quiet live process is idle, not completed. This is the
             // same busy/idle/done model used by agent-notch and avoids treating Claude's interactive shell
@@ -1693,7 +1725,7 @@ internal sealed class AgentActivityScanner
             title = FirstNonEmpty(title, SummarizeTitle(prompt) ?? "Cline");
             model = FirstNonEmpty(model, tail.Model);
             var lastActivity = Max(modified, tail.LastActivity ?? modified);
-            var live = claimLive && modified > DateTimeOffset.Now - RecentWindow;
+            var live = claimLive;
             var fresh = DateTimeOffset.Now - lastActivity < BusyWindow;
             var failed = statusText.Contains("fail", StringComparison.Ordinal)
                 || statusText.Contains("error", StringComparison.Ordinal)
@@ -1871,7 +1903,7 @@ internal sealed class AgentActivityScanner
                 SummarizeTitle(tail.Prompt) ?? "",
                 "Kimi");
             var lastActivity = Max(modified, tail.LastActivity ?? modified);
-            var live = claimLive && modified > DateTimeOffset.Now - RecentWindow;
+            var live = claimLive;
             var fresh = DateTimeOffset.Now - lastActivity < BusyWindow;
             var status = !live
                 ? tail.State == TranscriptState.Failed ? AgentActivityStatus.Failed : AgentActivityStatus.Completed
@@ -2040,7 +2072,7 @@ internal sealed class AgentActivityScanner
             var lastActivity = Max(modified, summaryUpdatedAt ?? modified,
                 historyInfo.LastActivity ?? modified, eventInfo.LastActivity ?? modified);
             var fresh = DateTimeOffset.Now - lastActivity < BusyWindow;
-            var live = claimLive && modified > DateTimeOffset.Now - RecentWindow;
+            var live = claimLive;
             var state = eventInfo.State != TranscriptState.Unknown ? eventInfo.State : historyInfo.State;
             var status = !live
                 ? state == TranscriptState.Failed ? AgentActivityStatus.Failed : AgentActivityStatus.Completed
@@ -2443,11 +2475,12 @@ internal sealed class AgentActivityScanner
             command.CommandText = """
                 SELECT id, parent_id, title, model, time_created, time_updated
                 FROM session
-                WHERE COALESCE(time_updated, time_created, 0) >= $cutoff
+                WHERE $claimLive = 1 OR COALESCE(time_updated, time_created, 0) >= $cutoff
                 ORDER BY time_updated DESC, time_created DESC
                 LIMIT 80;
                 """;
             command.Parameters.AddWithValue("$cutoff", DateTimeOffset.Now.Add(-RecentWindow).ToUnixTimeMilliseconds());
+            command.Parameters.AddWithValue("$claimLive", claimLive ? 1 : 0);
 
             var sessions = new List<OpenCodeSessionRow>();
             using (var reader = command.ExecuteReader())
