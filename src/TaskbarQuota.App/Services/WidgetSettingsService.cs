@@ -49,10 +49,10 @@ public static class WidgetSettingsService
     private static readonly string WidgetDisplayModePath =
         Path.Combine(AppStorage.AppDataDirectory, "widget-display-mode.txt");
 
-    private static readonly string WidgetSurfaceModePath =
+    private static string WidgetSurfaceModePath =>
         Path.Combine(AppStorage.AppDataDirectory, "widget-surface-mode.txt");
 
-    private static readonly string FloatingOpacityPath =
+    private static string FloatingOpacityPath =>
         Path.Combine(AppStorage.AppDataDirectory, "floating-opacity.txt");
 
     private static readonly string PercentageDisplayModePath =
@@ -113,6 +113,19 @@ public static class WidgetSettingsService
     public static event EventHandler? Changed;
     public static event EventHandler? DashboardCompositionChanged;
     public static event EventHandler? PercentageModeChanged;
+
+    internal static void ReloadSurfaceSettingsForTesting()
+    {
+        CurrentSurface = LoadWidgetSurfaceMode();
+        FloatingOpacity = LoadFloatingOpacity();
+    }
+
+    internal static void RestoreSurfaceSettingsForTesting(
+        WidgetSurfaceMode surface, double floatingOpacity)
+    {
+        CurrentSurface = surface;
+        FloatingOpacity = floatingOpacity;
+    }
 
     public static void Apply(WidgetDisplayMode mode)
     {

@@ -2,33 +2,37 @@ using TaskbarQuota.Services;
 
 namespace TaskbarQuota.Tests;
 
+[Collection(WidgetRowSettingsCollection.Name)]
 public class WidgetSurfaceModeTests
 {
     /// <summary>
     /// WidgetSettingsService is process-global. Capture and restore surface/opacity so these tests
     /// cannot leak into others (or observe another test's mutations under parallel xUnit).
     /// </summary>
-    private static void WithIsolatedSurfaceSettings(Action body)
+    private static void WithIsolatedSurfaceSettings(Action<string> body)
     {
         var previousSurface = WidgetSettingsService.CurrentSurface;
         var previousOpacity = WidgetSettingsService.FloatingOpacity;
+        var directory = Path.Combine(Path.GetTempPath(), "taskbarquota-surface-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
         try
         {
-            body();
+            using var storageOverride = AppStorage.OverrideAppDataDirectoryForTesting(directory);
+            WidgetSettingsService.ReloadSurfaceSettingsForTesting();
+            body(directory);
         }
         finally
         {
-            WidgetSettingsService.ApplySurface(previousSurface);
-            WidgetSettingsService.ApplyFloatingOpacity(previousOpacity);
+            WidgetSettingsService.RestoreSurfaceSettingsForTesting(previousSurface, previousOpacity);
+            Directory.Delete(directory, recursive: true);
         }
     }
 
     [Fact]
     public void Default_surface_is_taskbar()
     {
-        WithIsolatedSurfaceSettings(() =>
+        WithIsolatedSurfaceSettings(directory =>
         {
-            WidgetSettingsService.ApplySurface(WidgetSurfaceMode.Taskbar);
             Assert.Equal(WidgetSurfaceMode.Taskbar, WidgetSettingsService.CurrentSurface);
         });
     }
@@ -36,7 +40,7 @@ public class WidgetSurfaceModeTests
     [Fact]
     public void ApplySurface_switches_to_floating_and_back()
     {
-        WithIsolatedSurfaceSettings(() =>
+        WithIsolatedSurfaceSettings(_ =>
         {
             WidgetSettingsService.ApplySurface(WidgetSurfaceMode.Taskbar);
             Assert.Equal(WidgetSurfaceMode.Taskbar, WidgetSettingsService.CurrentSurface);
@@ -44,6 +48,10 @@ public class WidgetSurfaceModeTests
             WidgetSettingsService.ApplySurface(WidgetSurfaceMode.Floating);
             Assert.Equal(WidgetSurfaceMode.Floating, WidgetSettingsService.CurrentSurface);
             Assert.Equal(int.MaxValue, PinBudgetService.AvailableLogicalWidth);
+            Assert.Equal("1", File.ReadAllText(Path.Combine(directory, "widget-surface-mode.txt")));
+
+            WidgetSettingsService.ReloadSurfaceSettingsForTesting();
+            Assert.Equal(WidgetSurfaceMode.Floating, WidgetSettingsService.CurrentSurface);
 
             WidgetSettingsService.ApplySurface(WidgetSurfaceMode.Taskbar);
             Assert.Equal(WidgetSurfaceMode.Taskbar, WidgetSettingsService.CurrentSurface);
@@ -53,7 +61,7 @@ public class WidgetSurfaceModeTests
     [Fact]
     public void ApplySurface_same_value_is_noop()
     {
-        WithIsolatedSurfaceSettings(() =>
+        WithIsolatedSurfaceSettings(_ =>
         {
             WidgetSettingsService.ApplySurface(WidgetSurfaceMode.Taskbar);
             int changed = 0;
@@ -74,9 +82,13 @@ public class WidgetSurfaceModeTests
     [Fact]
     public void ApplyFloatingOpacity_clamps_and_round_trips()
     {
-        WithIsolatedSurfaceSettings(() =>
+        WithIsolatedSurfaceSettings(directory =>
         {
             WidgetSettingsService.ApplyFloatingOpacity(0.5);
+            Assert.Equal(0.5, WidgetSettingsService.FloatingOpacity, precision: 2);
+            Assert.Equal("50", File.ReadAllText(Path.Combine(directory, "floating-opacity.txt")));
+
+            WidgetSettingsService.ReloadSurfaceSettingsForTesting();
             Assert.Equal(0.5, WidgetSettingsService.FloatingOpacity, precision: 2);
 
             WidgetSettingsService.ApplyFloatingOpacity(0.1); // below min
