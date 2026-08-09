@@ -32,7 +32,7 @@ namespace TaskbarQuota.ViewModels
         public Brush PercentForeground { get; }
         public bool IsWidgetVisible { get; internal set; }
         public bool IsWidgetToggleEnabled { get; internal set; }
-        public string WidgetToggleName => $"Show {Label} in taskbar widget";
+        public string WidgetToggleName => $"Show {Label} in usage widget";
 
         public BarViewModel(ProviderId providerId, string widgetRowId, string label, RateWindow w)
         {
@@ -69,7 +69,7 @@ namespace TaskbarQuota.ViewModels
         public double MutedOpacity { get; }
         public bool IsWidgetVisible { get; internal set; }
         public bool IsWidgetToggleEnabled { get; internal set; }
-        public string WidgetToggleName => $"Show {Label} in taskbar widget";
+        public string WidgetToggleName => $"Show {Label} in usage widget";
 
         public TextMetricViewModel(ProviderId providerId, string widgetRowId, string label, string value, bool muted = false)
         {
@@ -96,7 +96,7 @@ namespace TaskbarQuota.ViewModels
         public string Label { get; }
         public bool IsWidgetVisible { get; internal set; }
         public bool IsWidgetToggleEnabled { get; internal set; }
-        public string WidgetToggleName => $"Show {Label} in taskbar widget";
+        public string WidgetToggleName => $"Show {Label} in usage widget";
 
         public WidgetRowToggleViewModel(ProviderId providerId, WidgetRowOption option)
         {
@@ -232,9 +232,9 @@ namespace TaskbarQuota.ViewModels
             ActiveVisibility = isActive ? Visibility.Visible : Visibility.Collapsed;
             ProviderId = r.Id;
             IsProviderWidgetVisible = WidgetSettingsService.IsProviderVisible(r.Id);
-            ProviderWidgetToggleName = $"Show {DisplayName} in taskbar widget";
+            ProviderWidgetToggleName = $"Show {DisplayName} in usage widget";
             IsProviderPinned = WidgetSettingsService.IsProviderPinned(r.Id);
-            ProviderPinToggleName = $"Pin {DisplayName} to the taskbar widget";
+            ProviderPinToggleName = $"Pin {DisplayName} in the usage widget";
 
             var bars = new List<BarViewModel>();
             var textMetrics = new List<TextMetricViewModel>();

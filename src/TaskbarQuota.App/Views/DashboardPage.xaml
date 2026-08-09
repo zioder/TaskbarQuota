@@ -34,7 +34,7 @@
                                   Padding="6"
                                   MinWidth="32"
                                   MinHeight="32"
-                                  ToolTipService.ToolTip="Show in taskbar widget"
+                                  ToolTipService.ToolTip="Show in usage widget"
                                   Click="WidgetRowVisibility_Click">
                         <FontIcon Glyph="&#xE890;" FontSize="12"/>
                     </ToggleButton>
@@ -79,7 +79,7 @@
                               Padding="6"
                               MinWidth="32"
                               MinHeight="32"
-                              ToolTipService.ToolTip="Show in taskbar widget"
+                              ToolTipService.ToolTip="Show in usage widget"
                               Click="WidgetRowVisibility_Click">
                     <FontIcon Glyph="&#xE890;" FontSize="12"/>
                 </ToggleButton>
@@ -218,7 +218,7 @@
                                           Padding="6"
                                           MinWidth="32"
                                           MinHeight="32"
-                                          ToolTipService.ToolTip="Show in taskbar widget"
+                                          ToolTipService.ToolTip="Show in usage widget"
                                           Click="WidgetRowVisibility_Click">
                                 <FontIcon Glyph="&#xE890;" FontSize="12"/>
                             </ToggleButton>
@@ -280,7 +280,7 @@
                                           Padding="6"
                                           MinWidth="32"
                                           MinHeight="32"
-                                          ToolTipService.ToolTip="Show in taskbar widget"
+                                          ToolTipService.ToolTip="Show in usage widget"
                                           Click="WidgetRowVisibility_Click">
                                 <FontIcon Glyph="&#xE890;" FontSize="12"/>
                             </ToggleButton>
@@ -343,7 +343,7 @@
                                           Padding="6"
                                           MinWidth="32"
                                           MinHeight="32"
-                                          ToolTipService.ToolTip="Show in taskbar widget"
+                                          ToolTipService.ToolTip="Show in usage widget"
                                           Click="WidgetRowVisibility_Click">
                                 <FontIcon Glyph="&#xE890;" FontSize="12"/>
                             </ToggleButton>
@@ -556,7 +556,7 @@
                                           Tag="{x:Bind ViewModel.SelectedCard, Mode=OneWay}"
                                           VerticalAlignment="Center"
                                           MinWidth="76"
-                                          ToolTipService.ToolTip="Keep this provider on the taskbar even when another tool is active"
+                                          ToolTipService.ToolTip="Keep this provider in the usage widget even when another tool is active"
                                           Click="ProviderPinToggle_Click">
                                 <StackPanel Orientation="Horizontal" Spacing="6">
                                     <FontIcon Glyph="&#xE718;" FontSize="14"/>

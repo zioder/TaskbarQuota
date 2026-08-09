@@ -64,7 +64,7 @@
             </tk:SettingsCard>
 
             <tk:SettingsCard Header="Hide widget when no AI app is focused"
-                             Description="Fade the active provider's tile out when you switch to a browser or any other app, and bring it back when you return. Pinned providers always stay on the taskbar.">
+                             Description="Fade the active provider's tile out when you switch to a browser or any other app, and bring it back when you return. Pinned providers always stay visible.">
                 <tk:SettingsCard.HeaderIcon>
                     <FontIcon Glyph="&#xE890;"/>
                 </tk:SettingsCard.HeaderIcon>
@@ -118,7 +118,7 @@
                               Toggled="OnAutoHideUnavailableToggled"/>
             </tk:SettingsCard>
 
-            <TextBlock Text="Choose which providers appear in the dashboard and taskbar widget."
+            <TextBlock Text="Choose which providers appear in the dashboard and usage widget."
                        Opacity="0.7"
                        Style="{StaticResource CaptionTextBlockStyle}"
                        TextWrapping="Wrap"
@@ -127,7 +127,7 @@
             <StackPanel x:Name="ProviderSettingsPanel" Spacing="4"/>
 
             <TextBlock Text="Behavior" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,2"/>
-            <tk:SettingsCard Header="Open at startup" Description="Start TaskbarQuota with Windows and show only the taskbar widget.">
+            <tk:SettingsCard Header="Open at startup" Description="Start TaskbarQuota with Windows and show only the usage widget.">
                 <tk:SettingsCard.HeaderIcon>
                     <FontIcon Glyph="&#xE7F4;"/>
                 </tk:SettingsCard.HeaderIcon>
@@ -196,7 +196,7 @@
                        Opacity="0.7" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" Margin="0,0,0,4"/>
 
             <TextBlock Text="About" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,2"/>
-            <tk:SettingsCard Description="Native WinUI taskbar widget for AI coding-tool usage.">
+            <tk:SettingsCard Description="Native WinUI widget for AI coding-tool usage.">
                 <tk:SettingsCard.Header>
                     <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
                         <Border Width="40" Height="40"

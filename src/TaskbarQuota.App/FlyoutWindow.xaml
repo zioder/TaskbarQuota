@@ -48,9 +48,9 @@
                               MinWidth="76"
                               VerticalAlignment="Center"
                               Click="ActivityWidgetButton_Click"
-                              AutomationProperties.Name="Show agent activity in taskbar widget"
+                              AutomationProperties.Name="Show agent activity in usage widget"
                               AutomationProperties.AutomationId="FlyoutActivityWidgetButton"
-                              ToolTipService.ToolTip="Show agent activity in taskbar widget">
+                              ToolTipService.ToolTip="Show agent activity in usage widget">
                     <TextBlock Text="Activity Widget"/>
                 </ToggleButton>
             </Grid>

@@ -272,9 +272,9 @@ namespace TaskbarQuota
             ActivityWidgetButton.IsEnabled = monitoringEnabled;
             ActivityMonitoringButton.IsChecked = monitoringEnabled;
             ToolTipService.SetToolTip(ActivityWidgetButton,
-                widgetEnabled ? "Hide agent activity from taskbar widget" : "Show agent activity in taskbar widget");
+                widgetEnabled ? "Hide agent activity from usage widget" : "Show agent activity in usage widget");
             AutomationProperties.SetName(ActivityWidgetButton,
-                widgetEnabled ? "Hide agent activity from taskbar widget" : "Show agent activity in taskbar widget");
+                widgetEnabled ? "Hide agent activity from usage widget" : "Show agent activity in usage widget");
             ToolTipService.SetToolTip(ActivityMonitoringButton,
                 monitoringEnabled ? "Stop monitoring local agent activity" : "Start monitoring local agent activity");
             AutomationProperties.SetName(ActivityMonitoringButton,
@@ -781,7 +781,7 @@ namespace TaskbarQuota
             if (_providerStripItems.TryGetValue(id, out var item))
                 item.Pin.Visibility = pinned ? Visibility.Visible : Visibility.Collapsed;
 
-            ToolTipService.SetToolTip(button, pinned ? $"{displayName} — pinned to the taskbar" : displayName);
+            ToolTipService.SetToolTip(button, pinned ? $"{displayName} — pinned in the usage widget" : displayName);
         }
 
         /// <summary>
