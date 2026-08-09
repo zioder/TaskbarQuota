@@ -23,20 +23,12 @@ public static class PinBudgetService
     public static event Action<IReadOnlyList<ProviderId>>? ProvidersUnpinned;
 
     /// <summary>
-    /// Free width for the floating surface pin budget, in logical px of <em>tile content</em>
-    /// (not including the floating window's chrome padding). Wide enough that pins are limited by
-    /// <see cref="UsageCoordinator.MaxDisplayedWidgetTiles"/>, not by a tray gap.
-    /// Matches what <c>QuotaWidgetContent</c> sums when sizing tiles; host padding is applied outside this.
-    /// </summary>
-    public const int FloatingAvailableLogicalWidth = 1200;
-
-    /// <summary>
-    /// Free width the pin budget uses for the current surface: measured taskbar span, or a large fixed
-    /// budget when usage is shown in the floating window.
+    /// Free width the pin budget uses for the current surface. Floating mode is constrained only by the
+    /// tile cap; its host scrolls horizontally when content is wider than the monitor work area.
     /// </summary>
     public static int AvailableLogicalWidth
         => WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Floating
-            ? FloatingAvailableLogicalWidth
+            ? int.MaxValue
             : Taskbar.TaskbarSpace.AvailableLogicalWidth;
 
     // Tile chrome, mirroring TaskBarWidget: 4px of margin per tile and a 7px divider between neighbours.

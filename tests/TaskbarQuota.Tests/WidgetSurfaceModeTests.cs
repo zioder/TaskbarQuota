@@ -43,7 +43,7 @@ public class WidgetSurfaceModeTests
 
             WidgetSettingsService.ApplySurface(WidgetSurfaceMode.Floating);
             Assert.Equal(WidgetSurfaceMode.Floating, WidgetSettingsService.CurrentSurface);
-            Assert.Equal(PinBudgetService.FloatingAvailableLogicalWidth, PinBudgetService.AvailableLogicalWidth);
+            Assert.Equal(int.MaxValue, PinBudgetService.AvailableLogicalWidth);
 
             WidgetSettingsService.ApplySurface(WidgetSurfaceMode.Taskbar);
             Assert.Equal(WidgetSurfaceMode.Taskbar, WidgetSettingsService.CurrentSurface);
