@@ -72,6 +72,7 @@ public sealed partial class QuotaWidgetContent : UserControl
         ActivitySummary.IsWheelNavigationEnabled = false;
         _activityEmptySnapshotTimer = new DispatcherTimer { Interval = EmptyActivityGrace };
         _activityEmptySnapshotTimer.Tick += ActivityEmptySnapshotTimer_Tick;
+        ActualThemeChanged += (_, _) => RecomputeLayout();
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
     }

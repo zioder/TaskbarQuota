@@ -164,7 +164,10 @@ namespace TaskbarQuota.Controls
             ActualThemeChanged += (_, _) =>
             {
                 if (UseApplicationChromeColors)
+                {
                     ApplyTaskbarForeground();
+                    SetBars();
+                }
             };
             Tapped += (_, _) =>
             {
