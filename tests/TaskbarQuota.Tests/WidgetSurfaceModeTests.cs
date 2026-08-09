@@ -40,7 +40,7 @@ public class WidgetSurfaceModeTests
     [Fact]
     public void ApplySurface_switches_to_floating_and_back()
     {
-        WithIsolatedSurfaceSettings(_ =>
+        WithIsolatedSurfaceSettings(directory =>
         {
             WidgetSettingsService.ApplySurface(WidgetSurfaceMode.Taskbar);
             Assert.Equal(WidgetSurfaceMode.Taskbar, WidgetSettingsService.CurrentSurface);
