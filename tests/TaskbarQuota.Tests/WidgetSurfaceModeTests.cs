@@ -114,6 +114,24 @@ public class WidgetSurfaceModeTests
         Assert.Equal(0.55, FloatingUsageWindow.StepOpacityFromWheel(0.50, +40), precision: 2);
     }
 
+    [Theory]
+    [InlineData(false, false, 120, false, true)]
+    [InlineData(false, false, -120, false, true)]
+    [InlineData(false, false, 120, true, false)]
+    [InlineData(true, false, 120, false, false)]
+    [InlineData(false, true, 120, false, false)]
+    [InlineData(false, false, 0, false, false)]
+    public void OpacityWheel_is_exclusive_with_agent_navigation(
+        bool isDragging,
+        bool isHorizontalWheel,
+        int wheelDelta,
+        bool overAgentActivity,
+        bool expected)
+    {
+        Assert.Equal(expected, FloatingUsageWindow.ShouldAdjustOpacityFromWheel(
+            isDragging, isHorizontalWheel, wheelDelta, overAgentActivity));
+    }
+
     [Fact]
     public void ComputeAcrylicMaterial_clamps_and_preserves_native_material_at_maximum()
     {

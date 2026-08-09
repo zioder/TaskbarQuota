@@ -402,16 +402,32 @@ public sealed partial class FloatingUsageWindow : Window
 
     private void Root_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
-        if (_isDragging)
-            return;
-
         var props = e.GetCurrentPoint(Root).Properties;
-        if (props.IsHorizontalMouseWheel || props.MouseWheelDelta == 0)
+        bool overAgentActivity = IsAgentActivitySource(e.OriginalSource);
+        if (!ShouldAdjustOpacityFromWheel(
+                _isDragging, props.IsHorizontalMouseWheel, props.MouseWheelDelta, overAgentActivity))
             return;
 
         e.Handled = true;
         double next = StepOpacityFromWheel(WidgetSettingsService.FloatingOpacity, props.MouseWheelDelta);
         WidgetSettingsService.ApplyFloatingOpacity(next);
+    }
+
+    internal static bool ShouldAdjustOpacityFromWheel(
+        bool isDragging, bool isHorizontalWheel, int wheelDelta, bool overAgentActivity)
+        => !isDragging && !isHorizontalWheel && wheelDelta != 0 && !overAgentActivity;
+
+    private static bool IsAgentActivitySource(object? source)
+    {
+        var current = source as DependencyObject;
+        while (current is not null)
+        {
+            if (current is AgentActivitySummary)
+                return true;
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return false;
     }
 
     private void Root_RightTapped(object sender, RightTappedRoutedEventArgs e)
