@@ -175,7 +175,11 @@ public sealed partial class FloatingUsageWindow : Window
         Root.RemoveHandler(UIElement.PointerWheelChangedEvent, _rootPointerWheelChanged);
         Root.RightTapped -= Root_RightTapped;
 
-        _accessibilitySettings = null;
+        if (_accessibilitySettings is not null)
+        {
+            _accessibilitySettings.HighContrastChanged -= OnHighContrastChanged;
+            _accessibilitySettings = null;
+        }
 
         if (_acrylicController is not null)
         {
@@ -224,9 +228,15 @@ public sealed partial class FloatingUsageWindow : Window
             _backdropConfiguration = configuration;
 
             _accessibilitySettings = new AccessibilitySettings();
+            _accessibilitySettings.HighContrastChanged += OnHighContrastChanged;
         }
         catch (Exception ex)
         {
+            if (_accessibilitySettings is not null)
+            {
+                _accessibilitySettings.HighContrastChanged -= OnHighContrastChanged;
+                _accessibilitySettings = null;
+            }
             _acrylicController?.RemoveAllSystemBackdropTargets();
             _acrylicController?.Dispose();
             _acrylicController = null;
@@ -489,6 +499,9 @@ public sealed partial class FloatingUsageWindow : Window
             DispatcherQueue.TryEnqueue(ContentHost.ClearSuppressedClicks);
         }
     }
+
+    private void OnHighContrastChanged(AccessibilitySettings sender, object args)
+        => DispatcherQueue.TryEnqueue(ApplyAcrylicMaterial);
 
     private void Root_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
     {
