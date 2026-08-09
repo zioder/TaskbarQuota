@@ -144,6 +144,7 @@ namespace TaskbarQuota.Taskbar
                 try { widget.Dispose(); } catch (Exception ex) { Log.Warning(ex, "Failed to dispose taskbar widget"); }
             }
             Widgets.Clear();
+            TaskbarSpace.ResetAvailableWidth();
         }
 
         /// <summary>

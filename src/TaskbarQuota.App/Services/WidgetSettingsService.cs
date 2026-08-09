@@ -131,9 +131,8 @@ public static class WidgetSettingsService
 
         CurrentSurface = mode;
         Save(WidgetSurfaceModePath, (int)mode);
-        // Moving back to the taskbar may leave a pin set that no longer fits the free span.
-        if (mode == WidgetSurfaceMode.Taskbar)
-            Services.PinBudgetService.EnforceBudget(notify: false);
+        // TaskBarManager enforces the taskbar budget after a current widget measurement exists.
+        // Doing it here would use the span cached before floating mode and could remove valid pins.
         Changed?.Invoke(null, EventArgs.Empty);
     }
 
