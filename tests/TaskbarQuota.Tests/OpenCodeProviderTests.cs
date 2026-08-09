@@ -243,6 +243,24 @@ public class OpenCodeProviderTests
     }
 
     [Fact]
+    public void ParseUsage_WithJsonPercentages_PreservesPercentageScale()
+    {
+        var json = """
+            {
+              "rollingUsage": { "usagePercent": 0.653, "resetInSec": 14400 },
+              "weeklyUsage": { "usagePercent": 1, "resetInSec": 259200 }
+            }
+            """;
+
+        var (rolling, weekly, _) = OpenCodeProvider.ParseUsage(json);
+
+        Assert.NotNull(rolling);
+        Assert.Equal(0.653, rolling!.UsedPercent, 3);
+        Assert.NotNull(weekly);
+        Assert.Equal(1, weekly!.UsedPercent);
+    }
+
+    [Fact]
     public void ExtractWindow_WithNoMatch_ReturnsNull()
     {
         var text = "plan:free,active:true";

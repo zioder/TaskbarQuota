@@ -505,7 +505,7 @@ namespace TaskbarQuota.Usage.Providers
         private static double NormalizeMoney(double raw)
             => Math.Abs(raw) >= 1_000_000 ? raw / 100_000_000d : raw;
 
-        private static (RateWindow? rolling, RateWindow? weekly, DateTimeOffset? renewsAt) ParseUsage(string text)
+        internal static (RateWindow? rolling, RateWindow? weekly, DateTimeOffset? renewsAt) ParseUsage(string text)
         {
             try
             {
