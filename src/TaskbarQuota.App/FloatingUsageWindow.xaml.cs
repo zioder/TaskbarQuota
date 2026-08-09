@@ -7,6 +7,8 @@ using Microsoft.UI.Composition;
 using Microsoft.UI.Composition.SystemBackdrops;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.Graphics;
@@ -35,6 +37,7 @@ public sealed partial class FloatingUsageWindow : Window
     private const int ChromePaddingLogicalY = 12; // Border padding 6*2
     private const int DefaultLogicalWidth = 200;
     private const int DefaultLogicalHeight = 60;
+    private const int HorizontalScrollbarLogicalHeight = 12;
     private const int DragThresholdLogicalPx = 4;
     private const float AcrylicTintOpacityMin = 0.25f;
     private const float AcrylicTintOpacityMax = 0.80f;
@@ -412,6 +415,8 @@ public sealed partial class FloatingUsageWindow : Window
     {
         if (!e.GetCurrentPoint(Root).Properties.IsLeftButtonPressed)
             return;
+        if (IsScrollBarSource(e.OriginalSource))
+            return;
 
         _isPointerTracking = true;
         _isDragging = false;
@@ -573,10 +578,19 @@ public sealed partial class FloatingUsageWindow : Window
         if (!_hasManualPosition && !_shown)
             PlaceAtDefault();
 
-        // Clamp once from the current position, then move+resize in a single call.
         var pos = _appWindow.Position;
-        ClampToWorkArea(ref pos, w, h);
-        _appWindow.MoveAndResize(new RectInt32(pos.X, pos.Y, w, h));
+        bool hasWorkArea = TryGetWorkArea(pos.X, pos.Y, w, h, out var workArea);
+        bool horizontalOverflow = hasWorkArea && w > workArea.Width;
+        ContentScroller.HorizontalScrollBarVisibility = horizontalOverflow
+            ? ScrollBarVisibility.Auto
+            : ScrollBarVisibility.Hidden;
+        if (horizontalOverflow)
+            h += WindowDpi.ToPhysical(HorizontalScrollbarLogicalHeight, scale);
+
+        var bounds = hasWorkArea
+            ? ConstrainBoundsToWorkArea(new RectInt32(pos.X, pos.Y, w, h), workArea)
+            : new RectInt32(pos.X, pos.Y, w, h);
+        _appWindow.MoveAndResize(bounds);
 
         if (forceShow && !_appWindow.IsVisible)
             _appWindow.Show(false);
@@ -593,21 +607,64 @@ public sealed partial class FloatingUsageWindow : Window
 
     private void ClampToWorkArea(ref int x, ref int y, int width, int height)
     {
+        if (!TryGetWorkArea(x, y, width, height, out var workArea))
+            return;
+
+        var constrained = ConstrainBoundsToWorkArea(
+            new RectInt32(x, y, width, height),
+            workArea);
+        x = constrained.X;
+        y = constrained.Y;
+    }
+
+    private static bool TryGetWorkArea(int x, int y, int width, int height, out RectInt32 workArea)
+    {
         // Use the candidate rectangle, not the current window, so a drag can cross monitors.
         var center = new POINT { x = x + (width / 2), y = y + (height / 2) };
         var monitor = User32.MonitorFromPoint(center, MonitorFromFlags.MONITOR_DEFAULTTONEAREST);
         var info = MONITORINFO.Create();
         if (monitor == IntPtr.Zero || !User32.GetMonitorInfo(monitor, ref info))
-            return;
+        {
+            workArea = default;
+            return false;
+        }
 
-        var work = info.rcWork;
-        if (width > work.right - work.left)
-            width = work.right - work.left;
-        if (height > work.bottom - work.top)
-            height = work.bottom - work.top;
+        workArea = new RectInt32(
+            info.rcWork.left,
+            info.rcWork.top,
+            info.rcWork.right - info.rcWork.left,
+            info.rcWork.bottom - info.rcWork.top);
+        return workArea.Width > 0 && workArea.Height > 0;
+    }
 
-        x = Math.Clamp(x, work.left, work.right - width);
-        y = Math.Clamp(y, work.top, work.bottom - height);
+    internal static RectInt32 ConstrainBoundsToWorkArea(RectInt32 desired, RectInt32 workArea)
+    {
+        int width = Math.Clamp(desired.Width, 1, Math.Max(1, workArea.Width));
+        int height = Math.Clamp(desired.Height, 1, Math.Max(1, workArea.Height));
+        int x = Math.Clamp(
+            desired.X,
+            workArea.X,
+            Math.Max(workArea.X, workArea.X + workArea.Width - width));
+        int y = Math.Clamp(
+            desired.Y,
+            workArea.Y,
+            Math.Max(workArea.Y, workArea.Y + workArea.Height - height));
+
+        return new RectInt32(x, y, width, height);
+    }
+
+    private static bool IsScrollBarSource(object? source)
+    {
+        var current = source as DependencyObject;
+        while (current is not null)
+        {
+            if (current is ScrollBar)
+                return true;
+
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return false;
     }
 
     private static void SavePosition(int x, int y)

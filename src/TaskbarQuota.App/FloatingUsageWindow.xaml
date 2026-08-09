@@ -17,9 +17,18 @@
                 Padding="10,6"
                 Background="Transparent"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
-            <controls:QuotaWidgetContent x:Name="ContentHost"
-                                         VerticalAlignment="Center"
-                                         HorizontalAlignment="Left"/>
+            <ScrollViewer x:Name="ContentScroller"
+                          AutomationProperties.Name="Floating usage content"
+                          IsTabStop="True"
+                          HorizontalScrollMode="Enabled"
+                          HorizontalScrollBarVisibility="Hidden"
+                          VerticalScrollMode="Disabled"
+                          VerticalScrollBarVisibility="Disabled"
+                          ZoomMode="Disabled">
+                <controls:QuotaWidgetContent x:Name="ContentHost"
+                                             VerticalAlignment="Center"
+                                             HorizontalAlignment="Left"/>
+            </ScrollViewer>
         </Border>
     </Grid>
 </Window>

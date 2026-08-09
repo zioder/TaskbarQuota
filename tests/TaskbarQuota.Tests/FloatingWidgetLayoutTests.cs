@@ -1,4 +1,5 @@
 using TaskbarQuota.Controls;
+using Windows.Graphics;
 
 namespace TaskbarQuota.Tests;
 
@@ -50,5 +51,25 @@ public class FloatingWidgetLayoutTests
             tileWidths: [],
             showActivity: false);
         Assert.Equal(172 + 8, width);
+    }
+
+    [Fact]
+    public void ConstrainBoundsToWorkArea_CapsOversizedWindowAndKeepsItVisible()
+    {
+        var result = FloatingUsageWindow.ConstrainBoundsToWorkArea(
+            new RectInt32(1200, 700, 1600, 900),
+            new RectInt32(0, 0, 1366, 728));
+
+        Assert.Equal(new RectInt32(0, 0, 1366, 728), result);
+    }
+
+    [Fact]
+    public void ConstrainBoundsToWorkArea_ClampsPositionWithoutResizingContentThatFits()
+    {
+        var result = FloatingUsageWindow.ConstrainBoundsToWorkArea(
+            new RectInt32(1800, 900, 450, 60),
+            new RectInt32(0, 0, 1920, 1040));
+
+        Assert.Equal(new RectInt32(1470, 900, 450, 60), result);
     }
 }
