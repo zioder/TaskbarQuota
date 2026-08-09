@@ -26,6 +26,11 @@ public sealed partial class AgentActivitySummary : UserControl
     public const int MinimumLogicalWidth = 120;
     public event Action<AgentActivityItem?>? Clicked;
     public bool SuppressNextClick { get; set; }
+    /// <summary>
+    /// Whether vertical wheel input moves between agents. Floating mode disables this because its host
+    /// owns the wheel gesture for Acrylic strength; the Previous/Next buttons remain available.
+    /// </summary>
+    public bool IsWheelNavigationEnabled { get; set; } = true;
 
     /// <summary>
     /// When true, colors follow the app/window theme (floating HUD) instead of the system taskbar palette.
@@ -122,6 +127,9 @@ public sealed partial class AgentActivitySummary : UserControl
 
     private void AgentActivitySummary_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
     {
+        if (!IsWheelNavigationEnabled)
+            return;
+
         var properties = e.GetCurrentPoint(this).Properties;
         int delta = properties.MouseWheelDelta;
         if (delta == 0 || properties.IsHorizontalMouseWheel)
