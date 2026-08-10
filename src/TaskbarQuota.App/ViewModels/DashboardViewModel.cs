@@ -24,6 +24,7 @@ namespace TaskbarQuota.ViewModels
 
         public ObservableCollection<ProviderCardViewModel> Cards { get; } = new();
         public ObservableCollection<ProviderCardViewModel> AvailableCards { get; } = new();
+        public TotalSpendViewModel TotalSpend { get; } = new();
 
         [ObservableProperty] public partial ProviderCardViewModel? SelectedCard { get; set; }
         [ObservableProperty] public partial double DetailContentWidth { get; private set; }
@@ -142,6 +143,7 @@ namespace TaskbarQuota.ViewModels
 
         private async Task LoadProgressiveAsync(bool force)
         {
+            TotalSpend.IsLoading = true;
             _loadCts?.Cancel();
             _loadCts?.Dispose();
             _loadCts = new CancellationTokenSource();
@@ -184,23 +186,40 @@ namespace TaskbarQuota.ViewModels
                 {
                     var finalActive = UsageCoordinator.Instance.ActiveProvider;
                     var finalResults = results.ToList();
-                    var merged = await Task.Run(() => BuildDashboardResults(finalActive, finalResults)).ConfigureAwait(false);
+                    var completed = await Task.Run(() =>
+                    {
+                        var merged = BuildDashboardResults(finalActive, finalResults);
+                        return (Results: merged, UsageResults: BuildUsageHistoryResults(merged));
+                    }).ConfigureAwait(false);
                     _dispatcher.TryEnqueue(() =>
                     {
-                        UpdateCards(merged, finalActive);
+                        UpdateCards(
+                            completed.Results,
+                            finalActive,
+                            refreshUsageSnapshot: true,
+                            usageResults: completed.UsageResults);
+                        TotalSpend.IsLoading = false;
                         StatusText = $"Updated at {DateTime.Now:HH:mm:ss}";
                     });
                 }
             }
-            catch (OperationCanceledException) { }
+            catch (OperationCanceledException)
+            {
+                _dispatcher.TryEnqueue(() => TotalSpend.IsLoading = false);
+            }
         }
 
-        private void UpdateCards(IReadOnlyList<UsageResult> results, ProviderId? active, bool force = false)
+        private void UpdateCards(
+            IReadOnlyList<UsageResult> results,
+            ProviderId? active,
+            bool force = false,
+            bool refreshUsageSnapshot = false,
+            IReadOnlyList<UsageResult>? usageResults = null)
         {
             Views.DashboardPage.SetSuppressWidgetEvents(true);
             try
             {
-                UpdateCardsCore(results, active, force);
+                UpdateCardsCore(results, active, force, refreshUsageSnapshot, usageResults);
             }
             finally
             {
@@ -211,7 +230,12 @@ namespace TaskbarQuota.ViewModels
             }
         }
 
-        private void UpdateCardsCore(IReadOnlyList<UsageResult> results, ProviderId? active, bool force)
+        private void UpdateCardsCore(
+            IReadOnlyList<UsageResult> results,
+            ProviderId? active,
+            bool force,
+            bool refreshUsageSnapshot,
+            IReadOnlyList<UsageResult>? usageResults)
         {
             var selectedProviderId = SelectedCard?.ProviderId;
 
@@ -226,8 +250,17 @@ namespace TaskbarQuota.ViewModels
                 .Where(r => ProviderDiscoveryService.ShouldShowInAvailable(r, active))
                 .ToList();
 
-            SyncCardCollection(Cards, dashboardResults, active, force);
-            SyncCardCollection(AvailableCards, availableResults, active: null, force: force);
+            var historyOverrides = (usageResults ?? Array.Empty<UsageResult>())
+                .Where(result => result.Fetch?.Usage.UsageHistory is not null)
+                .ToDictionary(result => result.Id, result => result.Fetch!.Usage.UsageHistory!);
+            bool refreshProviderHistory = refreshUsageSnapshot && historyOverrides.Count > 0;
+            SyncCardCollection(Cards, dashboardResults, active, force || refreshProviderHistory, historyOverrides);
+            SyncCardCollection(AvailableCards, availableResults, active: null, force: force || refreshProviderHistory, historyOverrides);
+            // Populate the spend snapshot only from a complete usage-history pass. Progressive quota
+            // updates and per-provider callbacks would otherwise flip HasSpendData early and flash a
+            // partially-populated Cost surface before the full history is ready.
+            if (refreshUsageSnapshot && usageResults is not null)
+                TotalSpend.UpdateResults(usageResults, force: true);
 
             AvailableCardsVisibility = AvailableCards.Count > 0
                 ? Visibility.Visible
@@ -249,7 +282,8 @@ namespace TaskbarQuota.ViewModels
             ObservableCollection<ProviderCardViewModel> collection,
             IReadOnlyList<UsageResult> results,
             ProviderId? active,
-            bool force)
+            bool force,
+            IReadOnlyDictionary<ProviderId, UsageHistory>? historyOverrides = null)
         {
             var ids = results.Select(r => r.Id).ToHashSet();
             for (int i = collection.Count - 1; i >= 0; i--)
@@ -270,7 +304,9 @@ namespace TaskbarQuota.ViewModels
 
                 if (existingIndex < 0)
                 {
-                    var card = new ProviderCardViewModel(result, result.Id == active);
+                    UsageHistory? historyOverride = null;
+                    historyOverrides?.TryGetValue(result.Id, out historyOverride);
+                    var card = new ProviderCardViewModel(result, result.Id == active, historyOverride);
                     collection.Insert(targetIndex, card);
                     if (ReferenceEquals(collection, Cards) && SelectedCard is null)
                         SelectedCard = card;
@@ -284,7 +320,9 @@ namespace TaskbarQuota.ViewModels
                 if (force || !_cardSignatures.TryGetValue(result.Id, out var previous) || previous != signature)
                 {
                     var wasSelected = SelectedCard?.ProviderId == result.Id;
-                    var card = new ProviderCardViewModel(result, result.Id == active);
+                    UsageHistory? historyOverride = null;
+                    historyOverrides?.TryGetValue(result.Id, out historyOverride);
+                    var card = new ProviderCardViewModel(result, result.Id == active, historyOverride);
                     collection[targetIndex] = card;
                     if (ReferenceEquals(collection, Cards) && wasSelected)
                         SelectedCard = card;
@@ -372,6 +410,27 @@ namespace TaskbarQuota.ViewModels
             return OrderResults(merged.Values.ToArray(), active).ToList();
         }
 
+        private static IReadOnlyList<UsageResult> BuildUsageHistoryResults(IReadOnlyList<UsageResult> results)
+        {
+            var combined = results
+                .Where(result => result.Fetch?.Usage.UsageHistory is not null)
+                .ToDictionary(result => result.Id);
+            var service = UsageCoordinator.Instance.Service;
+            foreach (var provider in service.All)
+            {
+                if (combined.ContainsKey(provider.Id)
+                    || !UsageHistoryService.TryLoad(provider.Id, out var history))
+                    continue;
+
+                var usage = new UsageSnapshot(new RateWindow(0)) { UsageHistory = history };
+                combined[provider.Id] = UsageResult.Success(
+                    provider.Id,
+                    provider,
+                    new ProviderFetchResult(usage, "Local usage history"));
+            }
+            return combined.Values.OrderBy(result => result.Id).ToArray();
+        }
+
         private static int IndexOfCard(ObservableCollection<ProviderCardViewModel> collection, ProviderId id)
         {
             for (int i = 0; i < collection.Count; i++)
@@ -432,7 +491,35 @@ namespace TaskbarQuota.ViewModels
                 }
             }
 
+            if (usage.UsageHistory is { } history)
+            {
+                AppendUsagePeriod(sb, history.Today);
+                AppendUsagePeriod(sb, history.Yesterday);
+                AppendUsagePeriod(sb, history.Last30Days);
+                foreach (var day in history.Daily)
+                {
+                    sb.Append('|').Append(day.Date)
+                      .Append('|').Append(day.Tokens)
+                      .Append('|').Append(day.EstimatedCostUsd)
+                      .Append('|').Append(day.EstimateComplete);
+                }
+            }
+
             return sb.ToString();
+        }
+
+        private static void AppendUsagePeriod(StringBuilder sb, UsagePeriod? period)
+        {
+            if (period is null)
+            {
+                sb.Append("|history-null");
+                return;
+            }
+
+            sb.Append('|').Append(period.Tokens)
+              .Append('|').Append(period.EstimatedCostUsd)
+              .Append('|').Append(period.CostEstimated)
+              .Append('|').Append(period.EstimateComplete);
         }
 
         private static void AppendRateWindow(StringBuilder sb, RateWindow? window)

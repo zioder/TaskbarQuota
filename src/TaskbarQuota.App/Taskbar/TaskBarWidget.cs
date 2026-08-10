@@ -884,7 +884,7 @@ namespace TaskbarQuota.Taskbar
                     Log.Debug($"[widget] layout {DescribeLayout(count, total)}");
                 }
 
-                bool resized = ResizeWidgetHost(count == 0 ? DefaultWidgetHostWidth : total);
+                bool resized = ResizeWidgetHost(total == 0 ? DefaultWidgetHostWidth : total);
                 bool activityResized = ResizeActivityHost(activityWidth);
                 if (resized || activityResized || activityVisibilityChanged || forceReposition)
                     UpdatePosition();

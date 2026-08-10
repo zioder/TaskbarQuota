@@ -182,6 +182,8 @@ namespace TaskbarQuota.Usage
         public ResetCreditsSnapshot? ResetCredits { get; set; }
         /// <summary>Provider-specific usage dashboard link when known (e.g. OpenCode workspace /go or /usage).</summary>
         public string? UsageDashboardUrl { get; set; }
+        /// <summary>Local transcript-derived token history and API-equivalent cost estimates.</summary>
+        public UsageHistory? UsageHistory { get; set; }
 
         public UsageSnapshot(RateWindow primary) => Primary = primary;
 
@@ -190,6 +192,164 @@ namespace TaskbarQuota.Usage
         public UsageSnapshot WithLoginMethod(string m) { LoginMethod = m; return this; }
         public UsageSnapshot WithEmail(string e) { Email = e; return this; }
         public UsageSnapshot WithCost(CostSnapshot c) { Cost = c; return this; }
+        public UsageSnapshot WithUsageHistory(UsageHistory h) { UsageHistory = h; return this; }
+    }
+
+    public sealed class TokenBreakdown
+    {
+        /// <summary>Input tokens that were neither read from nor written to a prompt cache.</summary>
+        public ulong Input { get; set; }
+        public ulong CacheWrite5m { get; set; }
+        public ulong CacheWrite1h { get; set; }
+        public ulong CacheRead { get; set; }
+        public ulong Output { get; set; }
+        /// <summary>Reasoning is a subset of Output and is never added to TotalTokens.</summary>
+        public ulong Reasoning { get; set; }
+        public bool IsFast { get; set; }
+
+        public ulong CacheWrite => CacheWrite5m + CacheWrite1h;
+        public ulong PromptTokens => Input + CacheWrite5m + CacheWrite1h + CacheRead;
+        public ulong TotalTokens => PromptTokens + Output;
+
+        public TokenBreakdown Add(TokenBreakdown other) => new()
+        {
+            Input = Input + other.Input,
+            CacheWrite5m = CacheWrite5m + other.CacheWrite5m,
+            CacheWrite1h = CacheWrite1h + other.CacheWrite1h,
+            CacheRead = CacheRead + other.CacheRead,
+            Output = Output + other.Output,
+            Reasoning = Reasoning + other.Reasoning,
+        };
+    }
+
+    public sealed class ModelUsageEntry
+    {
+        public string Model { get; }
+        public ulong TotalTokens { get; }
+        public TokenBreakdown Tokens { get; }
+        public double? CostUsd { get; }
+        public double CacheSavingsUsd { get; }
+        public int Records { get; }
+        public int Sessions { get; }
+
+        public ModelUsageEntry(string model, ulong totalTokens, double? costUsd = null)
+            : this(model, new TokenBreakdown { Input = totalTokens }, costUsd)
+        {
+        }
+
+        public ModelUsageEntry(
+            string model,
+            TokenBreakdown tokens,
+            double? costUsd = null,
+            double cacheSavingsUsd = 0,
+            int records = 0,
+            int sessions = 0)
+        {
+            Model = model;
+            Tokens = tokens;
+            TotalTokens = tokens.TotalTokens;
+            CostUsd = costUsd;
+            CacheSavingsUsd = cacheSavingsUsd;
+            Records = records;
+            Sessions = sessions;
+        }
+    }
+
+    public sealed class ModelUsageBreakdown
+    {
+        public IReadOnlyList<ModelUsageEntry> Models { get; }
+        public string SourceNote { get; }
+
+        public ModelUsageBreakdown(IReadOnlyList<ModelUsageEntry> models, string sourceNote = "")
+        {
+            Models = models;
+            SourceNote = sourceNote;
+        }
+    }
+
+    public sealed class UsagePeriod
+    {
+        public ulong Tokens { get; }
+        public double? EstimatedCostUsd { get; }
+        public bool CostEstimated { get; }
+        public bool EstimateComplete { get; }
+        public ModelUsageBreakdown? ModelBreakdown { get; }
+        public TokenBreakdown TokenBreakdown { get; }
+        public ulong CachedInputTokens => TokenBreakdown.CacheRead;
+        public ulong UncachedInputTokens => TokenBreakdown.Input;
+        public ulong CacheCreationTokens => TokenBreakdown.CacheWrite;
+        public ulong OutputTokens => TokenBreakdown.Output;
+        public ulong ReasoningTokens => TokenBreakdown.Reasoning;
+        public double CacheSavingsUsd { get; }
+        public int Records { get; }
+        public int Sessions { get; }
+
+        public UsagePeriod(
+            ulong tokens,
+            double? estimatedCostUsd = null,
+            bool costEstimated = true,
+            bool estimateComplete = true,
+            ModelUsageBreakdown? modelBreakdown = null,
+            TokenBreakdown? tokenBreakdown = null,
+            double cacheSavingsUsd = 0,
+            int records = 0,
+            int sessions = 0)
+        {
+            TokenBreakdown = tokenBreakdown ?? new TokenBreakdown { Input = tokens };
+            Tokens = TokenBreakdown.TotalTokens;
+            EstimatedCostUsd = estimatedCostUsd;
+            CostEstimated = costEstimated;
+            EstimateComplete = estimateComplete;
+            ModelBreakdown = modelBreakdown;
+            CacheSavingsUsd = cacheSavingsUsd;
+            Records = records;
+            Sessions = sessions;
+        }
+    }
+
+    public sealed class DailyUsage
+    {
+        public string Date { get; }
+        public ulong Tokens { get; }
+        public double? EstimatedCostUsd { get; }
+        public bool EstimateComplete { get; }
+        public TokenBreakdown TokenBreakdown { get; }
+        public double CacheSavingsUsd { get; }
+        public int Records { get; }
+        public int Sessions { get; }
+        public ModelUsageBreakdown? ModelBreakdown { get; }
+
+        public DailyUsage(
+            string date,
+            ulong tokens,
+            double? estimatedCostUsd = null,
+            bool estimateComplete = true,
+            TokenBreakdown? tokenBreakdown = null,
+            double cacheSavingsUsd = 0,
+            int records = 0,
+            int sessions = 0,
+            ModelUsageBreakdown? modelBreakdown = null)
+        {
+            Date = date;
+            TokenBreakdown = tokenBreakdown ?? new TokenBreakdown { Input = tokens };
+            Tokens = TokenBreakdown.TotalTokens;
+            EstimatedCostUsd = estimatedCostUsd;
+            EstimateComplete = estimateComplete;
+            CacheSavingsUsd = cacheSavingsUsd;
+            Records = records;
+            Sessions = sessions;
+            ModelBreakdown = modelBreakdown;
+        }
+    }
+
+    public sealed class UsageHistory
+    {
+        public UsagePeriod? Today { get; set; }
+        public UsagePeriod? Yesterday { get; set; }
+        public UsagePeriod? Last7Days { get; set; }
+        public UsagePeriod? Last30Days { get; set; }
+        public UsagePeriod? Last90Days { get; set; }
+        public IReadOnlyList<DailyUsage> Daily { get; set; } = Array.Empty<DailyUsage>();
     }
 
     public sealed class ProviderFetchResult

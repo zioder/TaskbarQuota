@@ -582,6 +582,7 @@ namespace TaskbarQuota.Taskbar
                 try { widget.Dispose(); } catch { }
             }
             Widgets.Clear();
+            _showMainWindow = null;
         }
     }
 }

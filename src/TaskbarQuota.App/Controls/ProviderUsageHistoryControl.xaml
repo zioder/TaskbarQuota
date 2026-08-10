@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="TaskbarQuota.Controls.ProviderUsageHistoryControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:TaskbarQuota.ViewModels">
+
+    <Border
+        Padding="20,16"
+        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+        BorderThickness="1"
+        CornerRadius="{ThemeResource ControlCornerRadius}"
+        Visibility="{x:Bind BoolToVisibility(ViewModel.HasData), Mode=OneWay}">
+        <StackPanel Spacing="12">
+            <StackPanel Spacing="2">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="Usage history" />
+                <TextBlock
+                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                    Style="{StaticResource CaptionTextBlockStyle}"
+                    Text="{x:Bind ViewModel.SourceNote, Mode=OneWay}"
+                    TextWrapping="Wrap" />
+            </StackPanel>
+
+            <Grid MinHeight="56" ColumnSpacing="16">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="140" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock
+                    VerticalAlignment="Center"
+                    Style="{StaticResource BodyStrongTextBlockStyle}"
+                    Text="Usage trend" />
+                <Grid Grid.Column="1">
+                    <Canvas
+                        x:Name="TrendCanvas"
+                        AutomationProperties.Name="{x:Bind ViewModel.TrendAutomationName, Mode=OneWay}"
+                        Height="52"
+                        HorizontalAlignment="Stretch"
+                        SizeChanged="TrendCanvas_SizeChanged"
+                        Visibility="{x:Bind BoolToVisibility(ViewModel.HasTrend), Mode=OneWay}" />
+                    <TextBlock
+                        HorizontalAlignment="Right"
+                        VerticalAlignment="Center"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="No daily data"
+                        Visibility="{x:Bind InvertBoolToVisibility(ViewModel.HasTrend), Mode=OneWay}" />
+                </Grid>
+            </Grid>
+
+            <ItemsControl ItemsSource="{x:Bind ViewModel.Periods, Mode=OneWay}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:ProviderUsagePeriodRowViewModel">
+                        <Grid
+                            MinHeight="36"
+                            Padding="0,8"
+                            BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                            BorderThickness="0,1,0,0"
+                            ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="140" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock
+                                VerticalAlignment="Center"
+                                Style="{StaticResource BodyStrongTextBlockStyle}"
+                                Text="{x:Bind Label}" />
+                            <TextBlock
+                                Grid.Column="1"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="{x:Bind Reading}"
+                                TextAlignment="Right"
+                                ToolTipService.ToolTip="{x:Bind TooltipText}" />
+                        </Grid>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </StackPanel>
+    </Border>
+</UserControl>

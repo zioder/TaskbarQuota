@@ -27,6 +27,26 @@
                              PaneDisplayMode="Left"
                              OpenPaneLength="220"
                              SelectionChanged="Nav_SelectionChanged">
+            <muxc:NavigationView.MenuItems>
+                <muxc:NavigationViewItem x:Name="CostNavigationItem"
+                                         AutomationProperties.AutomationId="CostNavItem"
+                                         Content="Cost"
+                                         Tag="cost">
+                    <muxc:NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE9D2;" />
+                    </muxc:NavigationViewItem.Icon>
+                </muxc:NavigationViewItem>
+                <muxc:NavigationViewItemSeparator />
+                <muxc:NavigationViewItem x:Name="ProvidersNavigationItem"
+                                         AutomationProperties.AutomationId="ProvidersNavItem"
+                                         Content="Providers"
+                                         IsExpanded="True"
+                                         SelectsOnInvoked="False">
+                    <muxc:NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Folder" />
+                    </muxc:NavigationViewItem.Icon>
+                </muxc:NavigationViewItem>
+            </muxc:NavigationView.MenuItems>
             <Frame x:Name="ContentFrame"
                    Padding="24,16,24,0"
                    HorizontalAlignment="Stretch"

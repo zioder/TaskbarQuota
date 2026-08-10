@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
@@ -9,6 +10,7 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Navigation;
 using TaskbarQuota.Usage;
+using TaskbarQuota.Services;
 using TaskbarQuota.ViewModels;
 using Windows.System;
 
@@ -379,6 +381,47 @@ namespace TaskbarQuota.Views
         {
             if (ViewModel.SelectedCard?.UsageDashboardUrl is { Length: > 0 } url)
                 _ = Launcher.LaunchUriAsync(new Uri(url));
+        }
+
+        private async void ShareProvider_Click(object sender, RoutedEventArgs e)
+        {
+            // Hide the interactive chrome so the copied image reads as a clean provider share card.
+            var hidden = new List<FrameworkElement>();
+            if (HeaderActionsPanel.Visibility == Visibility.Visible)
+            {
+                HeaderActionsPanel.Visibility = Visibility.Collapsed;
+                hidden.Add(HeaderActionsPanel);
+            }
+            if (ActionsPanel.Visibility == Visibility.Visible)
+            {
+                ActionsPanel.Visibility = Visibility.Collapsed;
+                hidden.Add(ActionsPanel);
+            }
+            // Drop the transient status row ("Loading..." / "Detected via ...") so the image
+            // ends with the usage history card.
+            if (StatusRow.Visibility == Visibility.Visible)
+            {
+                StatusRow.Visibility = Visibility.Collapsed;
+                hidden.Add(StatusRow);
+            }
+
+            bool copied = false;
+            try
+            {
+                DashboardContent.UpdateLayout();
+                copied = await ShareCardHelper.CopyElementToClipboardAsync(DashboardContent);
+            }
+            finally
+            {
+                foreach (var element in hidden)
+                    element.Visibility = Visibility.Visible;
+                DashboardContent.UpdateLayout();
+            }
+
+            ShareCardHelper.ShowTransientTip(
+                ProviderShareTip,
+                copied ? "Image copied to clipboard" : "Couldn't copy the image",
+                ShareProviderButton);
         }
 
         private void WidgetRowVisibility_Click(object sender, RoutedEventArgs e)
