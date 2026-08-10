@@ -11,6 +11,7 @@ using Microsoft.UI.Xaml.Media.Imaging;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Usage;
 using TaskbarQuota.AgentActivity;
+using TaskbarQuota.Services;
 
 namespace TaskbarQuota.Taskbar
 {
@@ -59,6 +60,7 @@ namespace TaskbarQuota.Taskbar
                 UsageCoordinator.Instance.IsOwnUiEngaged = () =>
                     _flyout?.IsShown == true || TaskBarWidget.IsAnyUserRepositioning;
                 WidgetSettingsService.Changed += OnWidgetSettingsChanged;
+                UpdateAvailabilityService.Instance.Changed += OnUpdateAvailabilityChanged;
                 App.Quitting += OnQuitting;
                 // Installed from the UI thread on purpose: WINEVENT_OUTOFCONTEXT callbacks arrive through
                 // that thread's message pump, which this one has and background threads do not.
@@ -244,8 +246,10 @@ namespace TaskbarQuota.Taskbar
                 widget.Clicked += () => _dispatcher?.TryEnqueue(() => ToggleFlyout(widget));
                 widget.ActivityClicked += item => _dispatcher?.TryEnqueue(
                     () => ToggleActivityFlyout(widget, item?.Id));
+                widget.UpdateBadgeDismissRequested += () => UpdateAvailabilityService.Instance.DismissUpdate();
                 Widgets[target.Handle] = widget;
                 SyncWidgetState(widget);
+                PushUpdateBadgeToWidgets();
                 PrewarmFlyout();
                 Log.Information($"Taskbar widget created: taskbar=0x{target.Handle.ToInt64():X}, primary={target.IsPrimary}");
             }
@@ -263,6 +267,32 @@ namespace TaskbarQuota.Taskbar
 
             try { widget.Dispose(); }
             catch (Exception ex) { Log.Warning(ex, "Failed to dispose destroyed taskbar widget"); }
+        }
+
+        private static void OnUpdateAvailabilityChanged()
+        {
+            // The update service publishes from thread-pool continuations; the badge is XAML.
+            _dispatcher?.TryEnqueue(PushUpdateBadgeToWidgets);
+        }
+
+        private static void PushUpdateBadgeToWidgets()
+        {
+            var updates = UpdateAvailabilityService.Instance;
+            string? tooltip = null;
+            if (updates.IsBannerVisible && updates.AvailableUpdate?.Version is { } version)
+            {
+                var headline = updates.UiState switch
+                {
+                    UpdateAvailabilityUiState.Downloading => $"Downloading TaskbarQuota v{version}…",
+                    UpdateAvailabilityUiState.ReadyToInstall => $"TaskbarQuota v{version} is ready to install",
+                    _ => $"TaskbarQuota update available: v{version}",
+                };
+                tooltip = $"{headline}\nClick to view · right-click to dismiss";
+            }
+
+            SnapshotWidgets();
+            foreach (var widget in _widgetBuffer)
+                widget.SetUpdateBadge(tooltip);
         }
 
         private static TaskBarWidget? PrimaryWidget()

@@ -54,6 +54,10 @@ namespace TaskbarQuota.Controls
         public event Action<DisplayMode>? DisplayModeChanged;
         public event Action<int>? DesiredHostWidthChanged;
 
+        /// <summary>Raised when the update dot is right-clicked: the host dismisses the
+        /// update chrome for that version.</summary>
+        public event Action? UpdateBadgeDismissRequested;
+
         public bool SuppressNextClick { get; set; }
 
         /// <summary>
@@ -393,6 +397,35 @@ namespace TaskbarQuota.Controls
                 SetNormalizedGlyph(HostBadgeGlyph, hostGlyph, Foreground);
             HostBadgeBox.Visibility = Visibility.Visible;
             ToolTipService.SetToolTip(HostBadgeBox, tooltip);
+        }
+
+        /// <summary>Shows (non-null tooltip) or hides (null) the update-available dot
+        /// overlaid on the provider glyph. Purely visual; the host decides when an update
+        /// is known and not dismissed.</summary>
+        public void SetUpdateBadge(string? tooltip)
+        {
+            var show = !string.IsNullOrEmpty(tooltip);
+            if ((UpdateBadgeBox.Visibility == Visibility.Visible) == show)
+            {
+                if (show)
+                    ToolTipService.SetToolTip(UpdateBadgeBox, tooltip);
+                return;
+            }
+
+            UpdateBadgeBox.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+            ToolTipService.SetToolTip(UpdateBadgeBox, show ? tooltip : null);
+        }
+
+        private void UpdateBadgeBox_PointerPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+        {
+            // Only the right button is intercepted (dismiss). Marking the press handled
+            // keeps the widget's drag-to-move tracking from starting on this press; a
+            // left press bubbles up and behaves like any tile click.
+            if (!e.GetCurrentPoint(this).Properties.IsRightButtonPressed)
+                return;
+
+            e.Handled = true;
+            UpdateBadgeDismissRequested?.Invoke();
         }
 
         private static string BuildSynaraTooltip(SynaraStateReader.SynaraSelection host, bool isT3Code)

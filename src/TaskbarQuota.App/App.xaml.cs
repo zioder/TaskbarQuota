@@ -60,13 +60,9 @@ namespace TaskbarQuota
 
             ScheduleTaskbarInitialization();
 
-            var updateTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) };
-            updateTimer.Tick += (_, _) =>
-            {
-                updateTimer.Stop();
-                _ = UpdateAvailabilityService.Instance.CheckSilentlyAsync();
-            };
-            updateTimer.Start();
+            // Restores any previously discovered update and starts the periodic silent
+            // check timer (first tick after a short startup delay, then every few hours).
+            UpdateAvailabilityService.Instance.Start();
 
             if (!IsWidgetStartup(args.Arguments, Environment.GetCommandLineArgs()))
             {
