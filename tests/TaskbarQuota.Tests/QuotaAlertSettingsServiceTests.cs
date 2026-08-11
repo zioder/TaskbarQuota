@@ -75,7 +75,7 @@ public sealed class QuotaAlertSettingsServiceTests : IDisposable
         Assert.True(store.Current.CrossSessionReplenishmentEnabled);
         Assert.Equal(1, changed);
         Assert.True(File.Exists(SettingsPath));
-        Assert.False(File.Exists(SettingsPath + ".tmp"));
+        Assert.Empty(Directory.EnumerateFiles(_directory, "*.tmp"));
         Assert.True(JsonSerializer.Deserialize<QuotaAlertSettings>(File.ReadAllText(SettingsPath))!.ReplenishmentEnabled);
         var restored = new QuotaAlertSettingsStore(SettingsPath).Current;
         Assert.True(restored.ReplenishmentEnabled);
@@ -101,9 +101,36 @@ public sealed class QuotaAlertSettingsServiceTests : IDisposable
         Assert.False(new QuotaAlertSettingsStore(SettingsPath).Current.ReplenishmentEnabled);
     }
 
+    [Fact]
+    public async Task ConcurrentApply_PersistsCurrentValueWithoutTemporaryFiles()
+    {
+        var store = new QuotaAlertSettingsStore(SettingsPath);
+        var updates = Enumerable.Range(1, 32)
+            .Select(index => Task.Run(() => store.Apply(store.Current with
+            {
+                WarningThreshold = 40 + index,
+                CriticalThreshold = 80 + index % 20,
+            })));
+
+        await Task.WhenAll(updates);
+
+        var persisted = JsonSerializer.Deserialize<QuotaAlertSettings>(File.ReadAllText(SettingsPath));
+        Assert.Equal(store.Current, persisted);
+        Assert.Empty(Directory.EnumerateFiles(_directory, "*.tmp"));
+    }
+
     public void Dispose()
     {
-        if (Directory.Exists(_directory))
+        if (!Directory.Exists(_directory))
+            return;
+
+        try
+        {
             Directory.Delete(_directory, recursive: true);
+        }
+        catch
+        {
+            // Cleanup should not replace a test assertion failure.
+        }
     }
 }

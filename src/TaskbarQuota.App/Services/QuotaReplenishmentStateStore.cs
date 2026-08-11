@@ -51,12 +51,16 @@ internal sealed class QuotaReplenishmentStateStore
 
     public bool Upsert(PersistedQuotaProvider observation)
     {
-        if (_providers.TryGetValue(observation.Provider, out var existing)
-            && SameValues(existing, observation)
-            && observation.ObservedAt >= existing.ObservedAt
-            && observation.ObservedAt - existing.ObservedAt < ConfirmationRefreshInterval)
+        if (_providers.TryGetValue(observation.Provider, out var existing))
         {
-            return true;
+            if (observation.ObservedAt < existing.ObservedAt)
+                return true;
+
+            if (SameValues(existing, observation)
+                && observation.ObservedAt - existing.ObservedAt < ConfirmationRefreshInterval)
+            {
+                return true;
+            }
         }
 
         _providers[observation.Provider] = observation;

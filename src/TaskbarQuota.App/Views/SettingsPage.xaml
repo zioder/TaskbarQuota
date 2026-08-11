@@ -112,7 +112,7 @@
             </tk:SettingsCard>
 
             <tk:SettingsCard Header="Changes since last session"
-                             Description="Notify after startup when quota increased since TaskbarQuota's last live reading.">
+                             Description="Notify after startup when quota increased since TaskbarQuota's last live reading. Requires quota replenishment notifications.">
                 <tk:SettingsCard.HeaderIcon>
                     <FontIcon Glyph="&#xE823;"/>
                 </tk:SettingsCard.HeaderIcon>

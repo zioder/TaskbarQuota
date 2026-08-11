@@ -132,9 +132,14 @@ internal sealed class QuotaReplenishmentTracker
         }
 
         var identity = NormalizeIdentity(usage.Email);
-        if (identity is not null
-            && _providerIdentities.TryGetValue(result.Id, out var previousIdentity)
-            && !string.Equals(previousIdentity, identity, StringComparison.OrdinalIgnoreCase))
+        if (_providerIdentities.TryGetValue(result.Id, out var previousIdentity)
+            && identity is null)
+        {
+            ResetProvider(result.Id, "identity-missing");
+        }
+        else if (identity is not null
+                 && previousIdentity is not null
+                 && !string.Equals(previousIdentity, identity, StringComparison.OrdinalIgnoreCase))
         {
             ResetProvider(result.Id, "identity-changed");
         }

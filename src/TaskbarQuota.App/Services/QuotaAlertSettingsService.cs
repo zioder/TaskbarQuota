@@ -44,26 +44,41 @@ public static class QuotaAlertSettingsService
 internal sealed class QuotaAlertSettingsStore
 {
     private readonly string _settingsPath;
+    private readonly object _lock = new();
+    private QuotaAlertSettings _current;
 
     public QuotaAlertSettingsStore(string settingsPath)
     {
         _settingsPath = settingsPath;
-        Current = Load();
+        _current = Load();
     }
 
     public event EventHandler? Changed;
 
-    public QuotaAlertSettings Current { get; private set; }
+    public QuotaAlertSettings Current
+    {
+        get
+        {
+            lock (_lock)
+                return _current;
+        }
+    }
 
     public void Apply(QuotaAlertSettings settings)
     {
         var normalized = settings.Normalized();
-        if (Current.Equals(normalized))
-            return;
+        EventHandler? changed;
+        lock (_lock)
+        {
+            if (_current.Equals(normalized))
+                return;
 
-        Current = normalized;
-        Save();
-        Changed?.Invoke(this, EventArgs.Empty);
+            _current = normalized;
+            Save(normalized);
+            changed = Changed;
+        }
+
+        changed?.Invoke(this, EventArgs.Empty);
     }
 
     private QuotaAlertSettings Load()
@@ -82,19 +97,34 @@ internal sealed class QuotaAlertSettingsStore
         }
     }
 
-    private void Save()
+    private void Save(QuotaAlertSettings settings)
     {
+        string? tempPath = null;
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_settingsPath)!);
-            var json = JsonSerializer.Serialize(Current, new JsonSerializerOptions { WriteIndented = true });
-            var tempPath = _settingsPath + ".tmp";
+            var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
+            tempPath = $"{_settingsPath}.{Guid.NewGuid():N}.tmp";
             File.WriteAllText(tempPath, json);
             File.Move(tempPath, _settingsPath, overwrite: true);
         }
         catch
         {
             // Settings are best-effort; keep the in-memory values for this run.
+        }
+        finally
+        {
+            if (tempPath is not null)
+            {
+                try
+                {
+                    File.Delete(tempPath);
+                }
+                catch
+                {
+                    // A failed best-effort save must not surface through temporary-file cleanup.
+                }
+            }
         }
     }
 }

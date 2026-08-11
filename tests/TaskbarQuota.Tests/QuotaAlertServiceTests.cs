@@ -8,12 +8,14 @@ public class QuotaAlertServiceTests
     [Fact]
     public void ReplenishmentWorksWhenThresholdAlertsAreDisabled()
     {
+        using var stateDirectory = new TemporaryDirectory();
         var notifier = new FakeNotifier();
         var settings = Settings(replenishmentEnabled: true);
         var service = new QuotaAlertService(
             notifier,
             clock: Now,
             settingsProvider: () => settings,
+            crossSessionTracker: CrossSessionTracker(stateDirectory),
             state: new QuotaAlertState());
 
         service.OnStateChanged(Result(1, usedPercent: 88));
@@ -27,12 +29,14 @@ public class QuotaAlertServiceTests
     [Fact]
     public void DisabledReplenishmentDoesNotNotifyOrRetainBaseline()
     {
+        using var stateDirectory = new TemporaryDirectory();
         var notifier = new FakeNotifier();
         var settings = Settings(replenishmentEnabled: false);
         var service = new QuotaAlertService(
             notifier,
             clock: Now,
             settingsProvider: () => settings,
+            crossSessionTracker: CrossSessionTracker(stateDirectory),
             state: new QuotaAlertState());
 
         service.OnStateChanged(Result(1, usedPercent: 88));
@@ -45,12 +49,14 @@ public class QuotaAlertServiceTests
     [Fact]
     public void DisablingAndReenablingReplenishmentRequiresANewBaseline()
     {
+        using var stateDirectory = new TemporaryDirectory();
         var notifier = new FakeNotifier();
         var settings = Settings(replenishmentEnabled: true);
         var service = new QuotaAlertService(
             notifier,
             clock: Now,
             settingsProvider: () => settings,
+            crossSessionTracker: CrossSessionTracker(stateDirectory),
             state: new QuotaAlertState());
 
         service.OnStateChanged(Result(1, usedPercent: 88));
@@ -147,6 +153,11 @@ public class QuotaAlertServiceTests
 
     private static DateTimeOffset Now()
         => new(2026, 7, 28, 12, 0, 0, TimeSpan.Zero);
+
+    private static QuotaReplenishmentCrossSessionTracker CrossSessionTracker(
+        TemporaryDirectory directory)
+        => new(new QuotaReplenishmentStateStore(
+            Path.Combine(directory.Path, QuotaReplenishmentStateStore.FileName)));
 
     private sealed class FakeNotifier : IQuotaAlertNotifier
     {

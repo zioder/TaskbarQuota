@@ -246,6 +246,29 @@ public sealed class QuotaReplenishmentCrossSessionTests : IDisposable
         Assert.Equal(Earlier().AddHours(2), LoadPersisted().ObservedAt);
     }
 
+    [Fact]
+    public void OlderObservationCannotReplaceNewerPersistedValues()
+    {
+        var store = new QuotaReplenishmentStateStore(StatePath);
+        var newer = new PersistedQuotaProvider(
+            ProviderId.Codex,
+            QuotaReplenishmentStateStore.HashIdentity("account@example.test"),
+            Now(),
+            [new PersistedQuotaWindow("primary", "Session", 10, 300, null)]);
+        Assert.True(store.Upsert(newer));
+
+        var older = newer with
+        {
+            ObservedAt = Earlier(),
+            Windows = [new PersistedQuotaWindow("primary", "Session", 90, 300, null)],
+        };
+        Assert.True(store.Upsert(older));
+
+        var persisted = LoadPersisted();
+        Assert.Equal(Now(), persisted.ObservedAt);
+        Assert.Equal(10, Assert.Single(persisted.Windows).UsedPercent);
+    }
+
     private void Seed(
         double usedPercent,
         double? secondaryUsedPercent = null,
