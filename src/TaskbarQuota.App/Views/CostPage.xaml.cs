@@ -21,7 +21,7 @@ namespace TaskbarQuota.Views
             Loaded -= CostPage_Loaded;
             DispatcherQueue.TryEnqueue(
                 Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
-                () => _ = ViewModel.LoadAsync());
+                () => _ = ViewModel.LoadHistoryAsync());
         }
 
         protected override void OnNavigatedTo(NavigationEventArgs e)

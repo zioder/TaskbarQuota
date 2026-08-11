@@ -126,6 +126,26 @@ namespace TaskbarQuota.ViewModels
         /// <summary>Initial load using cached values (no forced network).</summary>
         public Task LoadAsync() => LoadProgressiveAsync(force: false);
 
+        /// <summary>
+        /// Refreshes the cost/history data for the cost view without forcing a network refresh or
+        /// re-hydrating the quota cards. This is the only on-demand path that re-reads provider
+        /// history from disk (besides the explicit refresh button).
+        /// </summary>
+        public async Task LoadHistoryAsync()
+        {
+            if (IsRefreshing) return;
+
+            var active = UsageCoordinator.Instance.ActiveProvider;
+            var results = _lastResults.Count > 0
+                ? _lastResults
+                : await Task.Run(() => BuildDashboardResults(active)).ConfigureAwait(false);
+            var usageResults = await Task.Run(
+                () => BuildUsageHistoryResults(results, refresh: true)).ConfigureAwait(false);
+
+            _dispatcher.TryEnqueue(() =>
+                UpdateCards(results, active, refreshUsageSnapshot: true, usageResults: usageResults));
+        }
+
         private void OnPercentageModeChanged(object? sender, EventArgs e)
             => _dispatcher.TryEnqueue(() => UpdateCards(_lastResults, _lastActive, force: true));
 
@@ -189,7 +209,7 @@ namespace TaskbarQuota.ViewModels
                     var completed = await Task.Run(() =>
                     {
                         var merged = BuildDashboardResults(finalActive, finalResults);
-                        return (Results: merged, UsageResults: BuildUsageHistoryResults(merged));
+                        return (Results: merged, UsageResults: BuildUsageHistoryResults(merged, force));
                     }).ConfigureAwait(false);
                     _dispatcher.TryEnqueue(() =>
                     {
@@ -410,7 +430,9 @@ namespace TaskbarQuota.ViewModels
             return OrderResults(merged.Values.ToArray(), active).ToList();
         }
 
-        private static IReadOnlyList<UsageResult> BuildUsageHistoryResults(IReadOnlyList<UsageResult> results)
+        private static IReadOnlyList<UsageResult> BuildUsageHistoryResults(
+            IReadOnlyList<UsageResult> results,
+            bool refresh = false)
         {
             var combined = results
                 .Where(result => result.Fetch?.Usage.UsageHistory is not null)
@@ -418,8 +440,24 @@ namespace TaskbarQuota.ViewModels
             var service = UsageCoordinator.Instance.Service;
             foreach (var provider in service.All)
             {
-                if (combined.ContainsKey(provider.Id)
-                    || !UsageHistoryService.TryLoad(provider.Id, out var history))
+                if (combined.ContainsKey(provider.Id))
+                {
+                    // Only an explicit refresh re-reads the provider's local files; periodic loads
+                    // keep whatever history the fetch already carried (served from memory).
+                    if (refresh
+                        && UsageHistoryService.TryLoad(provider.Id, out var fresh, force: true)
+                        && combined[provider.Id].Fetch?.Usage is { } refreshedUsage)
+                        refreshedUsage.UsageHistory = fresh;
+                    continue;
+                }
+
+                UsageHistory? history;
+                bool loaded;
+                if (refresh)
+                    loaded = UsageHistoryService.TryLoad(provider.Id, out history, force: true);
+                else
+                    loaded = UsageHistoryService.TryGetCachedHistory(provider.Id, out history);
+                if (!loaded)
                     continue;
 
                 var usage = new UsageSnapshot(new RateWindow(0)) { UsageHistory = history };
