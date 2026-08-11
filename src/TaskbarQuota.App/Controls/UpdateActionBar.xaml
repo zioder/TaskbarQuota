@@ -6,7 +6,8 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
-    HorizontalAlignment="Stretch">
+    HorizontalAlignment="Stretch"
+    VerticalContentAlignment="Center">
 
     <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -14,15 +15,21 @@
             CornerRadius="8"
             Padding="12,10"
             HorizontalAlignment="Stretch">
-        <Grid RowSpacing="8" HorizontalAlignment="Stretch">
+        <Grid RowSpacing="8"
+              HorizontalAlignment="Stretch"
+              VerticalAlignment="Center">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
-            <Grid Grid.Row="0" ColumnSpacing="8">
+            <Grid Grid.Row="0"
+                  ColumnSpacing="8"
+                  HorizontalAlignment="Stretch"
+                  VerticalAlignment="Center">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
@@ -51,10 +58,24 @@
                         Grid.Column="1"
                         MinWidth="120"
                         VerticalAlignment="Center"
+                        VerticalContentAlignment="Center"
                         Click="ActionButton_Click"
                         AutomationProperties.AutomationId="UpdateActionButton"
                         Content="Install update"
                         Style="{StaticResource AccentButtonStyle}"/>
+
+                <Button x:Name="DismissButton"
+                        Grid.Column="2"
+                        Padding="6,4"
+                        VerticalAlignment="Center"
+                        VerticalContentAlignment="Center"
+                        Visibility="Collapsed"
+                        Click="DismissButton_Click"
+                        AutomationProperties.AutomationId="UpdateDismissButton"
+                        AutomationProperties.Name="Dismiss update"
+                        ToolTipService.ToolTip="Hide until the next update">
+                    <FontIcon Glyph="&#xE711;" FontSize="10"/>
+                </Button>
             </Grid>
 
             <ProgressBar x:Name="DownloadProgress"

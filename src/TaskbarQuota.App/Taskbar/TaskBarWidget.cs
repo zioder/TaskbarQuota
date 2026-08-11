@@ -255,7 +255,23 @@ namespace TaskbarQuota.Taskbar
         /// </summary>
         public bool HasVisibleActivity => WidgetSettingsService.ShowAgentActivityInWidget
             && activitySnapshot.Primary is not null;
+        /// <summary>Raised when the update dot on the leading tile is right-clicked.</summary>
+        public event Action? UpdateBadgeDismissRequested;
         public event EventHandler? Destroying;
+
+        // Last update-badge tooltip handed over via SetUpdateBadge; replayed onto the leading
+        // tile once Initialize() has built the panel. Null hides the dot.
+        private string? updateBadgeTooltip;
+
+        /// <summary>Shows or hides the update-available dot on the leading tile. Overlay only —
+        /// it never participates in the tile-fit width math.</summary>
+        public void SetUpdateBadge(string? tooltip)
+        {
+            updateBadgeTooltip = tooltip;
+            // Slot 0 always binds first (providers are bound leftmost-first), so a hidden slot 0
+            // means no tile is showing and the dot would have nothing to attach to anyway.
+            tiles[0]?.SetUpdateBadge(tooltip);
+        }
 
         public TaskBarWidget(TaskbarWindowTarget target)
         {
@@ -340,6 +356,7 @@ namespace TaskbarQuota.Taskbar
             // same "no panel yet" early-out on every health tick. That left the host injected with every
             // tile still collapsed — an invisible widget for the life of the process.
             ApplyPendingDisplayProviders();
+            tiles[0]?.SetUpdateBadge(updateBadgeTooltip);
         }
 
         private void InitializeActivityHost(RECT taskbarRect)
@@ -627,6 +644,7 @@ namespace TaskbarQuota.Taskbar
             summary.PointerReleased += WidgetSummary_PointerReleased;
             summary.PointerCanceled += WidgetSummary_PointerCanceled;
             summary.Clicked += OnTileClicked;
+            summary.UpdateBadgeDismissRequested += () => UpdateBadgeDismissRequested?.Invoke();
             return summary;
         }
 

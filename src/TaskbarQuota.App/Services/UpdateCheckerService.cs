@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using TaskbarQuota.Diagnostics;
 
 namespace TaskbarQuota.Services;
 
@@ -17,6 +18,22 @@ public sealed class UpdateCheckerService
     private const string HttpUserAgent = "TaskbarQuota";
     private static readonly Uri StoreProductUri = new("ms-windows-store://pdp/?productid=9N3KL49VFPVN");
 
+    /// <summary>
+    /// Development-only override used to exercise the update badge without publishing a release.
+    /// Set this before launching the app (for example, <c>$env:TASKBARQUOTA_FAKE_UPDATE_VERSION='9.9.9'</c>).
+    /// </summary>
+    public const string FakeUpdateVersionEnvironmentVariable = "TASKBARQUOTA_FAKE_UPDATE_VERSION";
+
+    /// <summary>
+    /// Optional development-only file override. The file is read on every check, so its version can be
+    /// changed while the app is running to verify that a newer release re-surfaces a dismissed badge.
+    /// </summary>
+    public const string FakeUpdateFileEnvironmentVariable = "TASKBARQUOTA_FAKE_UPDATE_FILE";
+
+    /// <summary>Optional path to a real installer to use for the fake GitHub release. When omitted,
+    /// the test hook creates a harmless local command file that records when it was launched.</summary>
+    public const string FakeUpdateInstallerEnvironmentVariable = "TASKBARQUOTA_FAKE_UPDATE_INSTALLER";
+
     public async Task<UpdateCheckResult> CheckAsync(string currentVersion, CancellationToken cancellationToken = default)
         => await CheckAsync(currentVersion, AppDistribution.CurrentChannel, cancellationToken).ConfigureAwait(false);
 
@@ -25,6 +42,12 @@ public sealed class UpdateCheckerService
         AppDistributionChannel distributionChannel,
         CancellationToken cancellationToken = default)
     {
+        if (TryReadFakeVersion() is { } fakeVersion
+            && TryCreateFakeUpdate(fakeVersion, currentVersion, distributionChannel) is { } fakeResult)
+        {
+            return fakeResult;
+        }
+
         using var client = new HttpClient();
         client.DefaultRequestHeaders.UserAgent.ParseAdd(HttpUserAgent);
         client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
@@ -67,6 +90,92 @@ public sealed class UpdateCheckerService
             UpdateDeliveryChannel.GitHubUnsigned);
     }
 
+    /// <summary>Creates the deterministic result used by the manual badge test hook.</summary>
+    internal static UpdateCheckResult? TryCreateFakeUpdate(
+        string fakeVersion,
+        string currentVersion,
+        AppDistributionChannel distributionChannel)
+    {
+        var normalized = VersionComparer.Normalize(fakeVersion);
+        if (!IsNumericVersion(normalized))
+            return null;
+
+        if (VersionComparer.Compare(normalized, VersionComparer.Normalize(currentVersion)) <= 0)
+            return UpdateCheckResult.UpToDate;
+
+        var channel = distributionChannel == AppDistributionChannel.MicrosoftStore
+            ? UpdateDeliveryChannel.MicrosoftStore
+            : UpdateDeliveryChannel.GitHubUnsigned;
+        var releaseUrl = channel == UpdateDeliveryChannel.MicrosoftStore
+            ? StoreProductUri
+            : new Uri($"https://github.com/zioder/TaskbarQuota/releases/tag/v{normalized}");
+
+        var downloadUrl = channel == UpdateDeliveryChannel.GitHubUnsigned
+            && TryGetFakeInstallerPath(normalized) is { } installerPath
+            ? new Uri(Path.GetFullPath(installerPath))
+            : null;
+
+        return UpdateCheckResult.UpdateAvailable(normalized, releaseUrl, downloadUrl, channel);
+    }
+
+    private static string? TryReadFakeVersion()
+    {
+        var filePath = Environment.GetEnvironmentVariable(FakeUpdateFileEnvironmentVariable)?.Trim();
+        if (!string.IsNullOrWhiteSpace(filePath))
+        {
+            try
+            {
+                if (File.Exists(filePath) && File.ReadAllText(filePath).Trim() is { Length: > 0 } version)
+                    return version;
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, $"Failed to read {FakeUpdateFileEnvironmentVariable}");
+            }
+        }
+
+        return Environment.GetEnvironmentVariable(FakeUpdateVersionEnvironmentVariable)?.Trim()
+            is { Length: > 0 } environmentVersion
+            ? environmentVersion
+            : null;
+    }
+
+    private static bool IsNumericVersion(string version)
+    {
+        var parts = version.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length > 0 && parts.All(static part => int.TryParse(part, out _));
+    }
+
+    private static string? TryGetFakeInstallerPath(string version)
+    {
+        var configured = Environment.GetEnvironmentVariable(FakeUpdateInstallerEnvironmentVariable)?.Trim();
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            if (File.Exists(configured))
+                return configured;
+
+            Log.Warning($"{FakeUpdateInstallerEnvironmentVariable} does not point to a file: {configured}");
+            return null;
+        }
+
+        try
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "TaskbarQuota", "FakeUpdates");
+            Directory.CreateDirectory(directory);
+            var installer = Path.Combine(directory, $"TaskbarQuotaSetup-{version}-fake.cmd");
+            var marker = Path.Combine(directory, $"fake-installer-launched-{version}.txt");
+            File.WriteAllText(
+                installer,
+                $"@echo off\r\n>\"{marker}\" echo TaskbarQuota fake installer launched for v{version}\r\n");
+            return installer;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Failed to create fake update installer");
+            return null;
+        }
+    }
+
     public async Task<DownloadedUpdate> DownloadAsync(
         UpdateCheckResult result,
         IProgress<UpdateDownloadProgress>? progress = null,
@@ -78,6 +187,9 @@ public sealed class UpdateCheckerService
         {
             throw new InvalidOperationException("The latest GitHub release does not include a downloadable Windows installer.");
         }
+
+        if (result.DownloadUrl.IsFile)
+            return await CopyLocalInstallerAsync(result, progress, cancellationToken).ConfigureAwait(false);
 
         using var client = new HttpClient();
         client.DefaultRequestHeaders.UserAgent.ParseAdd(HttpUserAgent);
@@ -112,7 +224,38 @@ public sealed class UpdateCheckerService
             progress?.Report(new UpdateDownloadProgress(received, totalBytes, fileName));
         }
 
-        return new DownloadedUpdate(result.Version, destination);
+        return new DownloadedUpdate(result.Version!, destination);
+    }
+
+    private static async Task<DownloadedUpdate> CopyLocalInstallerAsync(
+        UpdateCheckResult result,
+        IProgress<UpdateDownloadProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var source = result.DownloadUrl!.LocalPath;
+        if (!File.Exists(source))
+            throw new FileNotFoundException("The local update installer was not found.", source);
+
+        var fileName = Path.GetFileName(source);
+        var directory = GetUpdateDownloadDirectory(result.Version!);
+        Directory.CreateDirectory(directory);
+        var destination = Path.Combine(directory, fileName);
+        var totalBytes = new FileInfo(source).Length;
+        progress?.Report(new UpdateDownloadProgress(0, totalBytes, fileName));
+
+        await using var input = File.OpenRead(source);
+        await using var output = File.Create(destination);
+        var buffer = new byte[81_920];
+        long received = 0;
+        int read;
+        while ((read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken)) > 0)
+        {
+            await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+            received += read;
+            progress?.Report(new UpdateDownloadProgress(received, totalBytes, fileName));
+        }
+
+        return new DownloadedUpdate(result.Version!, destination);
     }
 
     private static bool IsTaskbarQuotaSetupExe(GitHubAsset asset) =>

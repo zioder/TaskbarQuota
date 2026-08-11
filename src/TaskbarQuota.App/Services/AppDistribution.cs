@@ -13,22 +13,24 @@ internal static class AppDistribution
 {
     public const string StorePackageFamilyName = "ZiedKallel.TaskbarQuota_q2e4dm2bjnsne";
 
-    public static AppDistributionChannel CurrentChannel => IsMicrosoftStorePackage()
-        ? AppDistributionChannel.MicrosoftStore
-        : AppDistributionChannel.UnsignedGitHub;
-
-    private static bool IsMicrosoftStorePackage()
+    public static AppDistributionChannel CurrentChannel
     {
-        try
+        get
         {
-            return string.Equals(
-                Package.Current.Id.FamilyName,
-                StorePackageFamilyName,
-                StringComparison.OrdinalIgnoreCase);
-        }
-        catch (InvalidOperationException)
-        {
-            return false;
+            try
+            {
+                return DetectChannel(Package.Current.Id.FamilyName);
+            }
+            catch (InvalidOperationException)
+            {
+                // Unpackaged GitHub installers have no Package identity.
+                return AppDistributionChannel.UnsignedGitHub;
+            }
         }
     }
+
+    internal static AppDistributionChannel DetectChannel(string? packageFamilyName) =>
+        string.Equals(packageFamilyName, StorePackageFamilyName, StringComparison.OrdinalIgnoreCase)
+            ? AppDistributionChannel.MicrosoftStore
+            : AppDistributionChannel.UnsignedGitHub;
 }
