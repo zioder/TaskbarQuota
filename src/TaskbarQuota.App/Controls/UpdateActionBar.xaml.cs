@@ -117,7 +117,7 @@ public sealed partial class UpdateActionBar : UserControl
             ? "Open Store"
             : _updates.AvailableUpdate?.DownloadUrl is null
                 ? "View release"
-                : "Download update";
+                : "Install update";
         break;
 
       case UpdateAvailabilityUiState.Downloading:
@@ -200,6 +200,8 @@ public sealed partial class UpdateActionBar : UserControl
         else
         {
           await DownloadAsync();
+          if (_updates.UiState == UpdateAvailabilityUiState.ReadyToInstall)
+            _updates.InstallAndQuit();
         }
 
         break;

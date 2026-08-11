@@ -291,8 +291,15 @@ choose **Check for updates** in Settings; the dot and flyout banner should reapp
 Set-Content $fakeRelease "9.9.10"
 ```
 
-The fake result has no installer URL, so this flow never downloads or launches an installer. Remove the
-environment variable when finished with the test (`Remove-Item Env:TASKBARQUOTA_FAKE_UPDATE_FILE`).
+For an unpackaged GitHub build, the fake release creates a harmless local installer script, so the action bar
+uses the same **Install update** → download → launch path as a real GitHub release. To exercise a real installer
+instead, set `TASKBARQUOTA_FAKE_UPDATE_INSTALLER` to its `.exe` path before launching. Store builds keep the
+Store redirect path and show **Open Store**. Remove the environment variables when finished:
+
+```powershell
+Remove-Item Env:TASKBARQUOTA_FAKE_UPDATE_FILE -ErrorAction SilentlyContinue
+Remove-Item Env:TASKBARQUOTA_FAKE_UPDATE_INSTALLER -ErrorAction SilentlyContinue
+```
 
 ### Manual credentials (optional)
 

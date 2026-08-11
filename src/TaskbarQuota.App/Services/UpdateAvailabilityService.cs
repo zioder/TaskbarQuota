@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -256,6 +257,7 @@ public sealed class UpdateAvailabilityService
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(downloaded.FilePath)
             {
                 UseShellExecute = true,
+                WorkingDirectory = Path.GetDirectoryName(downloaded.FilePath),
             });
             App.Quit();
             return;
@@ -301,7 +303,9 @@ public sealed class UpdateAvailabilityService
             if (!Directory.Exists(directory))
                 return null;
 
-            foreach (var file in Directory.EnumerateFiles(directory, "TaskbarQuotaSetup-*.exe"))
+            foreach (var file in Directory.EnumerateFiles(directory, "TaskbarQuotaSetup-*")
+                .Where(static path => string.Equals(Path.GetExtension(path), ".exe", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(Path.GetExtension(path), ".cmd", StringComparison.OrdinalIgnoreCase)))
                 return file;
         }
         catch

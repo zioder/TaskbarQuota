@@ -144,7 +144,7 @@ public sealed class UpdateAvailabilityStateTests
         if (expectedKind == UpdateCheckResultKind.UpdateAvailable)
         {
             Assert.Equal(VersionComparer.Normalize(fakeVersion), result.Version);
-            Assert.Null(result.DownloadUrl);
+            Assert.Equal(Uri.UriSchemeFile, result.DownloadUrl?.Scheme);
             Assert.Equal(UpdateDeliveryChannel.GitHubUnsigned, result.DeliveryChannel);
         }
     }
@@ -156,5 +156,31 @@ public sealed class UpdateAvailabilityStateTests
             "9.9.9-preview",
             "1.1.2",
             AppDistributionChannel.UnsignedGitHub));
+    }
+
+    [Fact]
+    public void Fake_store_release_redirects_without_an_installer()
+    {
+        var result = UpdateCheckerService.TryCreateFakeUpdate(
+            "9.9.9",
+            "1.1.2",
+            AppDistributionChannel.MicrosoftStore);
+
+        Assert.NotNull(result);
+        Assert.Equal(UpdateDeliveryChannel.MicrosoftStore, result.DeliveryChannel);
+        Assert.Null(result.DownloadUrl);
+        Assert.Equal("ms-windows-store", result.ReleaseUrl?.Scheme);
+    }
+
+    [Theory]
+    [InlineData(null, 0)]
+    [InlineData("", 0)]
+    [InlineData("ZiedKallel.TaskbarQuota_q2e4dm2bjnsne", 1)]
+    [InlineData("other.package_family", 0)]
+    public void Distribution_detection_distinguishes_store_and_unpacked_installs(
+        string? packageFamilyName,
+        int expected)
+    {
+        Assert.Equal((AppDistributionChannel)expected, AppDistribution.DetectChannel(packageFamilyName));
     }
 }
