@@ -203,6 +203,7 @@ namespace TaskbarQuota.Interop
     public static class DwmApi
     {
         public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+        public const int DWMWA_CLOAK = 13;
 
         [DllImport("dwmapi.dll")]
         public static extern int DwmSetWindowAttribute(
@@ -210,6 +211,13 @@ namespace TaskbarQuota.Interop
             int attribute,
             ref DwmWindowCornerPreference preference,
             int preferenceSize);
+
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmSetWindowAttribute(
+            IntPtr hwnd,
+            int attribute,
+            ref int value,
+            int valueSize);
     }
 
     public enum DwmWindowCornerPreference

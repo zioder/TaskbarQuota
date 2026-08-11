@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Composition.SystemBackdrops;
@@ -59,6 +60,13 @@ public sealed partial class FloatingUsageWindow : Window
     private DesktopAcrylicController? _acrylicController;
     private SystemBackdropConfiguration? _backdropConfiguration;
     private ThemeSettings? _themeSettings;
+    private bool _prewarming;
+    private bool _prewarmed;
+    private bool _prewarmCloaked;
+    private PointInt32 _prewarmRestorePosition;
+    private bool _hasPrewarmRestorePosition;
+    private bool _acrylicFrameReady;
+    private bool _acrylicFrameReadyScheduled;
 
     // Same instance for AddHandler/RemoveHandler; method-group casts would not match.
     private readonly PointerEventHandler _rootPointerPressed;
@@ -142,6 +150,7 @@ public sealed partial class FloatingUsageWindow : Window
         {
             ApplyAcrylicMaterial();
             ContentHost.EnsureVisibleContent();
+            ScheduleAcrylicFrameReady();
         };
 
         // handledEventsToo: activity title/step live inside a Button that marks PointerPressed handled.
@@ -278,7 +287,10 @@ public sealed partial class FloatingUsageWindow : Window
         // controller enters policy fallback (for example, Transparency effects off), it draws its own
         // solid FallbackColor behind the transparent content.
         ChromeFill.Background = new SolidColorBrush(tint);
-        ChromeFill.Opacity = _acrylicController is null ? 1 : 0;
+        // Keep an opaque fallback until the first compositor frame has landed. Showing a transparent
+        // XAML surface while Desktop Acrylic is still warming produces the black empty slab seen on
+        // the first switch to floating mode.
+        ChromeFill.Opacity = _acrylicController is null || !_acrylicFrameReady ? 1 : 0;
 
         if (_acrylicController is null || _backdropConfiguration is null)
             return;
@@ -295,6 +307,87 @@ public sealed partial class FloatingUsageWindow : Window
         _backdropConfiguration.IsInputActive = true;
         _backdropConfiguration.IsHighContrast = _themeSettings?.HighContrast == true;
         _backdropConfiguration.HighContrastBackgroundColor = tint;
+    }
+
+    /// <summary>
+    /// Builds the floating surface off-screen during idle time. The first visible switch can then reuse
+    /// the already-created XAML tree and warmed Acrylic controller instead of blocking the click.
+    /// </summary>
+    public void Prewarm()
+    {
+        if (_prewarmed || _appWindow is null)
+            return;
+
+        _prewarmed = true;
+        _prewarming = true;
+        _prewarmRestorePosition = _appWindow.Position;
+        _hasPrewarmRestorePosition = true;
+        SetPrewarmCloak(true);
+        _appWindow.Move(new PointInt32(-32000, -32000));
+        _appWindow.Show(false);
+        ScheduleAcrylicFrameReady();
+
+        // Give Loaded/layout and one compositor turn a chance to complete before hiding the window.
+        DispatcherQueue.TryEnqueue(
+            DispatcherQueuePriority.Low,
+            () => DispatcherQueue.TryEnqueue(
+                DispatcherQueuePriority.Low,
+                () =>
+                {
+                    _prewarming = false;
+                    RestorePrewarmPosition();
+                    if (!_shown && _appWindow is { IsVisible: true } appWindow)
+                    {
+                        appWindow.Hide();
+                        SetPrewarmCloak(false);
+                    }
+                }));
+    }
+
+    private void RestorePrewarmPosition()
+    {
+        if (!_hasPrewarmRestorePosition || _appWindow is null)
+            return;
+
+        _appWindow.Move(_prewarmRestorePosition);
+        _hasPrewarmRestorePosition = false;
+    }
+
+    private void SetPrewarmCloak(bool cloaked)
+    {
+        try
+        {
+            var hwnd = Handle;
+            if (hwnd == IntPtr.Zero)
+                return;
+
+            int value = cloaked ? 1 : 0;
+            if (DwmApi.DwmSetWindowAttribute(hwnd, DwmApi.DWMWA_CLOAK, ref value, sizeof(int)) == 0)
+                _prewarmCloaked = cloaked;
+        }
+        catch
+        {
+            // Cloaking is only a visual warm-up optimization; the opaque fallback still prevents a
+            // partially composed window from flashing if DWM policy rejects the attribute.
+        }
+    }
+
+    private void ScheduleAcrylicFrameReady()
+    {
+        if (_acrylicController is null || _acrylicFrameReady || _acrylicFrameReadyScheduled)
+            return;
+
+        _acrylicFrameReadyScheduled = true;
+        DispatcherQueue.TryEnqueue(
+            DispatcherQueuePriority.Low,
+            () => DispatcherQueue.TryEnqueue(
+                DispatcherQueuePriority.Low,
+                () =>
+                {
+                    _acrylicFrameReadyScheduled = false;
+                    _acrylicFrameReady = true;
+                    ApplyAcrylicMaterial();
+                }));
     }
 
     /// <summary>
@@ -354,11 +447,18 @@ public sealed partial class FloatingUsageWindow : Window
 
         if (visible)
         {
+            // A user click can arrive while the idle prewarm is between its two dispatcher turns.
+            // Promote that prewarm to the real presentation rather than leaving the window off-screen.
+            _prewarming = false;
+            RestorePrewarmPosition();
+            if (_prewarmCloaked)
+                SetPrewarmCloak(false);
             ApplyBounds(forceShow: true);
             if (!_appWindow.IsVisible)
                 _appWindow.Show(false);
             _shown = true;
             ApplyAcrylicMaterial();
+            ScheduleAcrylicFrameReady();
             // Hide/show and settings thrash can leave tiles at Opacity 0 while still "assigned".
             ContentHost.EnsureVisibleContent();
         }
@@ -598,6 +698,9 @@ public sealed partial class FloatingUsageWindow : Window
     private void ApplyBounds(bool forceShow)
     {
         if (_appWindow is null)
+            return;
+
+        if (_prewarming && !_shown)
             return;
 
         double scale = Root.XamlRoot?.RasterizationScale ?? GetWindowScale();
