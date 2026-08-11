@@ -205,7 +205,7 @@ namespace TaskbarQuota
                 }
                 : null;
 
-            ToolTipService.SetToolTip(item, pinned ? $"{displayName} — pinned to the taskbar" : displayName);
+            ToolTipService.SetToolTip(item, pinned ? $"{displayName} — pinned in the usage widget" : displayName);
         }
 
         /// <summary>

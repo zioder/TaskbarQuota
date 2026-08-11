@@ -56,6 +56,32 @@ namespace TaskbarQuota.Controls
 
         public bool SuppressNextClick { get; set; }
 
+        private bool _useApplicationChromeColors;
+
+        /// <summary>
+        /// When true, tile colors follow the app theme (floating window chrome) instead of the system
+        /// taskbar light/dark palette used by the injected taskbar island.
+        /// </summary>
+        public bool UseApplicationChromeColors
+        {
+            get => _useApplicationChromeColors;
+            set
+            {
+                if (_useApplicationChromeColors == value)
+                    return;
+                _useApplicationChromeColors = value;
+                // Re-color if the flag flips after construction (tiles already rendered).
+                if (_hasRevealed || _lastResult is not null || _renderedRows.Count > 0)
+                {
+                    ApplyTaskbarForeground();
+                    if (_lastResult is { } result)
+                        Apply(result, force: true);
+                    else
+                        RenderRows();
+                }
+            }
+        }
+
         /// <summary>
         /// Skips the cross-fade on the next render. Set when a tile is taking over another provider as part
         /// of a re-order: the movement is being conveyed by <see cref="AnimateSlide"/>, and fading the
@@ -133,6 +159,16 @@ namespace TaskbarQuota.Controls
             ApplyTaskbarForeground();
             RenderRows();
             WidgetSettingsService.Changed += OnWidgetSettingsChanged;
+            // App light/dark on the floating HUD changes ActualTheme; re-color so text never stays
+            // white-on-light or dark-on-dark after a theme switch.
+            ActualThemeChanged += (_, _) =>
+            {
+                if (UseApplicationChromeColors)
+                {
+                    ApplyTaskbarForeground();
+                    SetBars();
+                }
+            };
             Tapped += (_, _) =>
             {
                 if (SuppressNextClick)
@@ -150,7 +186,13 @@ namespace TaskbarQuota.Controls
 
         private void ApplyTaskbarForeground()
         {
-            bool light = Interop.SystemInfos.IsSystemLightThemeUsed() == true;
+            // Never pull theme brushes from Application.Current.Resources for the floating window:
+            // those resolve against Application.RequestedTheme (often system-dark) while the window
+            // RequestedTheme is Light — white text on a light card. Use ActualTheme + solid colors.
+            bool light = UseApplicationChromeColors
+                ? ThemeService.IsLightChrome(this)
+                : Interop.SystemInfos.IsSystemLightThemeUsed() == true;
+
             Foreground = new SolidColorBrush(light ? Color.FromArgb(255, 28, 28, 28) : Colors.White);
             var track = new SolidColorBrush(light ? Color.FromArgb(90, 28, 28, 28) : Color.FromArgb(110, 255, 255, 255));
 
@@ -158,6 +200,18 @@ namespace TaskbarQuota.Controls
             {
                 row.Track.Background = track;
                 row.Value.Foreground = Foreground;
+                if (row.Label is TextBlock labelBlock)
+                    labelBlock.Foreground = Foreground;
+                else if (row.Label is Panel labelPanel)
+                {
+                    foreach (var child in labelPanel.Children)
+                    {
+                        if (child is TextBlock tb)
+                            tb.Foreground = Foreground;
+                    }
+                }
+                if (row.Reset is { } resetBlock)
+                    resetBlock.Foreground = ResetBrush(row.Source.ResetDescription ?? "");
             }
             UpdateBadgeFill();
         }
@@ -409,8 +463,14 @@ namespace TaskbarQuota.Controls
 
         public void SetActiveToolVisible(bool isVisible)
         {
+            // If we already believe we are visible but the root was left at Opacity 0 (interrupted
+            // hide/reveal, first-paint race, or a settings thrash), force a re-show instead of no-op.
             if (_isActiveToolVisible == isVisible)
+            {
+                if (isVisible && Root.Opacity < 0.05)
+                    AnimateVisibility(toOpacity: 1, toOffset: 0, milliseconds: 200);
                 return;
+            }
 
             _isActiveToolVisible = isVisible;
             IsHitTestVisible = isVisible;
@@ -1287,6 +1347,7 @@ namespace TaskbarQuota.Controls
                 0.86,
                 compactTextOnlyValue ? TextAlignment.Left : TextAlignment.Center,
                 textSize);
+            value.Foreground = Foreground;
             var reset = CreateResetText(usageRow, textSize);
 
             FrameworkElement label;
@@ -1366,7 +1427,7 @@ namespace TaskbarQuota.Controls
                     break;
             }
 
-            _renderedRows.Add(new RenderedRow(usageRow, track, bar, barWidth, label, value));
+            _renderedRows.Add(new RenderedRow(usageRow, track, bar, barWidth, label, value, reset));
         }
 
         private static FrameworkElement CreateNormalizedGlyph(
@@ -1440,14 +1501,17 @@ namespace TaskbarQuota.Controls
             VerticalAlignment = VerticalAlignment.Center,
         };
 
-        private static FrameworkElement CreateLabelText(WidgetUsageRow row, WidgetDisplayMode mode, int fontSize = WidgetFontSize)
+        private FrameworkElement CreateLabelText(WidgetUsageRow row, WidgetDisplayMode mode, int fontSize = WidgetFontSize)
         {
             var baseLabel = CreateText(BaseLabelText(row, mode), 0.78, TextAlignment.Left, fontSize);
             baseLabel.TextTrimming = TextTrimming.None;
+            // Explicit brush: inheritance is unreliable once Application theme resources disagree
+            // with the floating window's light/dark chrome.
+            baseLabel.Foreground = Foreground;
             return baseLabel;
         }
 
-        private static TextBlock CreateResetText(WidgetUsageRow row, int fontSize = WidgetFontSize)
+        private TextBlock CreateResetText(WidgetUsageRow row, int fontSize = WidgetFontSize)
         {
             if (string.IsNullOrWhiteSpace(row.ResetDescription))
                 return CreateText("", 0.9, TextAlignment.Left, fontSize);
@@ -1473,18 +1537,38 @@ namespace TaskbarQuota.Controls
                 SetBar(row.Bar, row.Source.Percent, row.BarWidth);
         }
 
-        private static void SetBar(FrameworkElement bar, double percent, double maxWidth)
+        private void SetBar(FrameworkElement bar, double percent, double maxWidth)
         {
             bar.Width = Math.Clamp(percent, 0, 100) * (maxWidth / 100d);
-            string key = WidgetSettingsService.GetUsageBrushResourceKeyForDisplayPercent(percent);
-            if (bar is Border border)
+            if (bar is not Border border)
+                return;
+
+            bool emphasized = WidgetSettingsService.CurrentPercentageMode == PercentageDisplayMode.Remaining
+                ? percent <= 25
+                : percent >= 75;
+            border.Background = UsageBarBrush(percent);
+            border.Opacity = emphasized ? 0.95 : 0.78;
+        }
+
+        private Brush UsageBarBrush(double displayPercent)
+        {
+            if (UseApplicationChromeColors)
             {
-                bool emphasized = WidgetSettingsService.CurrentPercentageMode == PercentageDisplayMode.Remaining
-                    ? percent <= 25
-                    : percent >= 75;
-                border.Background = (Brush)Application.Current.Resources[key];
-                border.Opacity = emphasized ? 0.95 : 0.78;
+                bool light = ThemeService.IsLightChrome(this);
+                // Thresholds match WidgetSettingsService usage colors (critical / caution / normal).
+                displayPercent = Math.Clamp(displayPercent, 0, 100);
+                bool remaining = WidgetSettingsService.CurrentPercentageMode == PercentageDisplayMode.Remaining;
+                bool critical = remaining ? displayPercent <= 10 : displayPercent >= 90;
+                bool caution = remaining ? displayPercent <= 25 : displayPercent >= 75;
+                if (critical)
+                    return new SolidColorBrush(light ? Color.FromArgb(255, 196, 43, 28) : Color.FromArgb(255, 255, 99, 71));
+                if (caution)
+                    return new SolidColorBrush(light ? Color.FromArgb(255, 157, 93, 0) : Color.FromArgb(255, 255, 185, 0));
+                return new SolidColorBrush(light ? Color.FromArgb(255, 0, 103, 192) : Color.FromArgb(255, 96, 205, 255));
             }
+
+            string key = WidgetSettingsService.GetUsageBrushResourceKeyForDisplayPercent(displayPercent);
+            return (Brush)Application.Current.Resources[key];
         }
 
         private static string Abbrev(string name)
@@ -1609,8 +1693,30 @@ namespace TaskbarQuota.Controls
             return $"{local:MMM d h:mm tt}";
         }
 
-        private static Brush ResetBrush(string resetDescription)
+        private Brush ResetBrush(string resetDescription)
         {
+            // Floating HUD uses solid colors from the window chrome theme. Application.Current
+            // theme resources resolve against system/app dark mode and paint light-on-light
+            // secondary text (e.g. "(6h 25m)") when the floating window is in light mode.
+            if (UseApplicationChromeColors)
+            {
+                bool light = ThemeService.IsLightChrome(this);
+                return TryParseResetMinutes(resetDescription) switch
+                {
+                    // Urgent / soon: accent blue, darker on light chrome for contrast.
+                    <= 30 => new SolidColorBrush(light
+                        ? Color.FromArgb(255, 0, 90, 158)
+                        : Color.FromArgb(255, 96, 205, 255)),
+                    <= 120 => new SolidColorBrush(light
+                        ? Color.FromArgb(255, 0, 103, 192)
+                        : Color.FromArgb(255, 80, 180, 255)),
+                    // Normal reset countdown: muted primary, never pure theme secondary.
+                    _ => new SolidColorBrush(light
+                        ? Color.FromArgb(210, 28, 28, 28)
+                        : Color.FromArgb(210, 255, 255, 255)),
+                };
+            }
+
             string key = TryParseResetMinutes(resetDescription) switch
             {
                 <= 30 => "AccentFillColorDefaultBrush",
@@ -1684,7 +1790,8 @@ namespace TaskbarQuota.Controls
             Border Bar,
             double BarWidth,
             FrameworkElement? Label,
-            TextBlock Value);
+            TextBlock Value,
+            TextBlock? Reset = null);
 
         private sealed record WidgetLayoutMetrics(double LabelWidth, double ResetWidth, double ValueWidth);
     }

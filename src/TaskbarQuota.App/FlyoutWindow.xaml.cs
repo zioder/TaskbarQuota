@@ -40,12 +40,14 @@ namespace TaskbarQuota
         private bool _showingCost;
         private bool _sizeHooksRegistered;
         private bool _applyingBounds;
+        private bool _suppressSurfaceControlEvents;
         private DispatcherQueueTimer? _boundsUpdateTimer;
         private RectInt32? _lastAppliedBounds;
         private double _lastObservedScale = -1;
         private readonly DashboardViewModel _dashboardViewModel;
         private readonly Dictionary<ProviderId, FlyoutProviderStripItem> _providerStripItems = new();
         private int _stripIconCount;
+        private Slider? _floatingOpacitySlider;
         private static readonly TimeSpan BoundsCoalesceDelay = TimeSpan.FromMilliseconds(80);
 
         public bool IsShown => _shown;
@@ -53,7 +55,9 @@ namespace TaskbarQuota
         public FlyoutWindow()
         {
             InitializeComponent();
+            BuildFloatingOpacitySlider();
             UpdateActivityControls();
+            UpdateSurfaceControls();
             _dashboardViewModel = DashboardPage.SharedViewModel ?? new DashboardViewModel(DispatcherQueue);
             DashboardPage.SharedViewModel = _dashboardViewModel;
             _dashboardViewModel.Cards.CollectionChanged += DashboardCards_CollectionChanged;
@@ -104,6 +108,7 @@ namespace TaskbarQuota
         {
             Closed -= OnClosed;
             Activated -= OnActivated;
+            ThemeService.Unregister(Root);
             WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
             AgentActivityService.Instance.Changed -= OnActivityChanged;
             _dashboardViewModel.Cards.CollectionChanged -= DashboardCards_CollectionChanged;
@@ -119,6 +124,7 @@ namespace TaskbarQuota
             {
                 SyncProviderStripPins();
                 UpdateActivityControls();
+                UpdateSurfaceControls();
             });
 
         private void OnActivated(object sender, WindowActivatedEventArgs args)
@@ -234,6 +240,7 @@ namespace TaskbarQuota
         {
             Log.Debug("[cost-flyout] present above");
             _shown = true;
+            UpdateSurfaceControls();
             ApplyFlyoutBounds();
             GetAppWindow().Show();
             ActivateFlyout();
@@ -308,13 +315,102 @@ namespace TaskbarQuota
             ActivityWidgetButton.IsEnabled = monitoringEnabled;
             ActivityMonitoringButton.IsChecked = monitoringEnabled;
             ToolTipService.SetToolTip(ActivityWidgetButton,
-                widgetEnabled ? "Hide agent activity from taskbar widget" : "Show agent activity in taskbar widget");
+                widgetEnabled ? "Hide agent activity from usage widget" : "Show agent activity in usage widget");
             AutomationProperties.SetName(ActivityWidgetButton,
-                widgetEnabled ? "Hide agent activity from taskbar widget" : "Show agent activity in taskbar widget");
+                widgetEnabled ? "Hide agent activity from usage widget" : "Show agent activity in usage widget");
             ToolTipService.SetToolTip(ActivityMonitoringButton,
                 monitoringEnabled ? "Stop monitoring local agent activity" : "Start monitoring local agent activity");
             AutomationProperties.SetName(ActivityMonitoringButton,
                 monitoringEnabled ? "Stop monitoring local agent activity" : "Start monitoring local agent activity");
+        }
+
+        /// <summary>
+        /// Builds the opacity slider in code. WinUI RangeBase defaults Maximum=1; assigning Minimum=35
+        /// from XAML throws XamlParseException regardless of attribute order.
+        /// </summary>
+        private void BuildFloatingOpacitySlider()
+        {
+            if (_floatingOpacitySlider is not null)
+                return;
+
+            var slider = new Slider
+            {
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Center,
+                StepFrequency = 1,
+            };
+            // Order matters: raise Maximum first, then Minimum, then Value.
+            slider.Maximum = 100;
+            slider.Minimum = 35;
+            slider.Value = Math.Clamp(
+                Math.Round(WidgetSettingsService.FloatingOpacity * 100),
+                35,
+                100);
+            AutomationProperties.SetName(slider, "Floating acrylic strength");
+            AutomationProperties.SetAutomationId(slider, "FlyoutFloatingOpacitySlider");
+            ToolTipService.SetToolTip(slider, "Floating Acrylic strength (or scroll the floating window). Lower reveals more of the blurred desktop.");
+            slider.ValueChanged += FloatingOpacitySlider_ValueChanged;
+
+            FloatingOpacitySliderHost.Children.Clear();
+            FloatingOpacitySliderHost.Children.Add(slider);
+            _floatingOpacitySlider = slider;
+        }
+
+        private void UpdateSurfaceControls()
+        {
+            _suppressSurfaceControlEvents = true;
+            try
+            {
+                bool floating = WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Floating;
+                FloatingSurfaceButton.IsChecked = floating;
+                FloatingSurfaceButtonLabel.Text = floating ? "Floating" : "Taskbar";
+                ToolTipService.SetToolTip(FloatingSurfaceButton,
+                    floating
+                        ? "Switch back to the taskbar widget"
+                        : "Show usage as a floating always-on-top window");
+                AutomationProperties.SetName(FloatingSurfaceButton,
+                    floating
+                        ? "Show usage in the taskbar"
+                        : "Show usage as floating window");
+
+                int percent = (int)Math.Round(WidgetSettingsService.FloatingOpacity * 100);
+                if (_floatingOpacitySlider is { } slider)
+                {
+                    slider.Value = percent;
+                    slider.IsEnabled = floating;
+                    ToolTipService.SetToolTip(slider,
+                        floating
+                            ? "Floating acrylic strength"
+                            : "Acrylic strength applies when floating window mode is on");
+                }
+                FloatingOpacityLabel.Text = $"{percent}%";
+                FloatingOpacityLabel.Opacity = floating ? 0.9 : 0.45;
+            }
+            finally
+            {
+                _suppressSurfaceControlEvents = false;
+            }
+        }
+
+        private void FloatingSurfaceButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_suppressSurfaceControlEvents)
+                return;
+
+            bool wantFloating = FloatingSurfaceButton.IsChecked == true;
+            WidgetSettingsService.ApplySurface(
+                wantFloating ? WidgetSurfaceMode.Floating : WidgetSurfaceMode.Taskbar);
+            UpdateSurfaceControls();
+        }
+
+        private void FloatingOpacitySlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+        {
+            if (_suppressSurfaceControlEvents)
+                return;
+
+            int percent = (int)Math.Round(e.NewValue);
+            FloatingOpacityLabel.Text = $"{percent}%";
+            WidgetSettingsService.ApplyFloatingOpacity(percent / 100d);
         }
 
         private void OnActivityChanged(AgentActivitySnapshot snapshot)
@@ -541,29 +637,29 @@ namespace TaskbarQuota
                     return;
 
                 int gap = WindowDpi.ToPhysical(8, scale);
-                int maxHeight = Math.Max(WindowDpi.ToPhysical(320, scale), wr.top - gap);
-                h = Math.Min(h, maxHeight);
 
-                // Right-align the flyout to the widget, floating just above the taskbar.
-                int x = wr.right - w;
-                int y = wr.top - h - gap;
-
-                // Confine the flyout to the monitor that hosts the widget so it never straddles a
-                // monitor boundary on multi-display setups (issue #10).
-                if (TryGetWorkArea(_widgetHandle, out RECT work))
+                // Confine to the monitor that hosts the widget so it never straddles a display
+                // (issue #10). Prefer above the anchor; flip below when the top would crush height
+                // (floating window near the top of the screen).
+                RECT work;
+                if (!TryGetWorkArea(_widgetHandle, out work))
                 {
-                    w = Math.Min(w, work.right - work.left);
-                    h = Math.Min(h, work.bottom - work.top);
-                    x = Math.Clamp(wr.right - w, work.left, work.right - w);
-                    y = Math.Clamp(y, work.top, work.bottom - h);
-                }
-                else
-                {
-                    if (y < 0) y = 0;
-                    if (x < 0) x = 0;
+                    work = new RECT
+                    {
+                        left = 0,
+                        top = 0,
+                        right = Math.Max(w, wr.right),
+                        bottom = Math.Max(h + wr.bottom, wr.bottom + h),
+                    };
                 }
 
-                var bounds = new RectInt32(x, y, w, h);
+                var placement = FlyoutLayout.ComputePlacement(
+                    wr.left, wr.top, wr.right, wr.bottom,
+                    work.left, work.top, work.right, work.bottom,
+                    w, h, gap);
+
+                var bounds = new RectInt32(
+                    placement.X, placement.Y, placement.Width, placement.Height);
                 if (_lastAppliedBounds is { } last
                     && last.X == bounds.X
                     && last.Y == bounds.Y
@@ -737,7 +833,7 @@ namespace TaskbarQuota
             if (_providerStripItems.TryGetValue(id, out var item))
                 item.Pin.Visibility = pinned ? Visibility.Visible : Visibility.Collapsed;
 
-            ToolTipService.SetToolTip(button, pinned ? $"{displayName} — pinned to the taskbar" : displayName);
+            ToolTipService.SetToolTip(button, pinned ? $"{displayName} — pinned in the usage widget" : displayName);
         }
 
         /// <summary>

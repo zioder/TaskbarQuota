@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="TaskbarQuota.FloatingUsageWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:TaskbarQuota.Controls">
+
+    <Grid x:Name="Root" Background="Transparent">
+        <!-- Solid fallback only. Desktop Acrylic is supplied by the native composition backdrop. -->
+        <Border x:Name="ChromeFill"
+                CornerRadius="10"
+                Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                IsHitTestVisible="False"/>
+        <Border x:Name="Chrome"
+                CornerRadius="10"
+                BorderThickness="1"
+                Padding="10,6"
+                Background="Transparent"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+            <ScrollViewer x:Name="ContentScroller"
+                          AutomationProperties.Name="Floating usage content"
+                          IsTabStop="True"
+                          HorizontalScrollMode="Enabled"
+                          HorizontalScrollBarVisibility="Hidden"
+                          VerticalScrollMode="Disabled"
+                          VerticalScrollBarVisibility="Disabled"
+                          ZoomMode="Disabled">
+                <controls:QuotaWidgetContent x:Name="ContentHost"
+                                             VerticalAlignment="Center"
+                                             HorizontalAlignment="Left"/>
+            </ScrollViewer>
+        </Border>
+    </Grid>
+</Window>

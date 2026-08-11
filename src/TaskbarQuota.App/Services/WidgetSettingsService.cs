@@ -21,6 +21,16 @@ public enum PercentageDisplayMode
     Remaining = 1,
 }
 
+/// <summary>
+/// Where the compact usage UI is hosted: injected into each taskbar, or a single always-on-top
+/// floating window. Modes are mutually exclusive.
+/// </summary>
+public enum WidgetSurfaceMode
+{
+    Taskbar = 0,
+    Floating = 1,
+}
+
 public readonly record struct WidgetRowOption(string Id, string Label);
 
 public static class WidgetSettingsService
@@ -38,6 +48,12 @@ public static class WidgetSettingsService
 
     private static readonly string WidgetDisplayModePath =
         Path.Combine(AppStorage.AppDataDirectory, "widget-display-mode.txt");
+
+    private static string WidgetSurfaceModePath =>
+        Path.Combine(AppStorage.AppDataDirectory, "widget-surface-mode.txt");
+
+    private static string FloatingOpacityPath =>
+        Path.Combine(AppStorage.AppDataDirectory, "floating-opacity.txt");
 
     private static readonly string PercentageDisplayModePath =
         Path.Combine(AppStorage.AppDataDirectory, "percentage-display-mode.txt");
@@ -70,7 +86,17 @@ public static class WidgetSettingsService
     private static readonly Dictionary<string, bool> DashboardProviderVisibility = LoadDashboardProviderVisibility();
     private static readonly Dictionary<string, bool> ProviderPins = LoadProviderPins();
 
+    /// <summary>Minimum material strength for the floating usage window (35%).</summary>
+    public const double FloatingOpacityMin = 0.35;
+    /// <summary>Maximum material strength for the floating usage window.</summary>
+    public const double FloatingOpacityMax = 1.0;
+    /// <summary>Default floating Acrylic strength.</summary>
+    public const double FloatingOpacityDefault = 0.90;
+
     public static WidgetDisplayMode Current { get; private set; } = LoadWidgetDisplayMode();
+    public static WidgetSurfaceMode CurrentSurface { get; private set; } = LoadWidgetSurfaceMode();
+    /// <summary>Floating window Acrylic strength in the range [<see cref="FloatingOpacityMin"/>, <see cref="FloatingOpacityMax"/>].</summary>
+    public static double FloatingOpacity { get; private set; } = LoadFloatingOpacity();
     public static PercentageDisplayMode CurrentPercentageMode { get; private set; } = LoadPercentageDisplayMode();
     public static bool AutoHideUnavailable { get; private set; } = LoadAutoHideUnavailable();
     /// <summary>
@@ -88,6 +114,19 @@ public static class WidgetSettingsService
     public static event EventHandler? DashboardCompositionChanged;
     public static event EventHandler? PercentageModeChanged;
 
+    internal static void ReloadSurfaceSettingsForTesting()
+    {
+        CurrentSurface = LoadWidgetSurfaceMode();
+        FloatingOpacity = LoadFloatingOpacity();
+    }
+
+    internal static void RestoreSurfaceSettingsForTesting(
+        WidgetSurfaceMode surface, double floatingOpacity)
+    {
+        CurrentSurface = surface;
+        FloatingOpacity = floatingOpacity;
+    }
+
     public static void Apply(WidgetDisplayMode mode)
     {
         if (Current == mode)
@@ -95,6 +134,35 @@ public static class WidgetSettingsService
 
         Current = mode;
         Save(WidgetDisplayModePath, (int)mode);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ApplySurface(WidgetSurfaceMode mode)
+    {
+        if (CurrentSurface == mode)
+            return;
+
+        CurrentSurface = mode;
+        Save(WidgetSurfaceModePath, (int)mode);
+        // TaskBarManager enforces the taskbar budget after a current widget measurement exists.
+        // Doing it here would use the span cached before floating mode and could remove valid pins.
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Sets floating window Acrylic strength. Values outside
+    /// [<see cref="FloatingOpacityMin"/>, <see cref="FloatingOpacityMax"/>] are clamped.
+    /// </summary>
+    public static void ApplyFloatingOpacity(double opacity)
+    {
+        double clamped = Math.Clamp(opacity, FloatingOpacityMin, FloatingOpacityMax);
+        // Ignore sub-percent noise from slider drag so we don't rewrite disk every pixel.
+        if (Math.Abs(FloatingOpacity - clamped) < 0.005)
+            return;
+
+        FloatingOpacity = clamped;
+        // Persist as integer percent for stable round-trips.
+        Save(FloatingOpacityPath, (int)Math.Round(clamped * 100));
         Changed?.Invoke(null, EventArgs.Empty);
     }
 
@@ -488,6 +556,54 @@ public static class WidgetSettingsService
         catch
         {
             return WidgetDisplayMode.BarsOnly;
+        }
+    }
+
+    private static WidgetSurfaceMode LoadWidgetSurfaceMode()
+    {
+        try
+        {
+            if (!File.Exists(WidgetSurfaceModePath))
+                return WidgetSurfaceMode.Taskbar;
+
+            string raw = File.ReadAllText(WidgetSurfaceModePath);
+            return int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value)
+                && Enum.IsDefined(typeof(WidgetSurfaceMode), value)
+                ? (WidgetSurfaceMode)value
+                : WidgetSurfaceMode.Taskbar;
+        }
+        catch
+        {
+            return WidgetSurfaceMode.Taskbar;
+        }
+    }
+
+    private static double LoadFloatingOpacity()
+    {
+        try
+        {
+            if (!File.Exists(FloatingOpacityPath))
+                return FloatingOpacityDefault;
+
+            string raw = File.ReadAllText(FloatingOpacityPath).Trim();
+            // Stored as integer percent (35–100). Also accept a fractional 0–1 for hand-edited files.
+            if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int percent)
+                && percent is >= 1 and <= 100)
+            {
+                return Math.Clamp(percent / 100d, FloatingOpacityMin, FloatingOpacityMax);
+            }
+
+            if (double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out double fraction)
+                && fraction is > 0 and <= 1)
+            {
+                return Math.Clamp(fraction, FloatingOpacityMin, FloatingOpacityMax);
+            }
+
+            return FloatingOpacityDefault;
+        }
+        catch
+        {
+            return FloatingOpacityDefault;
         }
     }
 

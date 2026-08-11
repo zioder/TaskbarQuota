@@ -37,6 +37,7 @@ namespace TaskbarQuota
             // go of the static settings event or every reopen leaks one.
             Closed += (_, _) =>
             {
+                ThemeService.Unregister(Root);
                 _navigationBinder?.Dispose();
                 _navigationBinder = null;
             };

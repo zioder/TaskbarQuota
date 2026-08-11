@@ -148,4 +148,16 @@ public class OpenCodeGoProviderTests
         Assert.Equal(51, OpenCodeProvider.ExtractWindow(html, 10080, "weeklyUsage")!.UsedPercent, 1);
         Assert.Equal(12, OpenCodeProvider.ExtractWindow(html, 43200, "monthlyUsage")!.UsedPercent, 1);
     }
+
+    [Fact]
+    public void GoPagePayload_OnePercentWindowIsNotExpandedToOneHundredPercent()
+    {
+        var html = "<script>window.__data={rollingUsage:{usagePercent:1,resetInSec:7200}," +
+                   "weeklyUsage:{usagePercent:1,resetInSec:172800}," +
+                   "monthlyUsage:{usagePercent:1,resetInSec:1209600}}</script>";
+
+        Assert.Equal(1, OpenCodeProvider.ExtractWindow(html, 300, "rollingUsage")!.UsedPercent);
+        Assert.Equal(1, OpenCodeProvider.ExtractWindow(html, 10080, "weeklyUsage")!.UsedPercent);
+        Assert.Equal(1, OpenCodeProvider.ExtractWindow(html, 43200, "monthlyUsage")!.UsedPercent);
+    }
 }
