@@ -24,6 +24,7 @@
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
                 <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
@@ -55,6 +56,18 @@
                         AutomationProperties.AutomationId="UpdateActionButton"
                         Content="Install update"
                         Style="{StaticResource AccentButtonStyle}"/>
+
+                <Button x:Name="DismissButton"
+                        Grid.Column="2"
+                        Padding="6,4"
+                        VerticalAlignment="Center"
+                        Visibility="Collapsed"
+                        Click="DismissButton_Click"
+                        AutomationProperties.AutomationId="UpdateDismissButton"
+                        AutomationProperties.Name="Dismiss update"
+                        ToolTipService.ToolTip="Hide until the next update">
+                    <FontIcon Glyph="&#xE711;" FontSize="10"/>
+                </Button>
             </Grid>
 
             <ProgressBar x:Name="DownloadProgress"

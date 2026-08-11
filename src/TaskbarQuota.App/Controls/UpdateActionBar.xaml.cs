@@ -72,7 +72,7 @@ public sealed partial class UpdateActionBar : UserControl
       return;
     }
 
-    if (!_updates.IsBannerVisible)
+    if (!_updates.HasUpdate)
     {
       if (IsSettingsMode)
       {
@@ -84,9 +84,24 @@ public sealed partial class UpdateActionBar : UserControl
       return;
     }
 
+    // The flyout bar is dismissible chrome: once the user snoozes this version it stays
+    // hidden here (and on the taskbar badge) while Settings keeps offering the update.
+    if (!IsSettingsMode && !_updates.IsBannerVisible)
+    {
+      Visibility = Visibility.Collapsed;
+      return;
+    }
+
     Visibility = Visibility.Visible;
     ActionButton.ClearValue(StyleProperty);
     ActionButton.Style = (Style)Application.Current.Resources["AccentButtonStyle"];
+    // Dismiss is flyout-only chrome; Settings is the surface where a dismissed update
+    // stays visible and actionable.
+    DismissButton.Visibility = !IsSettingsMode
+        && _updates.UiState is UpdateAvailabilityUiState.UpdateAvailable
+            or UpdateAvailabilityUiState.ReadyToInstall
+        ? Visibility.Visible
+        : Visibility.Collapsed;
 
     switch (_updates.UiState)
     {
@@ -136,6 +151,7 @@ public sealed partial class UpdateActionBar : UserControl
   private void ApplySettingsIdle()
   {
     Visibility = Visibility.Visible;
+    DismissButton.Visibility = Visibility.Collapsed;
     StatusText.Text = _updates.UpToDateSummary
         ?? "Check for updates on GitHub when you are ready.";
     DetailText.Visibility = Visibility.Collapsed;
@@ -151,6 +167,7 @@ public sealed partial class UpdateActionBar : UserControl
   private void ApplySettingsChecking()
   {
     Visibility = Visibility.Visible;
+    DismissButton.Visibility = Visibility.Collapsed;
     StatusText.Text = "Checking for updates…";
     DetailText.Visibility = Visibility.Collapsed;
     BusyRing.Visibility = Visibility.Visible;
@@ -161,7 +178,7 @@ public sealed partial class UpdateActionBar : UserControl
 
   private async void ActionButton_Click(object sender, RoutedEventArgs e)
   {
-    if (IsSettingsMode && !_updates.IsBannerVisible && !_updates.IsChecking)
+    if (IsSettingsMode && !_updates.HasUpdate && !_updates.IsChecking)
     {
       await _updates.CheckManuallyAsync();
       return;
@@ -192,6 +209,8 @@ public sealed partial class UpdateActionBar : UserControl
         break;
     }
   }
+
+  private void DismissButton_Click(object sender, RoutedEventArgs e) => _updates.DismissUpdate();
 
   private async Task DownloadAsync()
   {

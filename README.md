@@ -270,6 +270,30 @@ Diagnostic log:
 %TEMP%\taskbarquota.log
 ```
 
+### Manual update-badge test
+
+The update checker has a development-only fake release override, so the taskbar dot can be tested without
+publishing a GitHub release. Point `TASKBARQUOTA_FAKE_UPDATE_FILE` at a text file containing a numeric version,
+then launch the app:
+
+```powershell
+$fakeRelease = Join-Path $env:TEMP "taskbarquota-fake-release.txt"
+Set-Content $fakeRelease "9.9.9"
+$env:TASKBARQUOTA_FAKE_UPDATE_FILE = $fakeRelease
+# Quit any existing TaskbarQuota instance first; the app is single-instance.
+dotnet run --project src/TaskbarQuota.App/TaskbarQuota.App.csproj
+```
+
+After the taskbar dot appears, right-click it to dismiss that version. Change the file to a newer version and
+choose **Check for updates** in Settings; the dot and flyout banner should reappear for the new version:
+
+```powershell
+Set-Content $fakeRelease "9.9.10"
+```
+
+The fake result has no installer URL, so this flow never downloads or launches an installer. Remove the
+environment variable when finished with the test (`Remove-Item Env:TASKBARQUOTA_FAKE_UPDATE_FILE`).
+
 ### Manual credentials (optional)
 
 ```text

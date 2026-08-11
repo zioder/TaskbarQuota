@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using TaskbarQuota.Diagnostics;
 
 namespace TaskbarQuota.Services;
 
@@ -17,6 +18,18 @@ public sealed class UpdateCheckerService
     private const string HttpUserAgent = "TaskbarQuota";
     private static readonly Uri StoreProductUri = new("ms-windows-store://pdp/?productid=9N3KL49VFPVN");
 
+    /// <summary>
+    /// Development-only override used to exercise the update badge without publishing a release.
+    /// Set this before launching the app (for example, <c>$env:TASKBARQUOTA_FAKE_UPDATE_VERSION='9.9.9'</c>).
+    /// </summary>
+    public const string FakeUpdateVersionEnvironmentVariable = "TASKBARQUOTA_FAKE_UPDATE_VERSION";
+
+    /// <summary>
+    /// Optional development-only file override. The file is read on every check, so its version can be
+    /// changed while the app is running to verify that a newer release re-surfaces a dismissed badge.
+    /// </summary>
+    public const string FakeUpdateFileEnvironmentVariable = "TASKBARQUOTA_FAKE_UPDATE_FILE";
+
     public async Task<UpdateCheckResult> CheckAsync(string currentVersion, CancellationToken cancellationToken = default)
         => await CheckAsync(currentVersion, AppDistribution.CurrentChannel, cancellationToken).ConfigureAwait(false);
 
@@ -25,6 +38,12 @@ public sealed class UpdateCheckerService
         AppDistributionChannel distributionChannel,
         CancellationToken cancellationToken = default)
     {
+        if (TryReadFakeVersion() is { } fakeVersion
+            && TryCreateFakeUpdate(fakeVersion, currentVersion, distributionChannel) is { } fakeResult)
+        {
+            return fakeResult;
+        }
+
         using var client = new HttpClient();
         client.DefaultRequestHeaders.UserAgent.ParseAdd(HttpUserAgent);
         client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
@@ -65,6 +84,59 @@ public sealed class UpdateCheckerService
                 ? downloadUri
                 : null,
             UpdateDeliveryChannel.GitHubUnsigned);
+    }
+
+    /// <summary>Creates the deterministic result used by the manual badge test hook.</summary>
+    internal static UpdateCheckResult? TryCreateFakeUpdate(
+        string fakeVersion,
+        string currentVersion,
+        AppDistributionChannel distributionChannel)
+    {
+        var normalized = VersionComparer.Normalize(fakeVersion);
+        if (!IsNumericVersion(normalized))
+            return null;
+
+        if (VersionComparer.Compare(normalized, VersionComparer.Normalize(currentVersion)) <= 0)
+            return UpdateCheckResult.UpToDate;
+
+        var channel = distributionChannel == AppDistributionChannel.MicrosoftStore
+            ? UpdateDeliveryChannel.MicrosoftStore
+            : UpdateDeliveryChannel.GitHubUnsigned;
+        var releaseUrl = channel == UpdateDeliveryChannel.MicrosoftStore
+            ? StoreProductUri
+            : new Uri($"https://github.com/zioder/TaskbarQuota/releases/tag/v{normalized}");
+
+        // There is intentionally no download URL: the fake release must never make a network request
+        // or offer an installer. It still drives the same available/dismissed taskbar UI state.
+        return UpdateCheckResult.UpdateAvailable(normalized, releaseUrl, downloadUrl: null, deliveryChannel: channel);
+    }
+
+    private static string? TryReadFakeVersion()
+    {
+        var filePath = Environment.GetEnvironmentVariable(FakeUpdateFileEnvironmentVariable)?.Trim();
+        if (!string.IsNullOrWhiteSpace(filePath))
+        {
+            try
+            {
+                if (File.Exists(filePath) && File.ReadAllText(filePath).Trim() is { Length: > 0 } version)
+                    return version;
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, $"Failed to read {FakeUpdateFileEnvironmentVariable}");
+            }
+        }
+
+        return Environment.GetEnvironmentVariable(FakeUpdateVersionEnvironmentVariable)?.Trim()
+            is { Length: > 0 } environmentVersion
+            ? environmentVersion
+            : null;
+    }
+
+    private static bool IsNumericVersion(string version)
+    {
+        var parts = version.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length > 0 && parts.All(static part => int.TryParse(part, out _));
     }
 
     public async Task<DownloadedUpdate> DownloadAsync(

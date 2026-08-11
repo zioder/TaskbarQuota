@@ -46,6 +46,23 @@
                         </Canvas>
                     </Viewbox>
                 </Border>
+
+                <!-- Update mark: accent dot top-right while a newer release is known and not
+                     dismissed. Left-click behaves like a tile click (opens the flyout);
+                     right-click dismisses the dot for that version. Overlay only — it never
+                     participates in the tile width math. -->
+                <Border x:Name="UpdateBadgeBox" Visibility="Collapsed"
+                        Width="13" Height="13" CornerRadius="6.5"
+                        Margin="0,-3,-3,0"
+                        HorizontalAlignment="Right" VerticalAlignment="Top"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                        BorderThickness="1"
+                        PointerPressed="UpdateBadgeBox_PointerPressed">
+                    <TextBlock Text="&#x2191;" FontSize="8" FontWeight="Bold"
+                               Foreground="White" Margin="0,-1,0,0"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Border>
             </Grid>
         </Grid>
     </Grid>
