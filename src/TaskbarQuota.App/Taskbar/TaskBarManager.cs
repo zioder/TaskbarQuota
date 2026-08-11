@@ -98,6 +98,7 @@ namespace TaskbarQuota.Taskbar
                 _activeSurface = WidgetSurfaceMode.Taskbar;
                 EnsureWidgets();
                 SyncWidgetState();
+                ScheduleFloatingPrewarm();
             }
         }
 
@@ -117,6 +118,7 @@ namespace TaskbarQuota.Taskbar
                 window.ActivityClicked += item => _dispatcher?.TryEnqueue(
                     () => ToggleActivityFlyout(window.Handle, item?.Id));
                 _floatingWindow = window;
+                window.Prewarm();
                 PrewarmFlyout();
                 Log.Information("Floating usage window created");
             }
@@ -632,6 +634,29 @@ namespace TaskbarQuota.Taskbar
                     Log.Warning(ex, "Failed to prewarm flyout");
                     try { flyout?.Close(); } catch { }
                     _flyout = null;
+                }
+            });
+        }
+
+        private static void ScheduleFloatingPrewarm()
+        {
+            if (_dispatcher is null || IsFloatingSurface || WidgetSettingsService.CurrentSurface != WidgetSurfaceMode.Taskbar)
+                return;
+
+            _dispatcher.TryEnqueue(DispatcherQueuePriority.Low, () =>
+            {
+                if (IsFloatingSurface || WidgetSettingsService.CurrentSurface != WidgetSurfaceMode.Taskbar)
+                    return;
+
+                try
+                {
+                    EnsureFloatingWindow();
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, "Failed to prewarm floating usage window");
+                    try { _floatingWindow?.Close(); } catch { }
+                    _floatingWindow = null;
                 }
             });
         }
