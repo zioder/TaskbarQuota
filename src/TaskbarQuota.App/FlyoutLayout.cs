@@ -21,11 +21,11 @@ namespace TaskbarQuota
         public const int MinLogicalWidth = BaseLogicalWidth;
 
         /// <summary>
-        /// Chrome beyond the provider icons, so the strip + activity + settings buttons fit without
-        /// clipping the settings gear: bottom-chrome margins (12+12) + strip border &amp; padding
-        /// (1+4+4+1) + two gaps (8+8) + two utility buttons (1+48+1 each) = 150.
+        /// Chrome beyond the provider icons, so the strip + activity + cost + settings buttons fit
+        /// without clipping the settings gear: bottom-chrome margins (12+12) + strip border &amp;
+        /// padding (1+4+4+1) + three gaps (8+8+8) + three utility buttons (1+48+1 each) = 208.
         /// </summary>
-        public const int StripChromeLogicalWidth = 150;
+        public const int StripChromeLogicalWidth = 208;
 
         /// <summary>Extra width reserved for the dashboard detail card inside the frame.</summary>
         public const int DetailContentPadding = 40;
@@ -40,7 +40,7 @@ namespace TaskbarQuota
         /// Stable compact dashboard content height used by the tray flyout. Taller provider detail
         /// panes scroll inside this frame instead of resizing the native tray window on selection.
         /// </summary>
-        public const int FixedLogicalContentHeight = 620;
+        public const int FixedLogicalContentHeight = 760;
 
         /// <summary>Largest dashboard content height before scrolling takes over.</summary>
         public const int MaxLogicalContentHeight = 760;

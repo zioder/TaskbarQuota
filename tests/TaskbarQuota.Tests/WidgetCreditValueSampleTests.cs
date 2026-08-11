@@ -1,4 +1,5 @@
 using TaskbarQuota.Controls;
+using TaskbarQuota.Usage;
 
 namespace TaskbarQuota.Tests;
 
@@ -33,5 +34,31 @@ public class WidgetCreditValueSampleTests
     {
         Assert.Equal("10,000/10,000".Length, WidgetSummary.CreditValueSample("9,999/10,000").Length);
         Assert.Equal("300/300".Length, WidgetSummary.CreditValueSample("7/300").Length);
+    }
+
+    [Fact]
+    public void TaskbarTooltipAddsTodayCostWithoutAddingAVisibleRow()
+    {
+        var history = new UsageHistory
+        {
+            Today = new UsagePeriod(35_400_000, 25.15, estimateComplete: true),
+        };
+
+        Assert.Equal(
+            "\nToday: $25.15 estimated · 35.4M tokens",
+            WidgetSummary.WidgetUsageHistoryTooltipLine(history));
+    }
+
+    [Fact]
+    public void TaskbarTooltipKeepsTokensWhenCostIsUnavailable()
+    {
+        var history = new UsageHistory
+        {
+            Today = new UsagePeriod(1_500_000, null, estimateComplete: false),
+        };
+
+        Assert.Equal(
+            "\nToday: 1.5M tokens · cost unavailable",
+            WidgetSummary.WidgetUsageHistoryTooltipLine(history));
     }
 }

@@ -5,6 +5,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
     xmlns:vm="using:TaskbarQuota.ViewModels"
+    xmlns:controls="using:TaskbarQuota.Controls"
     mc:Ignorable="d"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -404,6 +405,9 @@
                 <TextBlock Text="{x:Bind CostText}"
                            Visibility="{x:Bind CostVisibility}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+
+                <controls:ProviderUsageHistoryControl ViewModel="{x:Bind UsageHistoryDetails}" />
+
             </StackPanel>
         </DataTemplate>
     </Page.Resources>
@@ -536,17 +540,6 @@
                                     <TextBlock Text="Refresh"/>
                                 </StackPanel>
                             </Button>
-                            <ToggleButton x:Name="ProviderWidgetToggle"
-                                          AutomationProperties.AutomationId="ProviderWidgetVisibilityToggle"
-                                          AutomationProperties.Name="{x:Bind ViewModel.SelectedCard.ProviderWidgetToggleName, Mode=OneWay}"
-                                          IsChecked="{x:Bind ViewModel.SelectedCard.IsProviderWidgetVisible, Mode=OneWay}"
-                                          Visibility="{x:Bind ViewModel.SelectedCard.ProviderWidgetToggleVisibility, Mode=OneWay}"
-                                          Tag="{x:Bind ViewModel.SelectedCard, Mode=OneWay}"
-                                          VerticalAlignment="Center"
-                                          MinWidth="76"
-                                          Click="ProviderWidgetToggle_Click">
-                                <TextBlock Text="{x:Bind ViewModel.SelectedCard.ProviderWidgetToggleText, Mode=OneWay}"/>
-                            </ToggleButton>
                             <ToggleButton x:Name="ProviderPinToggle"
                                           AutomationProperties.AutomationId="ProviderWidgetPinToggle"
                                           AutomationProperties.Name="{x:Bind ViewModel.SelectedCard.ProviderPinToggleName, Mode=OneWay}"
@@ -563,6 +556,25 @@
                                     <TextBlock Text="{x:Bind ViewModel.SelectedCard.ProviderPinToggleText, Mode=OneWay}"/>
                                 </StackPanel>
                             </ToggleButton>
+                            <ToggleButton x:Name="ProviderWidgetToggle"
+                                          AutomationProperties.AutomationId="ProviderWidgetVisibilityToggle"
+                                          AutomationProperties.Name="{x:Bind ViewModel.SelectedCard.ProviderWidgetToggleName, Mode=OneWay}"
+                                          IsChecked="{x:Bind ViewModel.SelectedCard.IsProviderWidgetVisible, Mode=OneWay}"
+                                          Visibility="{x:Bind ViewModel.SelectedCard.ProviderWidgetToggleVisibility, Mode=OneWay}"
+                                          Tag="{x:Bind ViewModel.SelectedCard, Mode=OneWay}"
+                                          VerticalAlignment="Center"
+                                          MinWidth="76"
+                                          Click="ProviderWidgetToggle_Click">
+                                <TextBlock Text="{x:Bind ViewModel.SelectedCard.ProviderWidgetToggleText, Mode=OneWay}"/>
+                            </ToggleButton>
+                            <Button x:Name="ShareProviderButton"
+                                    AutomationProperties.AutomationId="ShareProviderButton"
+                                    AutomationProperties.Name="Share provider summary"
+                                    ToolTipService.ToolTip="Copy this provider summary as an image"
+                                    Click="ShareProvider_Click"
+                                    VerticalAlignment="Center">
+                                <FontIcon Glyph="&#xE72D;" FontSize="14"/>
+                            </Button>
                         </StackPanel>
 
                         <VisualStateManager.VisualStateGroups>
@@ -625,6 +637,9 @@
              and watched nothing happen, so the reason has to appear without being hunted for. -->
         <muxc:TeachingTip x:Name="PinBlockedTip"
                           Title="Can't pin this provider"
+                          PreferredPlacement="Bottom"
+                          IsLightDismissEnabled="True"/>
+        <muxc:TeachingTip x:Name="ProviderShareTip"
                           PreferredPlacement="Bottom"
                           IsLightDismissEnabled="True"/>
     </Grid>

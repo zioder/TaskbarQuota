@@ -16,6 +16,7 @@ using Windows.Foundation;
 using Windows.Graphics;
 using TaskbarQuota.Controls;
 using TaskbarQuota.AgentActivity;
+using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Interop;
 using TaskbarQuota.Services;
 using TaskbarQuota.Usage;
@@ -36,6 +37,7 @@ namespace TaskbarQuota
         private bool _dashboardLoaded;
         private string? _selectedActivityId;
         private bool _showingActivity;
+        private bool _showingCost;
         private bool _sizeHooksRegistered;
         private bool _applyingBounds;
         private bool _suppressSurfaceControlEvents;
@@ -85,6 +87,12 @@ namespace TaskbarQuota
             // itself is explicitly opened.
             appWindow.IsShownInSwitchers = false;
             appWindow.SetPresenter(presenter);
+            var cornerPreference = DwmWindowCornerPreference.Round;
+            _ = DwmApi.DwmSetWindowAttribute(
+                Win32Interop.GetWindowFromWindowId(appWindow.Id),
+                DwmApi.DWMWA_WINDOW_CORNER_PREFERENCE,
+                ref cornerPreference,
+                sizeof(int));
 
             Activated += OnActivated;
             Closed += OnClosed;
@@ -121,6 +129,7 @@ namespace TaskbarQuota
 
         private void OnActivated(object sender, WindowActivatedEventArgs args)
         {
+            Log.Debug($"[cost-flyout] activated state={args.WindowActivationState} showingCost={_showingCost} shown={_shown} foreground=0x{User32.GetForegroundWindow().ToInt64():X} widget=0x{_widgetHandle.ToInt64():X}");
             if (args.WindowActivationState == WindowActivationState.Deactivated
                 && User32.GetForegroundWindow() != _widgetHandle
                 && !IsPointerOverWidget())
@@ -131,7 +140,7 @@ namespace TaskbarQuota
 
         public void ToggleAbove(IntPtr widgetHandle)
         {
-            if (_shown && !_showingActivity)
+            if (_shown && !_showingActivity && !_showingCost)
             {
                 Hide();
                 return;
@@ -173,11 +182,19 @@ namespace TaskbarQuota
 
         private void EnsureDashboardLoaded()
         {
-            if (_dashboardLoaded)
+            if (_dashboardLoaded && ContentFrame.CurrentSourcePageType == typeof(DashboardPage))
                 return;
 
             ContentFrame.Navigate(typeof(DashboardPage), true, new SuppressNavigationTransitionInfo());
             _dashboardLoaded = true;
+        }
+
+        private void EnsureCostLoaded()
+        {
+            if (ContentFrame.CurrentSourcePageType == typeof(CostPage))
+                return;
+
+            ContentFrame.Navigate(typeof(CostPage), true, new SuppressNavigationTransitionInfo());
         }
 
         public void ShowAbove(IntPtr widgetHandle)
@@ -186,10 +203,24 @@ namespace TaskbarQuota
         public void ShowActivityAbove(IntPtr widgetHandle, string? selectedActivityId = null)
             => ShowSurfaceAbove(widgetHandle, showActivity: true, selectedActivityId);
 
+        private void ShowCostPage()
+        {
+            if (_showingActivity)
+                AgentActivityService.Instance.AcknowledgeAll();
+            _selectedActivityId = null;
+            _showingActivity = false;
+            _showingCost = true;
+            ActivityPanel.Visibility = Visibility.Collapsed;
+            ContentFrame.Visibility = Visibility.Visible;
+            EnsureCostLoaded();
+            ScheduleFlyoutBoundsUpdate();
+        }
+
         private void ShowSurfaceAbove(IntPtr widgetHandle, bool showActivity, string? selectedActivityId)
         {
             _widgetHandle = widgetHandle;
             _selectedActivityId = showActivity ? selectedActivityId : null;
+            _showingCost = false;
             EnsureDashboardLoaded();
             if (showActivity)
                 ShowActivityPanel();
@@ -202,6 +233,12 @@ namespace TaskbarQuota
             if (UsageCoordinator.Instance.ActiveProvider is { } active)
                 _dashboardViewModel.SelectProvider(active);
 
+            PresentAbove();
+        }
+
+        private void PresentAbove()
+        {
+            Log.Debug("[cost-flyout] present above");
             _shown = true;
             UpdateSurfaceControls();
             ApplyFlyoutBounds();
@@ -252,16 +289,22 @@ namespace TaskbarQuota
             if (_showingActivity)
                 AgentActivityService.Instance.AcknowledgeAll();
             _showingActivity = false;
+            _showingCost = false;
+            EnsureDashboardLoaded();
             ActivityPanel.Visibility = Visibility.Collapsed;
             ContentFrame.Visibility = Visibility.Visible;
+            ScheduleFlyoutBoundsUpdate();
         }
 
         private void ShowActivityPanel()
         {
             _showingActivity = true;
+            _showingCost = false;
+            EnsureDashboardLoaded();
             ActivityPanel.Visibility = Visibility.Visible;
             ContentFrame.Visibility = Visibility.Collapsed;
             UpdateActivityControls();
+            ScheduleFlyoutBoundsUpdate();
         }
 
         private void UpdateActivityControls()
@@ -514,6 +557,14 @@ namespace TaskbarQuota
                 ShowActivityPanel();
         }
 
+        private void CostButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_showingCost)
+                ShowProviderDashboard();
+            else
+                ShowCostPage();
+        }
+
         private void ActivityWidgetButton_Click(object sender, RoutedEventArgs e)
         {
             WidgetSettingsService.ApplyShowAgentActivityInWidget(
@@ -654,6 +705,7 @@ namespace TaskbarQuota
         public void Hide()
         {
             if (!_shown) return;
+            Log.Debug($"[cost-flyout] hide showingCost={_showingCost}");
             _shown = false;
             _lastAppliedBounds = null;
             GetAppWindow().Hide();

@@ -47,6 +47,7 @@ namespace TaskbarQuota
             StartupSettingsService.MigrateLegacyStartupEntryIfNeeded();
 
             Log.Information("TaskbarQuota launching");
+            Log.Information($"Launch arguments: activation='{args.Arguments}', commandLine='{string.Join(" ", Environment.GetCommandLineArgs())}'");
 
             UsageCoordinator.Instance.Start();
             QuotaAlertService.Instance.Start();

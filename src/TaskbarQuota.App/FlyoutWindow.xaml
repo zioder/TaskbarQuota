@@ -5,12 +5,18 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:TaskbarQuota.Controls">
 
-    <Grid x:Name="Root" CornerRadius="8">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
+    <Border x:Name="Root"
+            Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"
+            BackgroundSizing="InnerBorderEdge"
+            BorderBrush="{ThemeResource SurfaceStrokeColorFlyoutBrush}"
+            BorderThickness="1"
+            CornerRadius="{StaticResource OverlayCornerRadius}">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
 
         <Frame x:Name="ContentFrame"
                Grid.Row="0"
@@ -143,6 +149,28 @@
                             ToolTipService.ToolTip="Agent activity">
                         <FontIcon Glyph="&#xE7F4;"
                                   FontSize="16"
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                    </Button>
+                </Border>
+
+                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8">
+                    <Button x:Name="CostButton"
+                            Width="48"
+                            Height="48"
+                            MinWidth="0"
+                            MinHeight="0"
+                            Padding="0"
+                            BorderThickness="0"
+                            Background="Transparent"
+                            AutomationProperties.Name="Cost"
+                            AutomationProperties.AutomationId="FlyoutCostButton"
+                            Click="CostButton_Click"
+                            ToolTipService.ToolTip="Cost">
+                        <FontIcon Glyph="&#xE9D2;"
+                                  FontSize="16"
                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                     </Button>
                 </Border>
@@ -165,10 +193,11 @@
                             ToolTipService.ToolTip="Settings">
                         <FontIcon Glyph="&#xE713;"
                                   FontSize="16"
-                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                              Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                     </Button>
                 </Border>
             </StackPanel>
         </StackPanel>
     </Grid>
+    </Border>
 </Window>

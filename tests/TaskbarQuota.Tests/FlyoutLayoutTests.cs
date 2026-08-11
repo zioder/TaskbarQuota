@@ -11,8 +11,8 @@ public class FlyoutLayoutTests
     [Fact]
     public void ComputeLogicalHeight_GrowsWithDetailContent()
         // Fixed content + ChromeLogicalHeight (incl. surface/opacity bar) + HeightMeasureBuffer
-        => Assert.Equal(620 + FlyoutLayout.ChromeLogicalHeight + FlyoutLayout.HeightMeasureBuffer,
-            FlyoutLayout.ComputeLogicalHeight(620));
+        => Assert.Equal(FlyoutLayout.FixedLogicalContentHeight + FlyoutLayout.ChromeLogicalHeight + FlyoutLayout.HeightMeasureBuffer,
+            FlyoutLayout.ComputeLogicalHeight(FlyoutLayout.FixedLogicalContentHeight));
 
     [Fact]
     public void ComputeLogicalHeight_ClampsTallContent()
@@ -30,7 +30,7 @@ public class FlyoutLayoutTests
     public void ComputeLogicalWidth_GrowsWithInstalledProviders()
     {
         int width = FlyoutLayout.ComputeLogicalWidth(stripIconCount: 9, detailContentWidth: 300);
-        Assert.Equal(582, width);
+        Assert.Equal(640, width);
     }
 
     [Fact]

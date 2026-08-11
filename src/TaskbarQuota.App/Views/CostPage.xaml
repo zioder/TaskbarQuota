@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="TaskbarQuota.Views.CostPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:TaskbarQuota.Controls"
+    Background="Transparent">
+
+    <ScrollViewer
+        Padding="0,4,0,32"
+        HorizontalScrollMode="Disabled"
+        HorizontalContentAlignment="Stretch"
+        VerticalScrollBarVisibility="Auto"
+        VerticalScrollMode="Enabled">
+        <StackPanel Spacing="16">
+            <controls:TotalSpendControl
+                x:Name="SpendControl"
+                ViewModel="{x:Bind ViewModel.TotalSpend, Mode=OneWay}"
+                RefreshCommand="{x:Bind ViewModel.RefreshCommand}" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

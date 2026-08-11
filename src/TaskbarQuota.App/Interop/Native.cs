@@ -200,6 +200,26 @@ namespace TaskbarQuota.Interop
         public static extern bool GetMonitorInfo([In] IntPtr hMonitor, ref MONITORINFOEX lpmi);
     }
 
+    public static class DwmApi
+    {
+        public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmSetWindowAttribute(
+            IntPtr hwnd,
+            int attribute,
+            ref DwmWindowCornerPreference preference,
+            int preferenceSize);
+    }
+
+    public enum DwmWindowCornerPreference
+    {
+        Default = 0,
+        DoNotRound = 1,
+        Round = 2,
+        RoundSmall = 3,
+    }
+
     public enum MonitorFromFlags : uint
     {
         MONITOR_DEFAULTTONULL = 0,

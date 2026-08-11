@@ -347,12 +347,13 @@ namespace TaskbarQuota.Controls
             var tooltipLines = _rows.Select(FormatTooltipLine);
             var plan = FormatPlanLabel(result.Id, widgetName, usage.LoginMethod);
             var costTooltip = WidgetCostTooltipLine(result.Id, usage.Cost);
+            var historyTooltip = WidgetUsageHistoryTooltipLine(usage.UsageHistory);
             var resetCreditsTooltip = WidgetResetCreditsTooltipLine(usage.ResetCredits);
             var staleTooltip = StaleTooltipLine(result);
             ToolTipService.SetToolTip(this,
                 string.IsNullOrEmpty(plan)
-                    ? $"{WidgetTooltipTitle(widgetName, result.Source)}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}"
-                    : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}");
+                    ? $"{WidgetTooltipTitle(widgetName, result.Source)}\n{string.Join("\n", tooltipLines)}{costTooltip}{historyTooltip}{resetCreditsTooltip}{staleTooltip}"
+                    : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{historyTooltip}{resetCreditsTooltip}{staleTooltip}");
         }
 
         /// <summary>Colors this provider glyph from its own independently-discovered agent tasks.</summary>
@@ -733,6 +734,7 @@ namespace TaskbarQuota.Controls
                 $"{WidgetTooltipTitle(result.DisplayName, result.Source)} · {usage.LoginMethod}\n" +
                 $"Usage: {usage.Cost?.Display ?? "--"}\n" +
                 $"Balance: {(balanceText != null ? "$" + balanceText.Split(' ')[0] : "--")}" +
+                WidgetUsageHistoryTooltipLine(usage.UsageHistory) +
                 StaleTooltipLine(result));
         }
 
@@ -755,6 +757,7 @@ namespace TaskbarQuota.Controls
             ToolTipService.SetToolTip(this,
                 $"{WidgetTooltipTitle(result.DisplayName, result.Source)} · {usage.LoginMethod}\n" +
                 $"Credit balance: {usage.Cost?.Display ?? "--"}" +
+                WidgetUsageHistoryTooltipLine(usage.UsageHistory) +
                 StaleTooltipLine(result));
         }
 
@@ -808,6 +811,7 @@ namespace TaskbarQuota.Controls
                 tooltip += $"\nAdditional usage: {addl.StatusText} ({addl.SpendText})";
             if (usage.Primary.ResetDescription is { } resetDesc)
                 tooltip += $"\nresets in {resetDesc}";
+            tooltip += WidgetUsageHistoryTooltipLine(usage.UsageHistory);
             tooltip += StaleTooltipLine(result);
             ToolTipService.SetToolTip(this, tooltip);
         }
@@ -858,6 +862,27 @@ namespace TaskbarQuota.Controls
             }
 
             return $"\n{cost.Label}: {cost.Display}";
+        }
+
+        internal static string WidgetUsageHistoryTooltipLine(UsageHistory? history)
+        {
+            if (history?.Today is not { } today || today.Tokens == 0 && today.EstimatedCostUsd is null)
+                return string.Empty;
+
+            var tokens = FormatHistoryTokens(today.Tokens);
+            if (today.EstimatedCostUsd is not { } cost)
+                return $"\nToday: {tokens} · cost unavailable";
+
+            var estimateMarker = today.EstimateComplete ? string.Empty : "*";
+            return $"\nToday: ${cost:F2}{estimateMarker} estimated · {tokens}";
+        }
+
+        private static string FormatHistoryTokens(ulong tokens)
+        {
+            if (tokens >= 1_000_000_000) return $"{tokens / 1_000_000_000d:0.#}B tokens";
+            if (tokens >= 1_000_000) return $"{tokens / 1_000_000d:0.#}M tokens";
+            if (tokens >= 1_000) return $"{tokens / 1_000d:0.#}K tokens";
+            return $"{tokens:N0} tokens";
         }
 
         private static string WidgetResetCreditsTooltipLine(ResetCreditsSnapshot? resetCredits)
@@ -933,7 +958,9 @@ namespace TaskbarQuota.Controls
                 (usage.Primary.ResetDescription is { } r1 ? $" (resets {r1})" : "") + "\n" +
                 $"Non-Gemini: {WidgetSettingsService.FormatDisplayPercent(usage.Secondary?.UsedPercent ?? 0)}" +
                 (usage.Secondary?.ResetDescription is { } r2 ? $" (resets {r2})" : "");
-            ToolTipService.SetToolTip(this, header + body + StaleTooltipLine(result));
+            ToolTipService.SetToolTip(
+                this,
+                header + body + WidgetUsageHistoryTooltipLine(usage.UsageHistory) + StaleTooltipLine(result));
         }
 
         private void OnWidgetSettingsChanged(object? sender, EventArgs e)

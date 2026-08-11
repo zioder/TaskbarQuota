@@ -810,6 +810,7 @@ namespace TaskbarQuota.Taskbar
             _flyout = null;
             DisposeFloatingWindow();
             DisposeAllTaskbarWidgets();
+            _showMainWindow = null;
         }
     }
 }

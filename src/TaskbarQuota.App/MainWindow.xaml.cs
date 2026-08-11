@@ -29,7 +29,7 @@ namespace TaskbarQuota
             DashboardPage.SharedViewModel = _dashboardViewModel;
             ApplyFluentChrome();
             ThemeService.Register(Root);
-            _navigationBinder = new DashboardNavigationBinder(Nav, _dashboardViewModel);
+            _navigationBinder = new DashboardNavigationBinder(Nav, ProvidersNavigationItem, _dashboardViewModel);
             Root.SizeChanged += (_, _) => UpdateResponsiveNavigation();
             Root.Loaded += OnRootLoaded;
             Nav.Loaded += (_, _) => _navigationBinder?.ReapplySelection();
@@ -48,7 +48,10 @@ namespace TaskbarQuota
         {
             Root.Loaded -= OnRootLoaded;
             ApplyInitialWindowSize();
-            ContentFrame.Navigate(typeof(DashboardPage), false, new SuppressNavigationTransitionInfo());
+            _navigationBinder?.SetProviderPageActive(false);
+            Nav.SelectedItem = CostNavigationItem;
+            if (ContentFrame.CurrentSourcePageType != typeof(CostPage))
+                ContentFrame.Navigate(typeof(CostPage), null, new SuppressNavigationTransitionInfo());
         }
 
         private void ApplyInitialWindowSize()
@@ -126,6 +129,7 @@ namespace TaskbarQuota
         public void ShowSettings()
         {
             ShowFromTray();
+            _navigationBinder?.SetProviderPageActive(false);
             var info = new SuppressNavigationTransitionInfo();
             ContentFrame.Navigate(typeof(SettingsPage), null, info);
             if (Nav.SettingsItem is not null)
@@ -156,9 +160,20 @@ namespace TaskbarQuota
             var info = new EntranceNavigationTransitionInfo();
             if (args.IsSettingsSelected)
             {
+                _navigationBinder?.SetProviderPageActive(false);
                 ContentFrame.Navigate(typeof(SettingsPage), null, info);
                 return;
             }
+
+            if (args.SelectedItemContainer is NavigationViewItem { Tag: "cost" })
+            {
+                _navigationBinder?.SetProviderPageActive(false);
+                if (ContentFrame.CurrentSourcePageType != typeof(CostPage))
+                    ContentFrame.Navigate(typeof(CostPage), null, info);
+                return;
+            }
+
+            _navigationBinder?.SetProviderPageActive(true);
             if (_navigationBinder?.SelectFromNavigation(args) == true)
             {
                 if (ContentFrame.CurrentSourcePageType != typeof(DashboardPage))
