@@ -97,7 +97,7 @@ namespace TaskbarQuota.Usage
             try
             {
                 var fetch = await provider.FetchUsageAsync(ct).ConfigureAwait(false);
-                if (UsageHistoryService.TryLoad(id, out var history))
+                if (UsageHistoryService.TryGetCachedHistory(id, out var history))
                     fetch.Usage.UsageHistory = history;
                 var result = UsageResult.Success(id, provider, fetch);
                 if (TryGetLastSuccessfulLiveResult(id, out var lastSuccess) && IsSuspiciousClaudeZeroResult(result, lastSuccess))
@@ -309,7 +309,7 @@ namespace TaskbarQuota.Usage
             if (result.Fetch?.Usage is not { } usage)
                 return result;
 
-            if (UsageHistoryService.TryLoad(id, out var history))
+            if (UsageHistoryService.TryGetCachedHistory(id, out var history))
             {
                 usage.UsageHistory = history;
             }

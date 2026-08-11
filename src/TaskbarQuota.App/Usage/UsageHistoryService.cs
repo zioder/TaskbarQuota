@@ -37,13 +37,34 @@ namespace TaskbarQuota.Usage
             string SessionId,
             string? DedupeKey);
 
-        public static bool TryLoad(ProviderId providerId, out UsageHistory history)
+        public static bool TryLoad(ProviderId providerId, out UsageHistory history, bool force = false)
         {
             lock (ProviderLocks[providerId])
-                return TryLoadCore(providerId, out history);
+                return TryLoadCore(providerId, out history, force);
         }
 
-        private static bool TryLoadCore(ProviderId providerId, out UsageHistory history)
+        /// <summary>
+        /// Returns the last successfully parsed history without touching the disk. Periodic refresh
+        /// paths (coordinator tick, widget sync, dashboard load) use this so the heavy per-provider
+        /// enumeration/parse only happens on demand: entering the cost view or an explicit refresh.
+        /// </summary>
+        public static bool TryGetCachedHistory(ProviderId providerId, out UsageHistory history)
+        {
+            lock (CacheLock)
+            {
+                if (Cache.TryGetValue(providerId, out var cached)
+                    && cached.History.Last90Days is not null)
+                {
+                    history = cached.History;
+                    return true;
+                }
+            }
+
+            history = new UsageHistory();
+            return false;
+        }
+
+        private static bool TryLoadCore(ProviderId providerId, out UsageHistory history, bool force = false)
         {
             var files = DiscoverFiles(providerId).ToArray();
             if (files.Length == 0)
@@ -53,17 +74,20 @@ namespace TaskbarQuota.Usage
             }
 
             var fingerprint = Fingerprint(files);
-            lock (CacheLock)
+            if (!force)
             {
-                if (Cache.TryGetValue(providerId, out var cached)
-                    && cached.LocalDay == DateTime.Today
-                    && cached.FileCount == fingerprint.FileCount
-                    && cached.TotalLength == fingerprint.TotalLength
-                    && cached.LatestWriteTicks == fingerprint.LatestWriteTicks
-                    && cached.PathHash == fingerprint.PathHash)
+                lock (CacheLock)
                 {
-                    history = cached.History;
-                    return history.Last90Days is not null;
+                    if (Cache.TryGetValue(providerId, out var cached)
+                        && cached.LocalDay == DateTime.Today
+                        && cached.FileCount == fingerprint.FileCount
+                        && cached.TotalLength == fingerprint.TotalLength
+                        && cached.LatestWriteTicks == fingerprint.LatestWriteTicks
+                        && cached.PathHash == fingerprint.PathHash)
+                    {
+                        history = cached.History;
+                        return history.Last90Days is not null;
+                    }
                 }
             }
 
