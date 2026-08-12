@@ -221,9 +221,14 @@ namespace TaskbarQuota.ViewModels
             {
                 // A superseded load (cancelled by a newer LoadAsync/RefreshAsync) must not clear
                 // the loading state of the load that replaced it — that would show the empty state
-                // while the current fetch is still running.
-                if (ReferenceEquals(_loadCts, cts))
-                    _dispatcher.TryEnqueue(() => TotalSpend.IsLoading = false);
+                // while the current fetch is still running. Evaluate the identity inside the
+                // callback (on the UI thread), not where the exception was caught, so a load that
+                // was superseded between the catch and the callback execution is skipped.
+                _dispatcher.TryEnqueue(() =>
+                {
+                    if (ReferenceEquals(_loadCts, cts))
+                        TotalSpend.IsLoading = false;
+                });
             }
         }
 
