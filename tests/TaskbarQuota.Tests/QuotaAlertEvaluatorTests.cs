@@ -164,6 +164,87 @@ public class QuotaAlertEvaluatorTests
         Assert.Empty(second);
     }
 
+    [Fact]
+    public void Evaluate_SuppressedReplenishedWindowDoesNotEmitThresholdOnReplay()
+    {
+        var state = new QuotaAlertState();
+        var first = Now();
+        _ = QuotaAlertEvaluator.Evaluate(Result(91), Settings(), state, first).ToArray();
+
+        var replenished = QuotaAlertEvaluator.Evaluate(
+            Result(80),
+            Settings(),
+            state,
+            first.AddMinutes(1),
+            new HashSet<string> { "primary" }).ToArray();
+        var replay = QuotaAlertEvaluator.Evaluate(
+            Result(80),
+            Settings(),
+            state,
+            first.AddMinutes(2)).ToArray();
+
+        Assert.Empty(replenished);
+        Assert.Empty(replay);
+
+        _ = QuotaAlertEvaluator.Evaluate(Result(10), Settings(), state, first.AddMinutes(3)).ToArray();
+        Assert.Single(QuotaAlertEvaluator.Evaluate(Result(80), Settings(), state, first.AddMinutes(4)));
+    }
+
+    [Fact]
+    public void ReplenishmentNotification_NeutralIncreaseUsesAvailableQuotaLanguage()
+    {
+        var notification = QuotaAlertNotification.FromReplenishments(
+            "Codex",
+            [Replenishment("Weekly", 88, 62, QuotaReplenishmentKind.AvailabilityIncrease)]);
+
+        Assert.Equal("Codex weekly quota increased", notification.Title);
+        Assert.Equal("Available quota increased from 12% to 38%.", notification.Body);
+        Assert.DoesNotContain("reset", notification.Title, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("reset", notification.Body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ReplenishmentNotification_FullAvailabilityUsesReplenishedText()
+    {
+        var notification = QuotaAlertNotification.FromReplenishments(
+            "Codex",
+            [Replenishment("Session", 88, 0, QuotaReplenishmentKind.FullReplenishment)]);
+
+        Assert.Equal("Codex session quota replenished", notification.Title);
+        Assert.Equal("Available quota is now 100%.", notification.Body);
+    }
+
+    [Fact]
+    public void ReplenishmentNotification_ConfirmedCycleUsesRenewedText()
+    {
+        var notification = QuotaAlertNotification.FromReplenishments(
+            "Codex",
+            [Replenishment("Weekly", 88, 4, QuotaReplenishmentKind.ConfirmedCycleRenewal)]);
+
+        Assert.Equal("Codex weekly quota renewed", notification.Title);
+        Assert.Equal("Available quota increased from 12% to 96%.", notification.Body);
+    }
+
+    [Fact]
+    public void ReplenishmentNotification_ManyWindowsUsesThreeDetailsAndSummaryLine()
+    {
+        var replenishments = Enumerable.Range(1, 5)
+            .Select(index => Replenishment(
+                $"Window {index}",
+                90,
+                10,
+                QuotaReplenishmentKind.AvailabilityIncrease,
+                $"extra:{index}"))
+            .ToArray();
+
+        var notification = QuotaAlertNotification.FromReplenishments("Codex", replenishments);
+        var lines = notification.Body.Split(Environment.NewLine);
+
+        Assert.Equal("Codex quotas replenished", notification.Title);
+        Assert.Equal(4, lines.Length);
+        Assert.Equal("And 2 more windows.", lines[3]);
+    }
+
     private static QuotaAlertSettings Settings(bool enabled = true) => new()
     {
         Enabled = enabled,
@@ -194,6 +275,19 @@ public class QuotaAlertEvaluatorTests
         };
 
         return UsageResult.Success(provider.Id, provider, new ProviderFetchResult(usage, "test"));
+    }
+
+    private static QuotaReplenishmentEvent Replenishment(
+        string title,
+        double previousUsed,
+        double currentUsed,
+        QuotaReplenishmentKind kind,
+        string windowId = "secondary")
+    {
+        var key = new QuotaWindowKey(ProviderId.Codex, windowId);
+        var previous = new QuotaWindowObservation(key, title, previousUsed, 10080, null, 1, Now());
+        var current = new QuotaWindowObservation(key, title, currentUsed, 10080, null, 2, Now());
+        return new QuotaReplenishmentEvent(previous, current, kind);
     }
 
     private sealed class AlertTestProvider : IUsageProvider

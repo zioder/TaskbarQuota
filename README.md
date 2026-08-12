@@ -76,6 +76,14 @@ Cost coverage depends on the data stored by each provider. TaskbarQuota labels e
 
 The dashboard shows all enabled providers, their current plan, quota windows, reset times, balances, and recent history. TaskbarQuota can start with Windows and notify you when quota thresholds are crossed or Codex reset credits are close to expiring.
 
+Quota replenishment notifications are enabled by default and remain independent from the optional Warning and Critical threshold alerts. They notify when a live percentage-based window gains at least **10 percentage points** of available quota, including partial replenishments and readings that reach 99% after a reset has already been used. Primary, Secondary, Model, Monthly, and named extra windows are tracked separately, and multiple replenished windows from the same provider are grouped into one notification.
+
+The first live reading after launch or after re-enabling the option establishes a baseline without notifying. A separate, disabled-by-default **Changes since last session** option can compare the first live reading after startup with TaskbarQuota's last confirmed live observation. This can report a replenishment that happened while the app or PC was off, but only after TaskbarQuota starts and refreshes that provider.
+
+Cross-session comparison requires the same provider and account identity, stable window metadata, and an observation no more than 35 days old. Missing or changing identity, stale state, cached or restored snapshots, failures, and changed window definitions establish a new baseline silently. The Consumed/Remaining display preference does not affect detection.
+
+Notifications use the coordinator's existing provider refreshes. They work with the dashboard closed and the widget hidden while TaskbarQuota is running and receiving live observations for that provider. The feature adds no polling, timer, network request, telemetry, or remote notification service.
+
 ## Supported providers
 
 | Provider | Usage shown | Automatic credential source |
@@ -103,6 +111,7 @@ TaskbarQuota reuses credentials already stored by supported tools when possible.
 - TaskbarQuota does not collect telemetry or send data to a TaskbarQuota server.
 - Diagnostics are written only to `%TEMP%\taskbarquota.log`.
 - Automatic browser cookies are read in memory. Credentials entered manually are stored in plain JSON at `%LOCALAPPDATA%\TaskbarQuota\credentials.json`, so keep that file private.
+- Optional cross-session replenishment state is stored locally in `quota-replenishment-state.json`. It contains percentage-window metadata, timestamps, and a one-way identity hash, never the plaintext account identifier. Disabling either replenishment notifications or the cross-session option clears it.
 
 Disable **Monitoring** in the activity flyout to stop local process and session inspection and clear retained activity from memory.
 

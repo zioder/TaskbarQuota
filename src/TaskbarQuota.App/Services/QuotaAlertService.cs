@@ -16,14 +16,34 @@ public sealed class QuotaAlertService
     public static QuotaAlertService Instance { get; } = new(new AppNotificationQuotaAlertNotifier());
 
     private readonly IQuotaAlertNotifier _notifier;
+    private readonly Func<DateTimeOffset> _clock;
+    private readonly Func<QuotaAlertSettings> _settingsProvider;
+    private readonly QuotaReplenishmentTracker _replenishmentTracker;
+    private readonly QuotaReplenishmentCrossSessionTracker _crossSessionTracker;
     private readonly object _lock = new();
     private QuotaAlertState _state;
+    private bool _lastReplenishmentEnabled;
+    private bool _lastCrossSessionReplenishmentEnabled;
     private bool _started;
 
-    internal QuotaAlertService(IQuotaAlertNotifier notifier)
+    internal QuotaAlertService(
+        IQuotaAlertNotifier notifier,
+        Func<DateTimeOffset>? clock = null,
+        Func<QuotaAlertSettings>? settingsProvider = null,
+        QuotaReplenishmentTracker? replenishmentTracker = null,
+        QuotaReplenishmentCrossSessionTracker? crossSessionTracker = null,
+        QuotaAlertState? state = null)
     {
         _notifier = notifier;
-        _state = QuotaAlertState.Load();
+        _clock = clock ?? (() => DateTimeOffset.Now);
+        _settingsProvider = settingsProvider ?? (() => QuotaAlertSettingsService.Current);
+        _replenishmentTracker = replenishmentTracker ?? new QuotaReplenishmentTracker();
+        _crossSessionTracker = crossSessionTracker ?? new QuotaReplenishmentCrossSessionTracker(
+            new QuotaReplenishmentStateStore(QuotaReplenishmentStateStore.DefaultPath));
+        _state = state ?? QuotaAlertState.Load();
+        var settings = _settingsProvider();
+        _lastReplenishmentEnabled = settings.ReplenishmentEnabled;
+        _lastCrossSessionReplenishmentEnabled = settings.CrossSessionReplenishmentEnabled;
     }
 
     public void Start()
@@ -34,6 +54,7 @@ public sealed class QuotaAlertService
                 return;
 
             UsageCoordinator.Instance.StateChanged += OnStateChanged;
+            QuotaAlertSettingsService.Changed += OnSettingsChanged;
             App.Quitting += Stop;
             _started = true;
         }
@@ -49,38 +70,101 @@ public sealed class QuotaAlertService
                 return;
 
             UsageCoordinator.Instance.StateChanged -= OnStateChanged;
+            QuotaAlertSettingsService.Changed -= OnSettingsChanged;
             App.Quitting -= Stop;
             _started = false;
         }
     }
 
-    private void OnStateChanged(UsageResult result)
+    internal void OnStateChanged(UsageResult result)
     {
-        if (!QuotaAlertSettingsService.Current.Enabled || !result.Ok || result.Fetch is null)
+        var settings = _settingsProvider();
+        if (!settings.Enabled && !settings.ReplenishmentEnabled)
             return;
 
-        List<QuotaAlertNotification> notifications;
+        IReadOnlyList<QuotaReplenishmentEvent> replenishments;
+        List<QuotaAlertNotification> thresholdNotifications;
+        var now = _clock();
         lock (_lock)
         {
-            notifications = QuotaAlertEvaluator.Evaluate(
+            if (settings.ReplenishmentEnabled)
+            {
+                var currentSession = _replenishmentTracker.Observe(result, now);
+                var crossSession = settings.CrossSessionReplenishmentEnabled
+                    ? _crossSessionTracker.Observe(result, now)
+                    : Array.Empty<QuotaReplenishmentEvent>();
+                replenishments = crossSession.Count == 0
+                    ? currentSession
+                    : crossSession.Concat(currentSession).ToArray();
+            }
+            else
+            {
+                replenishments = Array.Empty<QuotaReplenishmentEvent>();
+            }
+
+            var replenishedWindowIds = replenishments
+                .Select(replenishment => replenishment.Current.Key.WindowId)
+                .ToHashSet(StringComparer.Ordinal);
+
+            thresholdNotifications = QuotaAlertEvaluator.Evaluate(
                 result,
-                QuotaAlertSettingsService.Current,
+                settings,
                 _state,
-                DateTimeOffset.Now).ToList();
+                now,
+                replenishedWindowIds).ToList();
 
             if (_state.HasUnsavedChanges)
                 _state.Save();
         }
 
-        foreach (var notification in notifications)
+        if (replenishments.Count > 0)
+        {
+            var notification = QuotaAlertNotification.FromReplenishments(result.DisplayName, replenishments);
+            if (_notifier.Show(notification))
+            {
+                var transitions = string.Join(",", replenishments.Select(item =>
+                    $"{item.Current.Key.WindowId}:{LogPercent(item.Previous.AvailablePercent)}" +
+                    $"->{LogPercent(item.Current.AvailablePercent)}"));
+                Log.Information(
+                    $"[quota-replenishment] notification shown provider={result.Id} " +
+                    $"transitions={transitions} reason=" +
+                    $"{(replenishments.Any(item => item.IsCrossSession) ? "delivered-since-last-session" : "delivered")}");
+            }
+        }
+
+        foreach (var notification in thresholdNotifications)
             _notifier.Show(notification);
     }
+
+    internal void OnSettingsChanged(object? sender, EventArgs args)
+    {
+        var settings = _settingsProvider();
+        var replenishmentEnabled = settings.ReplenishmentEnabled;
+        var crossSessionEnabled = settings.CrossSessionReplenishmentEnabled;
+        lock (_lock)
+        {
+            var replenishmentChanged = replenishmentEnabled != _lastReplenishmentEnabled;
+            var crossSessionChanged = crossSessionEnabled != _lastCrossSessionReplenishmentEnabled;
+
+            _lastReplenishmentEnabled = replenishmentEnabled;
+            _lastCrossSessionReplenishmentEnabled = crossSessionEnabled;
+
+            if (replenishmentChanged)
+                _replenishmentTracker.Reset("setting-changed");
+
+            if (replenishmentChanged || crossSessionChanged)
+                _crossSessionTracker.Reset(clearPersisted: true);
+        }
+    }
+
+    private static string LogPercent(double value)
+        => value.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
 }
 
 internal interface IQuotaAlertNotifier
 {
     void Register();
-    void Show(QuotaAlertNotification notification);
+    bool Show(QuotaAlertNotification notification);
 }
 
 internal sealed class AppNotificationQuotaAlertNotifier : IQuotaAlertNotifier
@@ -102,7 +186,7 @@ internal sealed class AppNotificationQuotaAlertNotifier : IQuotaAlertNotifier
         }
     }
 
-    public void Show(QuotaAlertNotification notification)
+    public bool Show(QuotaAlertNotification notification)
     {
         try
         {
@@ -113,10 +197,12 @@ internal sealed class AppNotificationQuotaAlertNotifier : IQuotaAlertNotifier
                 .BuildNotification();
 
             AppNotificationManager.Default.Show(appNotification);
+            return true;
         }
         catch (Exception ex)
         {
             Log.Warning(ex, "Failed to show quota alert notification");
+            return false;
         }
     }
 }
@@ -130,7 +216,8 @@ internal static class QuotaAlertEvaluator
         UsageResult result,
         QuotaAlertSettings settings,
         QuotaAlertState state,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        IReadOnlySet<string>? suppressedWindowIds = null)
     {
         if (!settings.Enabled || !result.Ok || result.Fetch?.Usage is not { } usage)
             yield break;
@@ -146,6 +233,12 @@ internal static class QuotaAlertEvaluator
                 continue;
 
             var key = QuotaAlertStateKey.For(result.Id, window.Id, crossed.Value, window.Window);
+            if (suppressedWindowIds?.Contains(window.Id) == true)
+            {
+                state.MarkAlerted(key, now);
+                continue;
+            }
+
             if (!state.ShouldAlert(key, now, TimeSpan.FromMinutes(settings.CooldownMinutes)))
                 continue;
 
@@ -253,6 +346,44 @@ internal readonly record struct QuotaAlertThreshold(string Severity, double Valu
 
 internal sealed record QuotaAlertNotification(string Title, string Body)
 {
+    public static QuotaAlertNotification FromReplenishments(
+        string providerName,
+        IReadOnlyList<QuotaReplenishmentEvent> replenishments)
+    {
+        if (replenishments.Count == 1)
+        {
+            var replenishment = replenishments[0];
+            var window = replenishment.Current.Title.ToLowerInvariant();
+            var verb = replenishment.Kind switch
+            {
+                QuotaReplenishmentKind.ConfirmedCycleRenewal => "renewed",
+                QuotaReplenishmentKind.FullReplenishment => "replenished",
+                _ => "increased",
+            };
+            var body = replenishment.Kind == QuotaReplenishmentKind.FullReplenishment
+                ? "Available quota is now 100%."
+                : $"Available quota increased from {FormatPercent(replenishment.Previous.AvailablePercent)}% " +
+                  $"to {FormatPercent(replenishment.Current.AvailablePercent)}%.";
+
+            return new QuotaAlertNotification(
+                $"{providerName} {window} quota {verb}",
+                body);
+        }
+
+        var lines = replenishments
+            .Take(3)
+            .Select(item =>
+                $"{item.Current.Title}: {FormatPercent(item.Previous.AvailablePercent)}% " +
+                $"→ {FormatPercent(item.Current.AvailablePercent)}% available.")
+            .ToList();
+        if (replenishments.Count > 3)
+            lines.Add($"And {replenishments.Count - 3} more windows.");
+
+        return new QuotaAlertNotification(
+            $"{providerName} quotas replenished",
+            string.Join(Environment.NewLine, lines));
+    }
+
     public static QuotaAlertNotification From(
         string providerName,
         QuotaAlertWindow window,
@@ -299,6 +430,9 @@ internal sealed record QuotaAlertNotification(string Title, string Body)
 
         return $"{minutes}m";
     }
+
+    private static string FormatPercent(double value)
+        => value.ToString("0", System.Globalization.CultureInfo.InvariantCulture);
 }
 
 internal static class QuotaAlertStateKey

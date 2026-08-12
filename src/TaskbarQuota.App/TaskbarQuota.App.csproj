@@ -96,4 +96,35 @@
           DestinationFiles="@(_LooseXbf->'$(PublishDir)%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
+
+  <Target Name="AddWindowsAppRuntimeNotificationResourceToPublish"
+          Condition="'$(WindowsPackageType)' == 'None'
+                     and '$(WindowsAppSDKSelfContained)' == 'true'
+                     and ('$(RuntimeIdentifier)' == 'win-x64' or '$(RuntimeIdentifier)' == 'win-arm64')"
+          AfterTargets="Publish">
+    <PropertyGroup>
+      <_WindowsAppRuntimeArchitecture Condition="'$(RuntimeIdentifier)' == 'win-x64'">x64</_WindowsAppRuntimeArchitecture>
+      <_WindowsAppRuntimeArchitecture Condition="'$(RuntimeIdentifier)' == 'win-arm64'">arm64</_WindowsAppRuntimeArchitecture>
+      <_WindowsAppRuntimeExtractDir>$(IntermediateOutputPath)WindowsAppRuntimeNotificationResource\$(_WindowsAppRuntimeArchitecture)</_WindowsAppRuntimeExtractDir>
+      <_WindowsAppRuntimeNotificationResource>$(_WindowsAppRuntimeExtractDir)\Microsoft.WindowsAppRuntime.Insights.Resource.dll</_WindowsAppRuntimeNotificationResource>
+    </PropertyGroup>
+    <ItemGroup>
+      <_WindowsAppRuntimeMsix Include="$(MicrosoftWindowsAppSDKPackageDir)tools\MSIX\win10-$(_WindowsAppRuntimeArchitecture)\Microsoft.WindowsAppRuntime.*.msix"
+                             Exclude="$(MicrosoftWindowsAppSDKPackageDir)tools\MSIX\win10-$(_WindowsAppRuntimeArchitecture)\Microsoft.WindowsAppRuntime.DDLM.*.msix;
+                                      $(MicrosoftWindowsAppSDKPackageDir)tools\MSIX\win10-$(_WindowsAppRuntimeArchitecture)\Microsoft.WindowsAppRuntime.Main.*.msix;
+                                      $(MicrosoftWindowsAppSDKPackageDir)tools\MSIX\win10-$(_WindowsAppRuntimeArchitecture)\Microsoft.WindowsAppRuntime.Singleton.*.msix" />
+    </ItemGroup>
+    <Error Condition="'@(_WindowsAppRuntimeMsix->Count())' != '1'"
+           Text="Expected exactly one Windows App Runtime MSIX for $(_WindowsAppRuntimeArchitecture) under the restored Microsoft.WindowsAppSDK.Runtime package at '$(MicrosoftWindowsAppSDKPackageDir)', found @(_WindowsAppRuntimeMsix->Count())." />
+    <RemoveDir Directories="$(_WindowsAppRuntimeExtractDir)" />
+    <MakeDir Directories="$(_WindowsAppRuntimeExtractDir)" />
+    <Exec Command="&quot;$(MakeAppxExeFullPath)&quot; unpack /p &quot;@(_WindowsAppRuntimeMsix)&quot; /d &quot;$(_WindowsAppRuntimeExtractDir)&quot; /o"
+          StandardOutputImportance="Low" />
+    <Error Condition="!Exists('$(_WindowsAppRuntimeNotificationResource)')"
+           Text="Microsoft.WindowsAppRuntime.Insights.Resource.dll was not found in '@(_WindowsAppRuntimeMsix)'." />
+    <Copy SourceFiles="$(_WindowsAppRuntimeNotificationResource)"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true" />
+    <RemoveDir Directories="$(_WindowsAppRuntimeExtractDir)" />
+  </Target>
 </Project>

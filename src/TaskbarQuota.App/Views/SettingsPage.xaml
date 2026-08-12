@@ -146,6 +146,26 @@
                               Toggled="OnQuotaAlertsToggled"/>
             </tk:SettingsCard>
 
+            <tk:SettingsCard Header="Quota replenishment"
+                             Description="Notify when available quota increases significantly or a usage window renews.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE7E7;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <ToggleSwitch x:Name="QuotaReplenishmentToggle"
+                              AutomationProperties.Name="Notify when quota is replenished"
+                              Toggled="OnQuotaReplenishmentToggled"/>
+            </tk:SettingsCard>
+
+            <tk:SettingsCard Header="Changes since last session"
+                             Description="Notify after startup when quota increased since TaskbarQuota's last live reading. Requires quota replenishment notifications.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE823;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <ToggleSwitch x:Name="CrossSessionReplenishmentToggle"
+                              AutomationProperties.Name="Notify about quota increases since the last session"
+                              Toggled="OnCrossSessionReplenishmentToggled"/>
+            </tk:SettingsCard>
+
             <tk:SettingsCard Header="Warning threshold" Description="Notify when a usage window reaches this consumed percentage.">
                 <tk:SettingsCard.HeaderIcon>
                     <FontIcon Glyph="&#xE7BA;"/>

@@ -27,10 +27,14 @@ public class FetchCachePolicyTests
         provider.NextException = new ProviderException(ProviderErrorKind.RateLimited, "429");
 
         var second = await service.FetchAsync(ProviderId.Claude, force: true);
+        var cachedFallback = await service.FetchAsync(ProviderId.Claude);
 
         Assert.True(first.Ok);
         Assert.True(second.Ok);
         Assert.Same(first.Fetch, second.Fetch);
+        Assert.Equal(UsageObservationOrigin.Live, first.ObservationOrigin);
+        Assert.Equal(UsageObservationOrigin.FailureFallback, second.ObservationOrigin);
+        Assert.Equal(UsageObservationOrigin.FailureFallback, cachedFallback.ObservationOrigin);
         Assert.Equal(42, second.Fetch!.Usage.Primary.UsedPercent);
         Assert.Equal(73, second.Fetch.Usage.Secondary!.UsedPercent);
     }
@@ -147,8 +151,28 @@ public class FetchCachePolicyTests
         var first = await service.FetchAsync(ProviderId.Claude, force: true);
         var second = await service.FetchAsync(ProviderId.Claude, force: true);
 
-        Assert.Same(first, second);
+        Assert.Same(first.Fetch, second.Fetch);
+        Assert.Equal(UsageObservationOrigin.Live, first.ObservationOrigin);
+        Assert.Equal(UsageObservationOrigin.Live, second.ObservationOrigin);
+        Assert.True(second.ObservationSequence > first.ObservationSequence);
         Assert.Equal(2, provider.FetchCount);
+    }
+
+    [Fact]
+    public async Task FetchAsync_CachedSuccessIsMarkedAsMemoryCache()
+    {
+        var service = new UsageService();
+        var provider = new FlakyProvider();
+        service.Register(provider);
+
+        var live = await service.FetchAsync(ProviderId.Claude, force: true);
+        var cached = await service.FetchAsync(ProviderId.Claude);
+
+        Assert.Equal(UsageObservationOrigin.Live, live.ObservationOrigin);
+        Assert.Equal(UsageObservationOrigin.MemoryCache, cached.ObservationOrigin);
+        Assert.Equal(live.ObservationSequence, cached.ObservationSequence);
+        Assert.Same(live.Fetch, cached.Fetch);
+        Assert.Equal(1, provider.FetchCount);
     }
 
     private sealed class FlakyProvider : IUsageProvider
