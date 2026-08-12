@@ -1,6 +1,8 @@
 using System;
 using System.IO;
+using System.Text;
 using System.Text.Json;
+using System.Threading;
 using TaskbarQuota.Usage;
 using TaskbarQuota.Usage.Providers;
 
@@ -234,5 +236,17 @@ public class OpenCodeGoProviderTests
         {
             try { Directory.Delete(profile, recursive: true); } catch { }
         }
+    }
+
+    [Fact]
+    public async Task ParseResponse_MalformedJson_ThrowsParseWithInnerException()
+    {
+        using var stream = new MemoryStream(Encoding.UTF8.GetBytes("not json"));
+
+        var ex = await Assert.ThrowsAsync<ProviderException>(
+            () => OpenCodeGoProvider.ParseResponse(stream, CancellationToken.None));
+
+        Assert.Equal(ProviderErrorKind.Parse, ex.Kind);
+        Assert.IsAssignableFrom<JsonException>(ex.InnerException);
     }
 }

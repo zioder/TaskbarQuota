@@ -681,8 +681,7 @@ namespace TaskbarQuota.Usage.Providers
                 throw new ProviderException(ProviderErrorKind.Other, $"OpenCode Go API returned {(int)response.StatusCode}");
 
             using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
-            return BuildResult(doc.RootElement);
+            return await ParseResponse(stream, ct).ConfigureAwait(false);
         }
 
         internal static ProviderFetchResult BuildResult(JsonElement root)
@@ -701,6 +700,19 @@ namespace TaskbarQuota.Usage.Providers
                 Monthly = monthly,
                 LoginMethod = "Go",
             }, "api");
+        }
+
+        internal static async Task<ProviderFetchResult> ParseResponse(Stream stream, CancellationToken ct)
+        {
+            try
+            {
+                using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+                return BuildResult(doc.RootElement);
+            }
+            catch (JsonException ex)
+            {
+                throw new ProviderException(ProviderErrorKind.Parse, $"OpenCode Go returned malformed JSON: {ex.Message}", ex);
+            }
         }
 
         private static RateWindow? ParseWindow(JsonElement usage, int windowMinutes, string key)
@@ -725,18 +737,19 @@ namespace TaskbarQuota.Usage.Providers
         internal static string LoadApiKey() => LoadApiKey(null);
 
         internal static string LoadApiKey(string? homeOverride)
+            => TryLoadApiKey(homeOverride)
+                ?? throw new ProviderException(ProviderErrorKind.AuthRequired,
+                    "OpenCode Go API key not found. Set OPENCODE_API_KEY or sign in to the OpenCode Go CLI.");
+
+        internal static string? TryLoadApiKey(string? homeOverride = null)
         {
             var fromEnv = Environment.GetEnvironmentVariable("OPENCODE_API_KEY")?.Trim();
-            if (!string.IsNullOrEmpty(fromEnv)) return fromEnv!;
+            if (!string.IsNullOrEmpty(fromEnv)) return fromEnv;
 
             var fromStore = CredentialStore.Instance.ApiKey(ProviderId.OpenCodeGo, "OPENCODE_API_KEY");
-            if (!string.IsNullOrWhiteSpace(fromStore)) return fromStore!;
+            if (!string.IsNullOrWhiteSpace(fromStore)) return fromStore;
 
-            var fromAuth = TryLoadApiKeyFromAuth(homeOverride);
-            if (!string.IsNullOrWhiteSpace(fromAuth)) return fromAuth!;
-
-            throw new ProviderException(ProviderErrorKind.AuthRequired,
-                "OpenCode Go API key not found. Set OPENCODE_API_KEY or sign in to the OpenCode Go CLI.");
+            return TryLoadApiKeyFromAuth(homeOverride);
         }
 
         internal static string? TryLoadApiKeyFromAuth(string? homeOverride = null)

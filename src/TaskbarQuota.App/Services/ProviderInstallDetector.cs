@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using TaskbarQuota.Usage;
+using TaskbarQuota.Usage.Providers;
 
 namespace TaskbarQuota;
 
@@ -62,8 +63,9 @@ internal static class ProviderInstallDetector
         ProviderId.Copilot => IsCliAvailable("gh")
             || !string.IsNullOrWhiteSpace(CredentialStore.Instance.For(ProviderId.Copilot).ApiKey),
         ProviderId.Cursor => IsCursorInstalled(),
-        ProviderId.OpenCode or ProviderId.OpenCodeGo => IsCliAvailable("opencode")
+        ProviderId.OpenCode => IsCliAvailable("opencode")
             || !string.IsNullOrWhiteSpace(CredentialStore.Instance.For(ProviderId.OpenCode).CookieHeader),
+        ProviderId.OpenCodeGo => IsCliAvailable("opencode") || HasOpenCodeGoKey(),
         ProviderId.Cline or ProviderId.ClinePass => IsCliAvailable("cline") || File.Exists(ClineProvidersPath()),
         _ => true,
     };
@@ -83,15 +85,19 @@ internal static class ProviderInstallDetector
         ProviderId.Copilot => !string.IsNullOrWhiteSpace(CredentialStore.Instance.For(ProviderId.Copilot).ApiKey)
             || HasCachedCli("gh"),
         ProviderId.Cursor => IsCursorInstalled(),
-        ProviderId.OpenCode or ProviderId.OpenCodeGo =>
+        ProviderId.OpenCode =>
             !string.IsNullOrWhiteSpace(CredentialStore.Instance.For(ProviderId.OpenCode).CookieHeader)
             || HasCachedCli("opencode"),
+        ProviderId.OpenCodeGo => HasOpenCodeGoKey() || HasCachedCli("opencode"),
         ProviderId.Cline or ProviderId.ClinePass => File.Exists(ClineProvidersPath()) || HasCachedCli("cline"),
         _ => true,
     };
 
     private static bool HasCachedCli(string name)
         => CliAvailability.TryGetValue(name, out bool available) && available;
+
+    private static bool HasOpenCodeGoKey()
+        => OpenCodeGoProvider.TryLoadApiKey() is { Length: > 0 };
 
     public static string WaitingMessage(ProviderId id) => id switch
     {
