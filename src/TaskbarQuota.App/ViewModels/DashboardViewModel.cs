@@ -19,7 +19,7 @@ namespace TaskbarQuota.ViewModels
         private IReadOnlyList<UsageResult> _lastResults = Array.Empty<UsageResult>();
         private ProviderId? _lastActive;
         private ProviderId? _lastTopProvider;
-        private CancellationTokenSource? _loadCts;
+        private volatile CancellationTokenSource? _loadCts;
         private readonly Dictionary<ProviderId, string> _cardSignatures = new();
 
         public ObservableCollection<ProviderCardViewModel> Cards { get; } = new();
@@ -146,13 +146,20 @@ namespace TaskbarQuota.ViewModels
             TotalSpend.IsLoading = true;
             _loadCts?.Cancel();
             _loadCts?.Dispose();
-            _loadCts = new CancellationTokenSource();
-            var ct = _loadCts.Token;
+            var cts = new CancellationTokenSource();
+            _loadCts = cts;
+            var ct = cts.Token;
 
             var active = UsageCoordinator.Instance.ActiveProvider;
             var results = await Task.Run(() => BuildDashboardResults(active)).ConfigureAwait(false);
             _dispatcher.TryEnqueue(() =>
             {
+                // A newer load may have superseded this one while we were off-thread; only the
+                // newest load may touch shared state, or a cancelled load can flip IsLoading off
+                // mid-fetch and flash the "No local usage history found" empty state (spinner →
+                // empty → data).
+                if (!ReferenceEquals(_loadCts, cts))
+                    return;
                 UpdateCards(results, active);
                 StatusText = force ? "Refreshing..." : "Loading...";
             });
@@ -177,12 +184,17 @@ namespace TaskbarQuota.ViewModels
                         _ = Task.Run(() =>
                         {
                             var merged = BuildDashboardResults(current, snapshot);
-                            _dispatcher.TryEnqueue(() => UpdateCards(merged, current));
+                            _dispatcher.TryEnqueue(() =>
+                            {
+                                if (!ReferenceEquals(_loadCts, cts))
+                                    return;
+                                UpdateCards(merged, current);
+                            });
                         });
                     },
                     ct);
 
-                if (!ct.IsCancellationRequested)
+                if (!ct.IsCancellationRequested && ReferenceEquals(_loadCts, cts))
                 {
                     var finalActive = UsageCoordinator.Instance.ActiveProvider;
                     var finalResults = results.ToList();
@@ -193,6 +205,8 @@ namespace TaskbarQuota.ViewModels
                     }).ConfigureAwait(false);
                     _dispatcher.TryEnqueue(() =>
                     {
+                        if (!ReferenceEquals(_loadCts, cts))
+                            return;
                         UpdateCards(
                             completed.Results,
                             finalActive,
@@ -205,7 +219,11 @@ namespace TaskbarQuota.ViewModels
             }
             catch (OperationCanceledException)
             {
-                _dispatcher.TryEnqueue(() => TotalSpend.IsLoading = false);
+                // A superseded load (cancelled by a newer LoadAsync/RefreshAsync) must not clear
+                // the loading state of the load that replaced it — that would show the empty state
+                // while the current fetch is still running.
+                if (ReferenceEquals(_loadCts, cts))
+                    _dispatcher.TryEnqueue(() => TotalSpend.IsLoading = false);
             }
         }
 
