@@ -36,6 +36,17 @@ namespace TaskbarQuota.Interop
         [DllImport("user32.dll")]
         public static extern IntPtr SetParent([In] IntPtr hWndChild, [In] IntPtr hWndNewParent);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetWindowPos(
+            [In] IntPtr hWnd,
+            [In, Optional] IntPtr hWndInsertAfter,
+            int x,
+            int y,
+            int cx,
+            int cy,
+            SetWindowPosFlags uFlags);
+
         [DllImport("User32.dll", CharSet = CharSet.Unicode)]
         public static extern IntPtr FindWindow([In, MarshalAs(UnmanagedType.LPWStr)] string? lpClassName, [In, MarshalAs(UnmanagedType.LPWStr)] string? lpWindowName);
 
@@ -53,6 +64,32 @@ namespace TaskbarQuota.Interop
 
         [DllImport("user32.dll")]
         public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowProc lpEnumFunc, IntPtr lParam);
+
+        public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+        public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+        public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
+
+        public delegate void WinEventProc(
+            IntPtr hWinEventHook,
+            uint eventType,
+            IntPtr hwnd,
+            int idObject,
+            int idChild,
+            uint dwEventThread,
+            uint dwmsEventTime);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr SetWinEventHook(
+            uint eventMin,
+            uint eventMax,
+            IntPtr hmodWinEventProc,
+            WinEventProc lpfnWinEventProc,
+            uint idProcess,
+            uint idThread,
+            uint dwFlags);
+
+        [DllImport("user32.dll")]
+        public static extern bool UnhookWinEvent(IntPtr hWinEventHook);
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool EnumWindows(EnumWindowProc lpEnumFunc, IntPtr lParam);
@@ -72,11 +109,27 @@ namespace TaskbarQuota.Interop
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool GetCursorPos([Out] out POINT lpPoint);
 
+        [DllImport("user32.dll")]
+        public static extern short GetAsyncKeyState(int vKey);
+
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr GetForegroundWindow();
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool SetForegroundWindow([In] IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr SetActiveWindow([In] IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr SetFocus([In] IntPtr hWnd);
+
+        [DllImport("kernel32.dll")]
+        public static extern uint GetCurrentThreadId();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, [MarshalAs(UnmanagedType.Bool)] bool fAttach);
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
@@ -92,6 +145,21 @@ namespace TaskbarQuota.Interop
 
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         public static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr newStyle);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern int GetWindowLong(IntPtr hwnd, int index);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
+
+        /// <summary>Sets opacity and/or color key for a WS_EX_LAYERED window.</summary>
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
+
+        public const int GWL_EXSTYLE = -20;
+        public const uint LWA_COLORKEY = 0x1;
+        public const uint LWA_ALPHA = 0x2;
 
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
@@ -130,6 +198,34 @@ namespace TaskbarQuota.Interop
 
         [DllImport("user32.dll", CharSet = CharSet.Auto, EntryPoint = "GetMonitorInfo")]
         public static extern bool GetMonitorInfo([In] IntPtr hMonitor, ref MONITORINFOEX lpmi);
+    }
+
+    public static class DwmApi
+    {
+        public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+        public const int DWMWA_CLOAK = 13;
+
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmSetWindowAttribute(
+            IntPtr hwnd,
+            int attribute,
+            ref DwmWindowCornerPreference preference,
+            int preferenceSize);
+
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmSetWindowAttribute(
+            IntPtr hwnd,
+            int attribute,
+            ref int value,
+            int valueSize);
+    }
+
+    public enum DwmWindowCornerPreference
+    {
+        Default = 0,
+        DoNotRound = 1,
+        Round = 2,
+        RoundSmall = 3,
     }
 
     public enum MonitorFromFlags : uint
@@ -187,6 +283,10 @@ namespace TaskbarQuota.Interop
     {
         Default = 0,
         WS_EX_LAYERED = 0x80000,
+        WS_EX_TOOLWINDOW = 0x00000080,
+        WS_EX_TOPMOST = 0x00000008,
+        WS_EX_NOACTIVATE = 0x08000000,
+        WS_EX_TRANSPARENT = 0x00000020,
     }
 
     [Flags]
@@ -218,6 +318,13 @@ namespace TaskbarQuota.Interop
         GA_PARENT = 1,
         GA_ROOT = 2,
         GA_ROOTOWNER = 3,
+    }
+
+    [Flags]
+    public enum SetWindowPosFlags : uint
+    {
+        SWP_NOZORDER = 0x0004,
+        SWP_NOACTIVATE = 0x0010,
     }
 
     [StructLayout(LayoutKind.Sequential)]

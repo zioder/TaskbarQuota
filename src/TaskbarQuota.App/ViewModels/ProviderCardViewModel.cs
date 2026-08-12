@@ -32,7 +32,7 @@ namespace TaskbarQuota.ViewModels
         public Brush PercentForeground { get; }
         public bool IsWidgetVisible { get; internal set; }
         public bool IsWidgetToggleEnabled { get; internal set; }
-        public string WidgetToggleName => $"Show {Label} in taskbar widget";
+        public string WidgetToggleName => $"Show {Label} in usage widget";
 
         public BarViewModel(ProviderId providerId, string widgetRowId, string label, RateWindow w)
         {
@@ -69,7 +69,7 @@ namespace TaskbarQuota.ViewModels
         public double MutedOpacity { get; }
         public bool IsWidgetVisible { get; internal set; }
         public bool IsWidgetToggleEnabled { get; internal set; }
-        public string WidgetToggleName => $"Show {Label} in taskbar widget";
+        public string WidgetToggleName => $"Show {Label} in usage widget";
 
         public TextMetricViewModel(ProviderId providerId, string widgetRowId, string label, string value, bool muted = false)
         {
@@ -96,7 +96,7 @@ namespace TaskbarQuota.ViewModels
         public string Label { get; }
         public bool IsWidgetVisible { get; internal set; }
         public bool IsWidgetToggleEnabled { get; internal set; }
-        public string WidgetToggleName => $"Show {Label} in taskbar widget";
+        public string WidgetToggleName => $"Show {Label} in usage widget";
 
         public WidgetRowToggleViewModel(ProviderId providerId, WidgetRowOption option)
         {
@@ -210,6 +210,11 @@ namespace TaskbarQuota.ViewModels
 
         public string UsageDashboardUrl { get; }
 
+        public bool HasModelBreakdown { get; }
+        public string ModelBreakdownSourceNote { get; }
+        public IReadOnlyList<ModelUsageItemViewModel> ModelItems { get; }
+        public ProviderUsageHistoryViewModel UsageHistoryDetails { get; }
+
         public bool IsSetupRequired { get; }
         public Visibility SetupRequiredVisibility { get; }
         public bool IsOAuthLoginRequired { get; }
@@ -224,7 +229,7 @@ namespace TaskbarQuota.ViewModels
         public double SuggestedDetailWidth { get; }
         public double SuggestedDetailHeight { get; }
 
-        public ProviderCardViewModel(UsageResult r, bool isActive)
+        public ProviderCardViewModel(UsageResult r, bool isActive, UsageHistory? usageHistoryOverride = null)
         {
             DisplayName = r.DisplayName;
             Initial = string.IsNullOrEmpty(DisplayName) ? "?" : DisplayName[..1].ToUpperInvariant();
@@ -232,9 +237,9 @@ namespace TaskbarQuota.ViewModels
             ActiveVisibility = isActive ? Visibility.Visible : Visibility.Collapsed;
             ProviderId = r.Id;
             IsProviderWidgetVisible = WidgetSettingsService.IsProviderVisible(r.Id);
-            ProviderWidgetToggleName = $"Show {DisplayName} in taskbar widget";
+            ProviderWidgetToggleName = $"Show {DisplayName} in usage widget";
             IsProviderPinned = WidgetSettingsService.IsProviderPinned(r.Id);
-            ProviderPinToggleName = $"Pin {DisplayName} to the taskbar widget";
+            ProviderPinToggleName = $"Pin {DisplayName} in the usage widget";
 
             var bars = new List<BarViewModel>();
             var textMetrics = new List<TextMetricViewModel>();
@@ -362,6 +367,29 @@ namespace TaskbarQuota.ViewModels
             TextMetrics = textMetrics;
             TextMetricsVisibility = textMetrics.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
             ResetCreditItems = resetCreditItems;
+
+            var usageHistory = r.Fetch?.Usage.UsageHistory ?? usageHistoryOverride;
+            UsageHistoryDetails = ProviderUsageHistoryViewModel.From(usageHistory);
+
+            var modelList = new List<ModelUsageItemViewModel>();
+            string sourceNote = string.Empty;
+                    if (usageHistory is { } history
+                        && (history.Today?.ModelBreakdown ?? history.Last30Days?.ModelBreakdown) is { } breakdown)
+            {
+                sourceNote = breakdown.SourceNote;
+                ulong maxTokens = 0;
+                foreach (var entry in breakdown.Models)
+                {
+                    if (entry.TotalTokens > maxTokens) maxTokens = entry.TotalTokens;
+                }
+                foreach (var entry in breakdown.Models)
+                {
+                    modelList.Add(new ModelUsageItemViewModel(entry, maxTokens));
+                }
+            }
+            ModelItems = modelList;
+            ModelBreakdownSourceNote = sourceNote;
+            HasModelBreakdown = ShouldShowModelBreakdown(r.Id, modelList.Count);
 
             bool ok = r.Ok;
             IsFixable = !ok && r.Id is ProviderId.Copilot or ProviderId.Cursor or ProviderId.OpenCode or ProviderId.OpenCodeGo;
@@ -498,6 +526,9 @@ namespace TaskbarQuota.ViewModels
             ProviderId.Copilot => "Completions",
             _ => "Model",
         };
+
+        internal static bool ShouldShowModelBreakdown(ProviderId providerId, int modelCount)
+            => providerId != ProviderId.Codex && modelCount > 0;
     }
 
     /// <summary>Small helpers for resolving theme brushes from code (keeps templates converter-free).</summary>

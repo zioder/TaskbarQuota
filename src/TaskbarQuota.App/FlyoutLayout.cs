@@ -21,11 +21,11 @@ namespace TaskbarQuota
         public const int MinLogicalWidth = BaseLogicalWidth;
 
         /// <summary>
-        /// Chrome beyond the provider icons, so the strip + settings button fit without clipping the
-        /// gear: bottom-chrome margins (12+12) + strip border &amp; padding (1+4+4+1) + strip/settings
-        /// gap (8) + settings border &amp; button (1+48+1) = 92, plus a few px of slack for rounding.
+        /// Chrome beyond the provider icons, so the strip + activity + cost + settings buttons fit
+        /// without clipping the settings gear: bottom-chrome margins (12+12) + strip border &amp;
+        /// padding (1+4+4+1) + three gaps (8+8+8) + three utility buttons (1+48+1 each) = 208.
         /// </summary>
-        public const int StripChromeLogicalWidth = 100;
+        public const int StripChromeLogicalWidth = 208;
 
         /// <summary>Extra width reserved for the dashboard detail card inside the frame.</summary>
         public const int DetailContentPadding = 40;
@@ -40,13 +40,16 @@ namespace TaskbarQuota
         /// Stable compact dashboard content height used by the tray flyout. Taller provider detail
         /// panes scroll inside this frame instead of resizing the native tray window on selection.
         /// </summary>
-        public const int FixedLogicalContentHeight = 620;
+        public const int FixedLogicalContentHeight = 760;
 
         /// <summary>Largest dashboard content height before scrolling takes over.</summary>
         public const int MaxLogicalContentHeight = 760;
 
-        /// <summary>Frame padding + scroll padding + bottom chrome (update bar is optional / collapsed).</summary>
-        public const int ChromeLogicalHeight = 122;
+        /// <summary>
+        /// Frame padding + scroll padding + bottom chrome (update bar is optional / collapsed).
+        /// Includes the quick surface/opacity bar above the provider strip (~52px).
+        /// </summary>
+        public const int ChromeLogicalHeight = 174;
 
         public const int HeightMeasureBuffer = 40;
         public const string ForceMinWidthEnvironmentVariable = "TASKBARQUOTA_FORCE_MIN_FLYOUT_WIDTH";
@@ -82,5 +85,62 @@ namespace TaskbarQuota
             return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
         }
+
+        /// <summary>
+        /// Positions a flyout relative to an anchor (taskbar widget or floating window), preferring
+        /// above when there is room and flipping below when the top of the work area would crush height.
+        /// All coordinates are physical pixels.
+        /// </summary>
+        public static FlyoutPlacementResult ComputePlacement(
+            int anchorLeft,
+            int anchorTop,
+            int anchorRight,
+            int anchorBottom,
+            int workLeft,
+            int workTop,
+            int workRight,
+            int workBottom,
+            int width,
+            int height,
+            int gap)
+        {
+            int workWidth = Math.Max(0, workRight - workLeft);
+            int workHeight = Math.Max(0, workBottom - workTop);
+            width = Math.Clamp(width, 1, Math.Max(1, workWidth));
+            height = Math.Clamp(height, 1, Math.Max(1, workHeight));
+            gap = Math.Max(0, gap);
+
+            int spaceAbove = Math.Max(0, anchorTop - workTop - gap);
+            int spaceBelow = Math.Max(0, workBottom - anchorBottom - gap);
+
+            bool placeAbove;
+            if (spaceAbove >= height)
+                placeAbove = true;
+            else if (spaceBelow >= height)
+                placeAbove = false;
+            else
+                placeAbove = spaceAbove >= spaceBelow;
+
+            int available = placeAbove ? spaceAbove : spaceBelow;
+            // Only shrink when neither side can host the full height; keep as much as fits.
+            if (available < height)
+                height = Math.Max(1, available);
+
+            int x = Math.Clamp(anchorRight - width, workLeft, Math.Max(workLeft, workRight - width));
+            int y = placeAbove
+                ? anchorTop - height - gap
+                : anchorBottom + gap;
+            y = Math.Clamp(y, workTop, Math.Max(workTop, workBottom - height));
+
+            return new FlyoutPlacementResult(x, y, width, height, placeAbove);
+        }
     }
+
+    /// <summary>Result of <see cref="FlyoutLayout.ComputePlacement"/> in physical pixels.</summary>
+    internal readonly record struct FlyoutPlacementResult(
+        int X,
+        int Y,
+        int Width,
+        int Height,
+        bool PlacedAbove);
 }

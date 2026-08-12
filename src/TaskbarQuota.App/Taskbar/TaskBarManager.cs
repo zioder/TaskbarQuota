@@ -2,16 +2,22 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using H.NotifyIcon.Core;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media.Imaging;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Usage;
+using TaskbarQuota.AgentActivity;
 
 namespace TaskbarQuota.Taskbar
 {
-    /// <summary>Owns the tray icon and injected taskbar widgets, and pushes coordinator state into every widget.</summary>
+    /// <summary>
+    /// Owns the tray icon and the active usage surface (taskbar widgets or floating window), and pushes
+    /// coordinator state into that surface.
+    /// </summary>
     internal static class TaskBarManager
     {
         private static TrayIconWithContextMenu? _trayIcon;
@@ -20,13 +26,24 @@ namespace TaskbarQuota.Taskbar
         // Reused snapshot of Widgets.Values, so iterating it while a callback may mutate the dictionary
         // doesn't allocate. Only valid until the next SnapshotWidgets call, and only used on the UI thread.
         private static readonly List<TaskBarWidget> _widgetBuffer = new();
+        private static FloatingUsageWindow? _floatingWindow;
         private static FlyoutWindow? _flyout;
         private static DispatcherQueue? _dispatcher;
         private static Action? _showMainWindow;
         private static DispatcherTimer? _widgetHealthTimer;
+        private static DispatcherTimer? _activityTimer;
+        private static CancellationTokenSource? _activityCts;
+        private static readonly TimeSpan ActiveActivityInterval = TimeSpan.FromSeconds(2);
+        private static readonly TimeSpan IdleActivityInterval = TimeSpan.FromSeconds(10);
         private static bool _initialized;
         private static bool _isReconcilingWidgets;
         private static ProviderId? _lastLoggedWidgetApplyProvider;
+        private static WidgetSurfaceMode _activeSurface = WidgetSurfaceMode.Taskbar;
+        // Foreground hook: fires the instant Windows switches windows so the focus-follows-provider
+        // widget reacts on the switch itself instead of waiting for the next 500 ms detect tick.
+        private static ActiveApp.ForegroundWatcher? _foregroundWatcher;
+
+        private static bool IsFloatingSurface => _activeSurface == WidgetSurfaceMode.Floating;
 
         public static void Initialize(DispatcherQueue dispatcher, Action showMainWindow)
         {
@@ -34,33 +51,220 @@ namespace TaskbarQuota.Taskbar
             _showMainWindow = showMainWindow;
 
             CreateTrayIcon();
-            EnsureWidgets();
+            ApplySurfaceFromSettings();
 
             if (!_initialized)
             {
                 UsageCoordinator.Instance.StateChanged += OnStateChanged;
                 UsageCoordinator.Instance.ActiveProviderChanged += OnActiveProviderChanged;
                 UsageCoordinator.Instance.ActiveToolPresenceChanged += OnActiveToolPresenceChanged;
+                AgentActivityService.Instance.Changed += OnActivityChanged;
+                UsageCoordinator.Instance.ProviderForegroundChanged += OnProviderForegroundChanged;
+                // Lets the coordinator's focus tracker treat our flyout and an active widget drag as neutral
+                // instead of as the user having left the provider app. Otherwise the opt-in hide-on-unfocus
+                // path can hide the widget during the drag and restore its old position.
+                UsageCoordinator.Instance.IsOwnUiEngaged = () =>
+                    _flyout?.IsShown == true
+                    || TaskBarWidget.IsAnyUserRepositioning
+                    || _floatingWindow?.IsDragging == true;
                 WidgetSettingsService.Changed += OnWidgetSettingsChanged;
                 App.Quitting += OnQuitting;
+                // Installed from the UI thread on purpose: WINEVENT_OUTOFCONTEXT callbacks arrive through
+                // that thread's message pump, which this one has and background threads do not.
+                _foregroundWatcher = new ActiveApp.ForegroundWatcher();
+                _foregroundWatcher.ForegroundChanged += OnForegroundChanged;
+                _foregroundWatcher.Start();
                 _initialized = true;
             }
 
             StartWidgetHealthTimer();
+            ConfigureActivityTimer();
             OnActiveToolPresenceChanged(UsageCoordinator.Instance.IsActiveToolPresent);
+        }
+
+        private static void ApplySurfaceFromSettings()
+        {
+            var desired = WidgetSettingsService.CurrentSurface;
+            if (desired == WidgetSurfaceMode.Floating)
+            {
+                DisposeAllTaskbarWidgets();
+                EnsureFloatingWindow();
+                _activeSurface = WidgetSurfaceMode.Floating;
+                SyncFloatingState();
+            }
+            else
+            {
+                DisposeFloatingWindow();
+                _activeSurface = WidgetSurfaceMode.Taskbar;
+                EnsureWidgets();
+                SyncWidgetState();
+                ScheduleFloatingPrewarm();
+            }
+        }
+
+        private static void EnsureFloatingWindow()
+        {
+            if (_floatingWindow is { IsAlive: true })
+                return;
+
+            try { _floatingWindow?.Close(); } catch { }
+            _floatingWindow = null;
+
+            try
+            {
+                var window = new FloatingUsageWindow();
+                window.HydrateProvider = provider => HydrateResult(UsageCoordinator.Instance, provider);
+                window.Clicked += () => _dispatcher?.TryEnqueue(() => ToggleFlyout(window.Handle));
+                window.ActivityClicked += item => _dispatcher?.TryEnqueue(
+                    () => ToggleActivityFlyout(window.Handle, item?.Id));
+                _floatingWindow = window;
+                window.Prewarm();
+                PrewarmFlyout();
+                Log.Information("Floating usage window created");
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to create floating usage window");
+                try { _floatingWindow?.Close(); } catch { }
+                _floatingWindow = null;
+            }
+        }
+
+        private static void DisposeFloatingWindow()
+        {
+            if (_floatingWindow is null)
+                return;
+
+            try { _floatingWindow.Close(); } catch (Exception ex) { Log.Warning(ex, "Failed to close floating usage window"); }
+            _floatingWindow = null;
+        }
+
+        private static void DisposeAllTaskbarWidgets()
+        {
+            foreach (var widget in Widgets.Values.ToArray())
+            {
+                try { widget.Dispose(); } catch (Exception ex) { Log.Warning(ex, "Failed to dispose taskbar widget"); }
+            }
+            Widgets.Clear();
+            TaskbarSpace.ResetAvailableWidth();
+        }
+
+        /// <summary>
+        /// Pushes providers, activity, and visibility into the floating window.
+        /// Returns false when the surface is unavailable or has nothing to show.
+        /// </summary>
+        private static bool SyncFloatingSurface()
+        {
+            if (_floatingWindow is not { IsAlive: true })
+                return false;
+
+            var coordinator = UsageCoordinator.Instance;
+            var providers = coordinator.WidgetDisplayProviders;
+            var activity = AgentActivityService.Instance.Snapshot;
+
+            _floatingWindow.SetActivitySnapshot(activity);
+            _floatingWindow.SetDisplayProviders(providers, coordinator.ActiveProvider);
+
+            // Consult the content actually applied by the floating host. A transient empty scan may be
+            // held for a short grace period; using the raw snapshot here hid the entire window anyway and
+            // defeated that protection.
+            if (!_floatingWindow.HasVisibleContent)
+            {
+                _floatingWindow.SetVisible(false);
+                return false;
+            }
+
+            _floatingWindow.SetVisible(true);
+            return true;
+        }
+
+        private static void SyncFloatingState()
+        {
+            if (!SyncFloatingSurface())
+                return;
+
+            var coordinator = UsageCoordinator.Instance;
+            var providers = coordinator.WidgetDisplayProviders;
+
+            bool needsFetch = false;
+            foreach (var provider in providers)
+            {
+                var toApply = HydrateResult(coordinator, provider);
+                if (toApply is { } result)
+                {
+                    _floatingWindow!.ApplyResult(result, force: true);
+                    LogWidgetApply(result.Id, "floating-sync");
+                }
+
+                if (toApply is null or { Ok: false })
+                    needsFetch = true;
+            }
+
+            if (needsFetch)
+                _ = coordinator.TickAsync(force: true);
+        }
+
+        /// <summary>
+        /// True when the floating surface should be showing content but the window is hidden or gone.
+        /// Used by the health timer so a transient hide does not become permanent.
+        /// </summary>
+        private static bool NeedsFloatingResync()
+        {
+            if (_floatingWindow is not { IsAlive: true })
+                return true;
+
+            var coordinator = UsageCoordinator.Instance;
+            var providers = coordinator.WidgetDisplayProviders;
+            bool shouldShow = providers.Count > 0 || _floatingWindow.HasVisibleContent;
+
+            return shouldShow && !_floatingWindow.IsShown;
+        }
+
+        private static void StartActivityTimer()
+        {
+            if (_activityTimer != null || !WidgetSettingsService.EnableAgentActivityMonitoring)
+                return;
+
+            _activityCts = new CancellationTokenSource();
+            var cancellationToken = _activityCts.Token;
+            // Start fast so a transcript created just after launch is not held behind the ten-second idle
+            // interval. The first completed timer refresh selects the normal active/idle cadence.
+            _activityTimer = new DispatcherTimer { Interval = ActiveActivityInterval };
+            _activityTimer.Tick += async (_, _) =>
+            {
+                await AgentActivityService.Instance.RefreshFromTranscriptsAsync(cancellationToken);
+                if (_activityTimer is { } timer)
+                    timer.Interval = AgentActivityService.Instance.Snapshot.HasLiveItems
+                        ? ActiveActivityInterval
+                        : IdleActivityInterval;
+            };
+            _activityTimer.Start();
+            _ = AgentActivityService.Instance.RefreshFromTranscriptsAsync(cancellationToken);
+        }
+
+        private static void ConfigureActivityTimer()
+        {
+            if (WidgetSettingsService.EnableAgentActivityMonitoring)
+            {
+                StartActivityTimer();
+                return;
+            }
+
+            _activityTimer?.Stop();
+            _activityTimer = null;
+            _activityCts?.Cancel();
+            _activityCts?.Dispose();
+            _activityCts = null;
+            AgentActivityService.Instance.Clear();
         }
 
         private static void CreateTrayIcon()
         {
             var open = new PopupMenuItem("Open TaskbarQuota", (_, _) => _dispatcher?.TryEnqueue(() => _showMainWindow?.Invoke()));
-            var move = new PopupMenuItem("Move primary taskbar widget", (_, _) => _dispatcher?.TryEnqueue(
-                () => PrimaryWidget()?.StartDragging()));
-            var reset = new PopupMenuItem("Reset widget positions", (_, _) => _dispatcher?.TryEnqueue(
-                () =>
-                {
-                    foreach (var widget in Widgets.Values.ToArray())
-                        widget.UpdatePosition(resetManualPosition: true);
-                }));
+            var activity = new PopupMenuItem("Open agent activity", (_, _) => _dispatcher?.TryEnqueue(
+                () => ToggleActivityFlyout(anchorHandle: null, selectedActivityId: null)));
+            var move = new PopupMenuItem("Move usage widget", (_, _) => _dispatcher?.TryEnqueue(StartMoveActiveSurface));
+            var reset = new PopupMenuItem("Reset widget positions", (_, _) => _dispatcher?.TryEnqueue(ResetActiveSurfacePositions));
             var quit = new PopupMenuItem("Quit", (_, _) => _dispatcher?.TryEnqueue(App.Quit));
 
             System.Drawing.Icon? icon = null;
@@ -76,7 +280,7 @@ namespace TaskbarQuota.Taskbar
 
             _trayIcon = new TrayIconWithContextMenu
             {
-                ContextMenu = new PopupMenu { Items = { open, new PopupMenuSeparator(), move, reset, new PopupMenuSeparator(), quit } },
+                ContextMenu = new PopupMenu { Items = { open, activity, new PopupMenuSeparator(), move, reset, new PopupMenuSeparator(), quit } },
                 ToolTip = "TaskbarQuota",
             };
             _trayIcon.Create();
@@ -92,6 +296,29 @@ namespace TaskbarQuota.Taskbar
             };
         }
 
+        private static void StartMoveActiveSurface()
+        {
+            if (IsFloatingSurface)
+            {
+                _floatingWindow?.StartDragging();
+                return;
+            }
+
+            PrimaryWidget()?.StartDragging();
+        }
+
+        private static void ResetActiveSurfacePositions()
+        {
+            if (IsFloatingSurface)
+            {
+                _floatingWindow?.ResetPosition();
+                return;
+            }
+
+            foreach (var widget in Widgets.Values.ToArray())
+                widget.UpdatePosition(resetManualPosition: true);
+        }
+
         private static void StartWidgetHealthTimer()
         {
             if (_widgetHealthTimer != null)
@@ -100,6 +327,26 @@ namespace TaskbarQuota.Taskbar
             _widgetHealthTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
             _widgetHealthTimer.Tick += (_, _) =>
             {
+                if (IsFloatingSurface)
+                {
+                    bool recreated = false;
+                    if (_floatingWindow is null || !_floatingWindow.IsAlive)
+                    {
+                        EnsureFloatingWindow();
+                        recreated = true;
+                    }
+
+                    // Recreate is empty until hydrated. Also re-sync periodically so a hide from a
+                    // transient empty provider set (or opacity stuck at 0 after settings thrash) cannot
+                    // leave the HUD gone until the next process restart.
+                    if (recreated || NeedsFloatingResync())
+                        SyncFloatingState();
+
+                    RefreshPinnedTiles();
+                    Services.PinBudgetService.EnforceBudget();
+                    return;
+                }
+
                 EnsureWidgets();
                 RefreshPinnedTiles();
                 // The free span is only known once a widget has measured it, so a set pinned before that
@@ -123,6 +370,9 @@ namespace TaskbarQuota.Taskbar
 
         private static void EnsureWidgets()
         {
+            if (IsFloatingSurface)
+                return;
+
             if (_isReconcilingWidgets)
                 return;
 
@@ -181,6 +431,8 @@ namespace TaskbarQuota.Taskbar
                 };
                 widget.HydrateProvider = provider => HydrateResult(UsageCoordinator.Instance, provider);
                 widget.Clicked += () => _dispatcher?.TryEnqueue(() => ToggleFlyout(widget));
+                widget.ActivityClicked += item => _dispatcher?.TryEnqueue(
+                    () => ToggleActivityFlyout(widget, item?.Id));
                 Widgets[target.Handle] = widget;
                 SyncWidgetState(widget);
                 PrewarmFlyout();
@@ -208,6 +460,12 @@ namespace TaskbarQuota.Taskbar
 
         private static void SyncWidgetState()
         {
+            if (IsFloatingSurface)
+            {
+                SyncFloatingState();
+                return;
+            }
+
             foreach (var widget in Widgets.Values.ToArray())
                 SyncWidgetState(widget);
         }
@@ -219,13 +477,25 @@ namespace TaskbarQuota.Taskbar
 
             var coordinator = UsageCoordinator.Instance;
             var providers = coordinator.WidgetDisplayProviders;
+            var activity = AgentActivityService.Instance.Snapshot;
 
-            // No provider to show -> hide the native host instead of leaving a transparent taskbar child
-            // window over the notification area (#10).
-            widget.SetVisible(providers.Count > 0);
-            widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
+            widget.SetActivitySnapshot(activity);
+            // window over the notification area (#10). The tiles are deliberately left bound while it
+            // hides: unbinding collapses them in the same frame, which wiped out the fade and made the
+            // widget look like it had blinked out of existence. SetVisible re-binds nothing on the way
+            // back in either — the set below runs first on show.
             if (providers.Count == 0)
+            {
+                widget.SetDisplayProviders(Array.Empty<ProviderId>(), coordinator.ActiveProvider);
+                if (widget.HasVisibleActivity)
+                    widget.SetQuotaVisible(false);
+                else
+                    widget.SetVisible(false);
                 return;
+            }
+
+            widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
+            widget.SetVisible(true);
 
             bool needsFetch = false;
             foreach (var provider in providers)
@@ -253,10 +523,13 @@ namespace TaskbarQuota.Taskbar
         /// </summary>
         private static UsageResult? HydrateResult(UsageCoordinator coordinator, ProviderId provider)
         {
-            if (coordinator.LastState is { } last && last.Id == provider)
-                return last;
             if (coordinator.Service.TryGetCached(provider, out var cached))
                 return cached;
+            // A failed refresh is cached deliberately. Prefer that current failure over LastState,
+            // which may still contain the previous successful snapshot and would resurrect stale quota
+            // values when the widget is recreated (especially after cookie/auth failures).
+            if (coordinator.LastState is { } last && last.Id == provider)
+                return last;
             if (coordinator.Service.TryGetLastSuccessfulLiveResult(provider, out var lastSuccess))
                 return lastSuccess;
             if (coordinator.Service.Get(provider) is { } usageProvider)
@@ -282,14 +555,65 @@ namespace TaskbarQuota.Taskbar
         private static void ToggleFlyout(TaskBarWidget widget)
         {
             if (!widget.IsAlive) return;
+            ToggleFlyout(widget.Handle);
+        }
+
+        private static void ToggleFlyout(IntPtr anchorHandle)
+        {
+            if (anchorHandle == IntPtr.Zero) return;
+            FlyoutWindow? flyout = null;
             try
             {
-                _flyout ??= new FlyoutWindow();
-                _flyout.ToggleAbove(widget.Handle);
+                flyout = _flyout ?? new FlyoutWindow();
+                _flyout = flyout;
+                flyout.ToggleAbove(anchorHandle);
             }
             catch (Exception ex)
             {
                 Log.Error(ex, "Failed to toggle flyout");
+                try { flyout?.Close(); } catch { }
+                _flyout = null;
+            }
+        }
+
+        private static void ToggleActivityFlyout(TaskBarWidget? sourceWidget, string? selectedActivityId)
+        {
+            if (sourceWidget is { IsAlive: true })
+            {
+                ToggleActivityFlyout(sourceWidget.ActivityHandle, selectedActivityId);
+                return;
+            }
+
+            ToggleActivityFlyout(anchorHandle: null, selectedActivityId);
+        }
+
+        private static void ToggleActivityFlyout(IntPtr? anchorHandle, string? selectedActivityId)
+        {
+            IntPtr handle = anchorHandle is { } h && h != IntPtr.Zero
+                ? h
+                : IsFloatingSurface
+                    ? _floatingWindow?.Handle ?? IntPtr.Zero
+                    : PrimaryWidget() is { IsAlive: true } primary
+                        ? primary.ActivityHandle
+                        : IntPtr.Zero;
+
+            if (handle == IntPtr.Zero)
+            {
+                Log.Warning("Cannot toggle agent activity: no usage surface is available");
+                return;
+            }
+
+            FlyoutWindow? flyout = null;
+            try
+            {
+                flyout = _flyout ?? new FlyoutWindow();
+                _flyout = flyout;
+                flyout.ToggleActivityAbove(handle, selectedActivityId);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to toggle agent activity flyout");
+                try { flyout?.Close(); } catch { }
                 _flyout = null;
             }
         }
@@ -298,15 +622,41 @@ namespace TaskbarQuota.Taskbar
         {
             _dispatcher?.TryEnqueue(DispatcherQueuePriority.Low, () =>
             {
+                FlyoutWindow? flyout = null;
                 try
                 {
-                    _flyout ??= new FlyoutWindow();
-                    _flyout.Prewarm();
+                    flyout = _flyout ?? new FlyoutWindow();
+                    _flyout = flyout;
+                    flyout.Prewarm();
                 }
                 catch (Exception ex)
                 {
                     Log.Warning(ex, "Failed to prewarm flyout");
+                    try { flyout?.Close(); } catch { }
                     _flyout = null;
+                }
+            });
+        }
+
+        private static void ScheduleFloatingPrewarm()
+        {
+            if (_dispatcher is null || IsFloatingSurface || WidgetSettingsService.CurrentSurface != WidgetSurfaceMode.Taskbar)
+                return;
+
+            _dispatcher.TryEnqueue(DispatcherQueuePriority.Low, () =>
+            {
+                if (IsFloatingSurface || WidgetSettingsService.CurrentSurface != WidgetSurfaceMode.Taskbar)
+                    return;
+
+                try
+                {
+                    EnsureFloatingWindow();
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, "Failed to prewarm floating usage window");
+                    try { _floatingWindow?.Close(); } catch { }
+                    _floatingWindow = null;
                 }
             });
         }
@@ -318,7 +668,18 @@ namespace TaskbarQuota.Taskbar
         {
             var coordinator = UsageCoordinator.Instance;
             var providers = coordinator.WidgetDisplayProviders;
+            var activity = AgentActivityService.Instance.Snapshot;
             bool isDisplayed = providers.Contains(result.Id);
+
+            if (IsFloatingSurface)
+            {
+                if (!SyncFloatingSurface() || !isDisplayed)
+                    return;
+
+                _floatingWindow!.ApplyResult(result);
+                LogWidgetApply(result.Id, "floating-state");
+                return;
+            }
 
             // Reused buffer: this runs on every usage publish, so a fresh array per publish was pure waste.
             SnapshotWidgets();
@@ -329,8 +690,21 @@ namespace TaskbarQuota.Taskbar
 
                 // Reconcile the tile set first, so a provider that just became active already owns a slot
                 // before its result is routed. SetDisplayProviders is a cheap no-op when nothing changed.
-                widget.SetVisible(providers.Count > 0);
+                widget.SetActivitySnapshot(activity);
+                // As in SyncWidgetState, clear the quota slots before hiding the quota host so a later
+                // provider return cannot reveal stale tiles.
+                if (providers.Count == 0)
+                {
+                    widget.SetDisplayProviders(Array.Empty<ProviderId>(), coordinator.ActiveProvider);
+                    if (widget.HasVisibleActivity)
+                        widget.SetQuotaVisible(false);
+                    else
+                        widget.SetVisible(false);
+                    continue;
+                }
+
                 widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
+                widget.SetVisible(true);
                 if (!isDisplayed)
                     continue;
 
@@ -361,27 +735,76 @@ namespace TaskbarQuota.Taskbar
             Log.Debug($"[synara] widget {source} applied provider={provider}");
         }
 
-        // Provider switches always publish StateChanged immediately after ActiveProviderChanged,
-        // so updating the widget here would only duplicate dispatcher work and add latency.
-        private static void OnActiveProviderChanged(ProviderId? _) { }
+        // Foreground provider detection is strictly for quota context. Agent activity is refreshed by
+        // its own desktop-app and terminal-command scans, even when another app has the focus.
+        private static void OnActiveProviderChanged(ProviderId? _)
+            => _dispatcher?.TryEnqueue(SyncWidgetState);
+
+        /// <summary>
+        /// Fired from the WinEvent hook the instant the foreground window changes. Relays to the
+        /// coordinator so it can re-detect whether a provider is in front without waiting for the
+        /// next 500 ms tick — this is what makes "switch away" hide the widget right away.
+        /// </summary>
+        private static void OnForegroundChanged()
+            => UsageCoordinator.Instance.NotifyForegroundChanged();
 
         private static void OnActiveToolPresenceChanged(bool isPresent)
             => _dispatcher?.TryEnqueue(() => ApplyActiveToolPresenceChanged(isPresent));
 
+        // Focus-follows-provider flip (opt-in setting): the tile set changes even though presence and the
+        // active provider did not, so the widget has to be re-synced from the recomputed set.
+        private static void OnProviderForegroundChanged(bool _)
+            => _dispatcher?.TryEnqueue(SyncWidgetState);
+
         private static void ApplyActiveToolPresenceChanged(bool isPresent)
         {
-            // Pinned tiles stay on the taskbar even when no AI tool is in the foreground; only the active
+            // Pinned tiles stay on the surface even when no AI tool is in the foreground; only the active
             // tile follows presence. SyncWidgetState recomputes the whole set and hydrates it.
-            foreach (var widget in Widgets.Values.ToArray())
-            {
-                if (widget.IsAlive)
-                    SyncWidgetState(widget);
-            }
+            SyncWidgetState();
         }
+
+        private static void OnActivityChanged(AgentActivitySnapshot snapshot)
+            => _dispatcher?.TryEnqueue(() =>
+            {
+                if (IsFloatingSurface)
+                {
+                    SyncFloatingState();
+                    return;
+                }
+
+                foreach (var widget in Widgets.Values.ToArray())
+                {
+                    if (!widget.IsAlive)
+                        continue;
+
+                    widget.SetActivitySnapshot(snapshot);
+                    var providers = UsageCoordinator.Instance.WidgetDisplayProviders;
+                    if (providers.Count == 0)
+                    {
+                        widget.SetDisplayProviders(Array.Empty<ProviderId>(), UsageCoordinator.Instance.ActiveProvider);
+                        if (widget.HasVisibleActivity)
+                            widget.SetQuotaVisible(false);
+                        else
+                            widget.SetVisible(false);
+                    }
+                    else
+                    {
+                        widget.SetDisplayProviders(providers, UsageCoordinator.Instance.ActiveProvider);
+                        widget.SetVisible(true);
+                    }
+                }
+            });
 
         private static void OnWidgetSettingsChanged(object? sender, EventArgs e)
         {
-            _dispatcher?.TryEnqueue(SyncWidgetState);
+            _dispatcher?.TryEnqueue(() =>
+            {
+                ConfigureActivityTimer();
+                if (WidgetSettingsService.CurrentSurface != _activeSurface)
+                    ApplySurfaceFromSettings();
+                else
+                    SyncWidgetState();
+            });
         }
 
         private static void OnQuitting()
@@ -389,18 +812,30 @@ namespace TaskbarQuota.Taskbar
             UsageCoordinator.Instance.StateChanged -= OnStateChanged;
             UsageCoordinator.Instance.ActiveProviderChanged -= OnActiveProviderChanged;
             UsageCoordinator.Instance.ActiveToolPresenceChanged -= OnActiveToolPresenceChanged;
+            AgentActivityService.Instance.Changed -= OnActivityChanged;
+            UsageCoordinator.Instance.ProviderForegroundChanged -= OnProviderForegroundChanged;
+            UsageCoordinator.Instance.IsOwnUiEngaged = null;
             WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
             _initialized = false;
             _widgetHealthTimer?.Stop();
             _widgetHealthTimer = null;
+            _activityTimer?.Stop();
+            _activityTimer = null;
+            _activityCts?.Cancel();
+            _activityCts?.Dispose();
+            _activityCts = null;
+            if (_foregroundWatcher is { } watcher)
+            {
+                watcher.ForegroundChanged -= OnForegroundChanged;
+                watcher.Dispose();
+                _foregroundWatcher = null;
+            }
             if (_trayIcon != null) { _trayIcon.TryRemove(); _trayIcon.Dispose(); _trayIcon = null; }
             try { _flyout?.Close(); } catch { }
             _flyout = null;
-            foreach (var widget in Widgets.Values.ToArray())
-            {
-                try { widget.Dispose(); } catch { }
-            }
-            Widgets.Clear();
+            DisposeFloatingWindow();
+            DisposeAllTaskbarWidgets();
+            _showMainWindow = null;
         }
     }
 }

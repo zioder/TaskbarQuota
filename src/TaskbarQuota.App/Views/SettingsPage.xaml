@@ -30,6 +30,7 @@
                           Margin="0,0,0,4"/>
 
             <TextBlock Text="Appearance" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,8,0,2"/>
+
             <tk:SettingsCard Header="Theme" Description="Choose how TaskbarQuota looks.">
                 <tk:SettingsCard.HeaderIcon>
                     <FontIcon Glyph="&#xE771;"/>
@@ -41,7 +42,7 @@
                 </ComboBox>
             </tk:SettingsCard>
 
-            <tk:SettingsCard Header="Taskbar widget" Description="Choose the compact usage layout shown beside the tray.">
+            <tk:SettingsCard Header="Widget layout" Description="Choose the compact usage layout (bars, percentages, or both).">
                 <tk:SettingsCard.HeaderIcon>
                     <FontIcon Glyph="&#xE71D;"/>
                 </tk:SettingsCard.HeaderIcon>
@@ -62,6 +63,50 @@
                 </ComboBox>
             </tk:SettingsCard>
 
+            <tk:SettingsCard Header="Hide widget when no AI app is focused"
+                             Description="Fade the active provider's tile out when you switch to a browser or any other app, and bring it back when you return. Pinned providers always stay visible.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE890;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <ToggleSwitch x:Name="HideWhenUnfocusedToggle"
+                              AutomationProperties.Name="Hide widget when no AI app is focused"
+                              Toggled="OnHideWhenUnfocusedToggled"/>
+            </tk:SettingsCard>
+
+            <tk:SettingsCard Header="Where to show usage"
+                             Description="Taskbar places the compact widget next to the tray. Floating uses a native Acrylic always-on-top window with the same layout. Scroll wheel adjusts its strength; right-click returns to the taskbar.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE8A7;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <ComboBox x:Name="WidgetSurfaceCombo"
+                          SelectionChanged="OnWidgetSurfaceChanged"
+                          MinWidth="200"
+                          AutomationProperties.Name="Where to show usage"
+                          AutomationProperties.AutomationId="WidgetSurfaceCombo">
+                    <ComboBoxItem Content="In the taskbar" Tag="Taskbar"/>
+                    <ComboBoxItem Content="Floating always-on-top window" Tag="Floating"/>
+                </ComboBox>
+            </tk:SettingsCard>
+
+            <tk:SettingsCard x:Name="FloatingOpacityCard"
+                             Header="Floating acrylic strength"
+                             Description="How opaque the native Acrylic tint is (lower values reveal more of the blurred desktop behind it).">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE790;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                    <!-- Slider range is applied in code — XAML Minimum/Maximum on RangeBase is unsafe. -->
+                    <Grid x:Name="FloatingOpacitySliderHost"
+                          Width="180"
+                          VerticalAlignment="Center"
+                          AutomationProperties.Name="Floating acrylic strength"/>
+                    <TextBlock x:Name="FloatingOpacityLabel"
+                               VerticalAlignment="Center"
+                               MinWidth="40"
+                               Style="{StaticResource BodyTextBlockStyle}"/>
+                </StackPanel>
+            </tk:SettingsCard>
+
             <TextBlock Text="Providers" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,2"/>
             <tk:SettingsCard Header="Hide unavailable providers"
                              Description="Automatically hide providers that are not installed or signed in. You can still add them from the dashboard or below.">
@@ -73,7 +118,7 @@
                               Toggled="OnAutoHideUnavailableToggled"/>
             </tk:SettingsCard>
 
-            <TextBlock Text="Choose which providers appear in the dashboard and taskbar widget."
+            <TextBlock Text="Choose which providers appear in the dashboard and usage widget."
                        Opacity="0.7"
                        Style="{StaticResource CaptionTextBlockStyle}"
                        TextWrapping="Wrap"
@@ -82,7 +127,7 @@
             <StackPanel x:Name="ProviderSettingsPanel" Spacing="4"/>
 
             <TextBlock Text="Behavior" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,2"/>
-            <tk:SettingsCard Header="Open at startup" Description="Start TaskbarQuota with Windows and show only the taskbar widget.">
+            <tk:SettingsCard Header="Open at startup" Description="Start TaskbarQuota with Windows and show only the usage widget.">
                 <tk:SettingsCard.HeaderIcon>
                     <FontIcon Glyph="&#xE7F4;"/>
                 </tk:SettingsCard.HeaderIcon>
@@ -171,7 +216,7 @@
                        Opacity="0.7" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" Margin="0,0,0,4"/>
 
             <TextBlock Text="About" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,2"/>
-            <tk:SettingsCard Description="Native WinUI taskbar widget for AI coding-tool usage.">
+            <tk:SettingsCard Description="Native WinUI widget for AI coding-tool usage.">
                 <tk:SettingsCard.Header>
                     <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
                         <Border Width="40" Height="40"

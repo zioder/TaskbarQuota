@@ -11,6 +11,7 @@ using Microsoft.UI.Xaml.Shapes;
 using Windows.Foundation;
 using Windows.UI;
 using TaskbarQuota.ActiveApp;
+using TaskbarQuota.AgentActivity;
 using TaskbarQuota.Services;
 using TaskbarQuota.Usage;
 using TaskbarQuota.Usage.Providers;
@@ -55,6 +56,32 @@ namespace TaskbarQuota.Controls
 
         public bool SuppressNextClick { get; set; }
 
+        private bool _useApplicationChromeColors;
+
+        /// <summary>
+        /// When true, tile colors follow the app theme (floating window chrome) instead of the system
+        /// taskbar light/dark palette used by the injected taskbar island.
+        /// </summary>
+        public bool UseApplicationChromeColors
+        {
+            get => _useApplicationChromeColors;
+            set
+            {
+                if (_useApplicationChromeColors == value)
+                    return;
+                _useApplicationChromeColors = value;
+                // Re-color if the flag flips after construction (tiles already rendered).
+                if (_hasRevealed || _lastResult is not null || _renderedRows.Count > 0)
+                {
+                    ApplyTaskbarForeground();
+                    if (_lastResult is { } result)
+                        Apply(result, force: true);
+                    else
+                        RenderRows();
+                }
+            }
+        }
+
         /// <summary>
         /// Skips the cross-fade on the next render. Set when a tile is taking over another provider as part
         /// of a re-order: the movement is being conveyed by <see cref="AnimateSlide"/>, and fading the
@@ -73,6 +100,8 @@ namespace TaskbarQuota.Controls
         private bool _forcePercentagesOnly;
         private UsageResult? _lastResult;
         private ProviderId? _lastAppliedProvider;
+        private AgentActivityStatus? _agentStatus;
+        private AgentActivitySnapshot _lastActivitySnapshot = new(Array.Empty<AgentActivityItem>());
         private string? _lastRenderSignature;
         private bool _hasRevealed;
         private bool _isActiveToolVisible = true;
@@ -130,6 +159,16 @@ namespace TaskbarQuota.Controls
             ApplyTaskbarForeground();
             RenderRows();
             WidgetSettingsService.Changed += OnWidgetSettingsChanged;
+            // App light/dark on the floating HUD changes ActualTheme; re-color so text never stays
+            // white-on-light or dark-on-dark after a theme switch.
+            ActualThemeChanged += (_, _) =>
+            {
+                if (UseApplicationChromeColors)
+                {
+                    ApplyTaskbarForeground();
+                    SetBars();
+                }
+            };
             Tapped += (_, _) =>
             {
                 if (SuppressNextClick)
@@ -147,7 +186,13 @@ namespace TaskbarQuota.Controls
 
         private void ApplyTaskbarForeground()
         {
-            bool light = Interop.SystemInfos.IsSystemLightThemeUsed() == true;
+            // Never pull theme brushes from Application.Current.Resources for the floating window:
+            // those resolve against Application.RequestedTheme (often system-dark) while the window
+            // RequestedTheme is Light — white text on a light card. Use ActualTheme + solid colors.
+            bool light = UseApplicationChromeColors
+                ? ThemeService.IsLightChrome(this)
+                : Interop.SystemInfos.IsSystemLightThemeUsed() == true;
+
             Foreground = new SolidColorBrush(light ? Color.FromArgb(255, 28, 28, 28) : Colors.White);
             var track = new SolidColorBrush(light ? Color.FromArgb(90, 28, 28, 28) : Color.FromArgb(110, 255, 255, 255));
 
@@ -155,8 +200,20 @@ namespace TaskbarQuota.Controls
             {
                 row.Track.Background = track;
                 row.Value.Foreground = Foreground;
+                if (row.Label is TextBlock labelBlock)
+                    labelBlock.Foreground = Foreground;
+                else if (row.Label is Panel labelPanel)
+                {
+                    foreach (var child in labelPanel.Children)
+                    {
+                        if (child is TextBlock tb)
+                            tb.Foreground = Foreground;
+                    }
+                }
+                if (row.Reset is { } resetBlock)
+                    resetBlock.Foreground = ResetBrush(row.Source.ResetDescription ?? "");
             }
-            BadgeGlyph.Fill = Foreground;
+            UpdateBadgeFill();
         }
 
         public void Apply(UsageResult result, bool force = false)
@@ -174,6 +231,7 @@ namespace TaskbarQuota.Controls
             var isFirstReveal = !_hasRevealed;
             var providerChanged = _lastAppliedProvider != result.Id;
             _lastAppliedProvider = result.Id;
+            UpdateActivityStatus();
             _lastRenderSignature = signature;
             _lastResult = result;
             ApplyTaskbarForeground();
@@ -187,7 +245,7 @@ namespace TaskbarQuota.Controls
             var glyph = TaskbarQuota.ViewModels.Ui.Glyph(result.Id);
             if (glyph != null)
             {
-                SetNormalizedGlyph(BadgeGlyph, glyph, Foreground);
+                SetNormalizedGlyph(BadgeGlyph, glyph, BadgeGlyph.Fill as Brush ?? Foreground);
                 BadgeGlyphBox.Visibility = Visibility.Visible;
                 BadgeText.Visibility = Visibility.Collapsed;
             }
@@ -225,6 +283,20 @@ namespace TaskbarQuota.Controls
                     AnimateRender(isFirstReveal, providerSwitch: providerChanged);
                     var loginSourceText = result.Source.IsKnown ? $" {result.Source.ShortViaText}" : "";
                     ToolTipService.SetToolTip(this, $"{widgetName}{loginSourceText}: Login required — open the app to connect.");
+                    return;
+                }
+
+                // OpenCode auth failures are not quota data. Render a neutral cookie status instead of
+                // the generic warning bar, which can be mistaken for a stale usage value.
+                if (result.Id is ProviderId.OpenCode or ProviderId.OpenCodeGo
+                    && result.ErrorKind == ProviderErrorKind.AuthRequired)
+                {
+                    _rows = new() { new WidgetUsageRow("Cookies", 0, "needed", HasBar: false) };
+                    RenderRows();
+                    AnimateRender(isFirstReveal, providerSwitch: providerChanged);
+                    var opencodeSourceText = result.Source.IsKnown ? $" {result.Source.ShortViaText}" : "";
+                    ToolTipService.SetToolTip(this,
+                        $"{widgetName}{opencodeSourceText}: {result.Error ?? "No cookies detected. Manual cookie insertion is needed."}");
                     return;
                 }
 
@@ -275,13 +347,55 @@ namespace TaskbarQuota.Controls
             var tooltipLines = _rows.Select(FormatTooltipLine);
             var plan = FormatPlanLabel(result.Id, widgetName, usage.LoginMethod);
             var costTooltip = WidgetCostTooltipLine(result.Id, usage.Cost);
+            var historyTooltip = WidgetUsageHistoryTooltipLine(usage.UsageHistory);
             var resetCreditsTooltip = WidgetResetCreditsTooltipLine(usage.ResetCredits);
             var staleTooltip = StaleTooltipLine(result);
             ToolTipService.SetToolTip(this,
                 string.IsNullOrEmpty(plan)
-                    ? $"{WidgetTooltipTitle(widgetName, result.Source)}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}"
-                    : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{resetCreditsTooltip}{staleTooltip}");
+                    ? $"{WidgetTooltipTitle(widgetName, result.Source)}\n{string.Join("\n", tooltipLines)}{costTooltip}{historyTooltip}{resetCreditsTooltip}{staleTooltip}"
+                    : $"{WidgetTooltipTitle(widgetName, result.Source)} · {plan}\n{string.Join("\n", tooltipLines)}{costTooltip}{historyTooltip}{resetCreditsTooltip}{staleTooltip}");
         }
+
+        /// <summary>Colors this provider glyph from its own independently-discovered agent tasks.</summary>
+        public void SetAgentActivity(AgentActivitySnapshot snapshot)
+        {
+            _lastActivitySnapshot = snapshot;
+            UpdateActivityStatus();
+        }
+
+        private void UpdateActivityStatus()
+        {
+            var activity = _lastAppliedProvider is { } provider
+                ? _lastActivitySnapshot.TrackedItems
+                    .Where(item => AreActivityProvidersEquivalent(item.Provider, provider))
+                    .OrderByDescending(item => item.IsLive)
+                    .ThenByDescending(item => ActivityStatusPriority(item.Status))
+                    .ThenByDescending(item => item.UpdatedAt)
+                    .FirstOrDefault()
+                : null;
+            _agentStatus = activity?.Status;
+            UpdateBadgeFill();
+        }
+
+        private static bool AreActivityProvidersEquivalent(ProviderId left, ProviderId right)
+            => left == right
+                || left is ProviderId.Cline or ProviderId.ClinePass
+                    && right is ProviderId.Cline or ProviderId.ClinePass
+                || left is ProviderId.OpenCode or ProviderId.OpenCodeGo
+                    && right is ProviderId.OpenCode or ProviderId.OpenCodeGo;
+
+        private static int ActivityStatusPriority(AgentActivityStatus status) => status switch
+        {
+            AgentActivityStatus.Working => 5,
+            AgentActivityStatus.Waiting => 4,
+            AgentActivityStatus.Idle => 3,
+            AgentActivityStatus.Failed => 2,
+            AgentActivityStatus.Completed => 1,
+            _ => 0,
+        };
+
+        private void UpdateBadgeFill()
+            => BadgeGlyph.Fill = AgentActivityVisuals.StatusBrush(_agentStatus, Foreground);
 
         /// <summary>
         /// Badge the provider glyph with its active source (browser, host app, terminal, desktop app).
@@ -349,8 +463,14 @@ namespace TaskbarQuota.Controls
 
         public void SetActiveToolVisible(bool isVisible)
         {
+            // If we already believe we are visible but the root was left at Opacity 0 (interrupted
+            // hide/reveal, first-paint race, or a settings thrash), force a re-show instead of no-op.
             if (_isActiveToolVisible == isVisible)
+            {
+                if (isVisible && Root.Opacity < 0.05)
+                    AnimateVisibility(toOpacity: 1, toOffset: 0, milliseconds: 200);
                 return;
+            }
 
             _isActiveToolVisible = isVisible;
             IsHitTestVisible = isVisible;
@@ -614,6 +734,7 @@ namespace TaskbarQuota.Controls
                 $"{WidgetTooltipTitle(result.DisplayName, result.Source)} · {usage.LoginMethod}\n" +
                 $"Usage: {usage.Cost?.Display ?? "--"}\n" +
                 $"Balance: {(balanceText != null ? "$" + balanceText.Split(' ')[0] : "--")}" +
+                WidgetUsageHistoryTooltipLine(usage.UsageHistory) +
                 StaleTooltipLine(result));
         }
 
@@ -636,6 +757,7 @@ namespace TaskbarQuota.Controls
             ToolTipService.SetToolTip(this,
                 $"{WidgetTooltipTitle(result.DisplayName, result.Source)} · {usage.LoginMethod}\n" +
                 $"Credit balance: {usage.Cost?.Display ?? "--"}" +
+                WidgetUsageHistoryTooltipLine(usage.UsageHistory) +
                 StaleTooltipLine(result));
         }
 
@@ -689,6 +811,7 @@ namespace TaskbarQuota.Controls
                 tooltip += $"\nAdditional usage: {addl.StatusText} ({addl.SpendText})";
             if (usage.Primary.ResetDescription is { } resetDesc)
                 tooltip += $"\nresets in {resetDesc}";
+            tooltip += WidgetUsageHistoryTooltipLine(usage.UsageHistory);
             tooltip += StaleTooltipLine(result);
             ToolTipService.SetToolTip(this, tooltip);
         }
@@ -739,6 +862,27 @@ namespace TaskbarQuota.Controls
             }
 
             return $"\n{cost.Label}: {cost.Display}";
+        }
+
+        internal static string WidgetUsageHistoryTooltipLine(UsageHistory? history)
+        {
+            if (history?.Today is not { } today || today.Tokens == 0 && today.EstimatedCostUsd is null)
+                return string.Empty;
+
+            var tokens = FormatHistoryTokens(today.Tokens);
+            if (today.EstimatedCostUsd is not { } cost)
+                return $"\nToday: {tokens} · cost unavailable";
+
+            var estimateMarker = today.EstimateComplete ? string.Empty : "*";
+            return $"\nToday: ${cost:F2}{estimateMarker} estimated · {tokens}";
+        }
+
+        private static string FormatHistoryTokens(ulong tokens)
+        {
+            if (tokens >= 1_000_000_000) return $"{tokens / 1_000_000_000d:0.#}B tokens";
+            if (tokens >= 1_000_000) return $"{tokens / 1_000_000d:0.#}M tokens";
+            if (tokens >= 1_000) return $"{tokens / 1_000d:0.#}K tokens";
+            return $"{tokens:N0} tokens";
         }
 
         private static string WidgetResetCreditsTooltipLine(ResetCreditsSnapshot? resetCredits)
@@ -814,7 +958,9 @@ namespace TaskbarQuota.Controls
                 (usage.Primary.ResetDescription is { } r1 ? $" (resets {r1})" : "") + "\n" +
                 $"Non-Gemini: {WidgetSettingsService.FormatDisplayPercent(usage.Secondary?.UsedPercent ?? 0)}" +
                 (usage.Secondary?.ResetDescription is { } r2 ? $" (resets {r2})" : "");
-            ToolTipService.SetToolTip(this, header + body + StaleTooltipLine(result));
+            ToolTipService.SetToolTip(
+                this,
+                header + body + WidgetUsageHistoryTooltipLine(usage.UsageHistory) + StaleTooltipLine(result));
         }
 
         private void OnWidgetSettingsChanged(object? sender, EventArgs e)
@@ -860,13 +1006,13 @@ namespace TaskbarQuota.Controls
         /// <summary>
         /// Whether a render that skips the cross-fade still has to put the tile on screen outright.
         ///
-        /// True exactly when this is the tile's first render and it is meant to be showing: the root ships
-        /// at Opacity 0, and the reveal is the only thing that raises it. A suppressed transition that
-        /// returned early here left the tile permanently invisible even though it measured, laid out and
-        /// reported itself Visible.
+        /// True exactly when this is the tile's first render: the root ships at Opacity 0, and the reveal is
+        /// the only thing that raises it. Provider seeding happens before the layout pass marks the slot
+        /// visible, so consulting the pre-layout visibility flag here can leave the tile permanently
+        /// transparent. The synchronous layout pass still collapses any slot that should not be shown.
         /// </summary>
-        internal static bool ShouldRevealWithoutTransition(bool isFirstReveal, bool isActiveToolVisible)
-            => isFirstReveal && isActiveToolVisible;
+        internal static bool ShouldRevealWithoutTransition(bool isFirstReveal)
+            => isFirstReveal;
 
         private void AnimateRender(bool isFirstReveal, bool providerSwitch = false)
         {
@@ -880,7 +1026,7 @@ namespace TaskbarQuota.Controls
                 // transition) used to stay fully transparent for the life of the process: measured, laid
                 // out, Visible, and painting nothing. Show it outright instead — skipping the fade is the
                 // whole point of the suppression, showing it is not.
-                if (ShouldRevealWithoutTransition(isFirstReveal, _isActiveToolVisible))
+                if (ShouldRevealWithoutTransition(isFirstReveal))
                 {
                     Root.Opacity = 1;
                     RootTranslate.Y = 0;
@@ -919,13 +1065,11 @@ namespace TaskbarQuota.Controls
 
         private void AnimateSoftRefresh()
         {
-            // Start below the resting value so the refresh still reads as a pulse, but never brighten
-            // past it — a stale snapshot must stay dimmed once the animation settles.
-            double targetOpacity = RestingPanelOpacity;
-            double startOpacity = Math.Min(0.72, targetOpacity);
-            Panel.Opacity = startOpacity;
-
-            AnimatePanelOpacity(startOpacity, targetOpacity, 180);
+            // A refresh replaces the row elements in-place. Dimming the entire panel here made every
+            // quota poll flash, especially when providers publish a stale snapshot followed by a live
+            // result a moment later. Keep the resting opacity stable; first reveal and provider switches
+            // still use their dedicated transitions.
+            Panel.Opacity = RestingPanelOpacity;
         }
 
         /// <summary>
@@ -1203,6 +1347,7 @@ namespace TaskbarQuota.Controls
                 0.86,
                 compactTextOnlyValue ? TextAlignment.Left : TextAlignment.Center,
                 textSize);
+            value.Foreground = Foreground;
             var reset = CreateResetText(usageRow, textSize);
 
             FrameworkElement label;
@@ -1282,7 +1427,7 @@ namespace TaskbarQuota.Controls
                     break;
             }
 
-            _renderedRows.Add(new RenderedRow(usageRow, track, bar, barWidth, label, value));
+            _renderedRows.Add(new RenderedRow(usageRow, track, bar, barWidth, label, value, reset));
         }
 
         private static FrameworkElement CreateNormalizedGlyph(
@@ -1356,14 +1501,17 @@ namespace TaskbarQuota.Controls
             VerticalAlignment = VerticalAlignment.Center,
         };
 
-        private static FrameworkElement CreateLabelText(WidgetUsageRow row, WidgetDisplayMode mode, int fontSize = WidgetFontSize)
+        private FrameworkElement CreateLabelText(WidgetUsageRow row, WidgetDisplayMode mode, int fontSize = WidgetFontSize)
         {
             var baseLabel = CreateText(BaseLabelText(row, mode), 0.78, TextAlignment.Left, fontSize);
             baseLabel.TextTrimming = TextTrimming.None;
+            // Explicit brush: inheritance is unreliable once Application theme resources disagree
+            // with the floating window's light/dark chrome.
+            baseLabel.Foreground = Foreground;
             return baseLabel;
         }
 
-        private static TextBlock CreateResetText(WidgetUsageRow row, int fontSize = WidgetFontSize)
+        private TextBlock CreateResetText(WidgetUsageRow row, int fontSize = WidgetFontSize)
         {
             if (string.IsNullOrWhiteSpace(row.ResetDescription))
                 return CreateText("", 0.9, TextAlignment.Left, fontSize);
@@ -1389,18 +1537,38 @@ namespace TaskbarQuota.Controls
                 SetBar(row.Bar, row.Source.Percent, row.BarWidth);
         }
 
-        private static void SetBar(FrameworkElement bar, double percent, double maxWidth)
+        private void SetBar(FrameworkElement bar, double percent, double maxWidth)
         {
             bar.Width = Math.Clamp(percent, 0, 100) * (maxWidth / 100d);
-            string key = WidgetSettingsService.GetUsageBrushResourceKeyForDisplayPercent(percent);
-            if (bar is Border border)
+            if (bar is not Border border)
+                return;
+
+            bool emphasized = WidgetSettingsService.CurrentPercentageMode == PercentageDisplayMode.Remaining
+                ? percent <= 25
+                : percent >= 75;
+            border.Background = UsageBarBrush(percent);
+            border.Opacity = emphasized ? 0.95 : 0.78;
+        }
+
+        private Brush UsageBarBrush(double displayPercent)
+        {
+            if (UseApplicationChromeColors)
             {
-                bool emphasized = WidgetSettingsService.CurrentPercentageMode == PercentageDisplayMode.Remaining
-                    ? percent <= 25
-                    : percent >= 75;
-                border.Background = (Brush)Application.Current.Resources[key];
-                border.Opacity = emphasized ? 0.95 : 0.78;
+                bool light = ThemeService.IsLightChrome(this);
+                // Thresholds match WidgetSettingsService usage colors (critical / caution / normal).
+                displayPercent = Math.Clamp(displayPercent, 0, 100);
+                bool remaining = WidgetSettingsService.CurrentPercentageMode == PercentageDisplayMode.Remaining;
+                bool critical = remaining ? displayPercent <= 10 : displayPercent >= 90;
+                bool caution = remaining ? displayPercent <= 25 : displayPercent >= 75;
+                if (critical)
+                    return new SolidColorBrush(light ? Color.FromArgb(255, 196, 43, 28) : Color.FromArgb(255, 255, 99, 71));
+                if (caution)
+                    return new SolidColorBrush(light ? Color.FromArgb(255, 157, 93, 0) : Color.FromArgb(255, 255, 185, 0));
+                return new SolidColorBrush(light ? Color.FromArgb(255, 0, 103, 192) : Color.FromArgb(255, 96, 205, 255));
             }
+
+            string key = WidgetSettingsService.GetUsageBrushResourceKeyForDisplayPercent(displayPercent);
+            return (Brush)Application.Current.Resources[key];
         }
 
         private static string Abbrev(string name)
@@ -1525,8 +1693,30 @@ namespace TaskbarQuota.Controls
             return $"{local:MMM d h:mm tt}";
         }
 
-        private static Brush ResetBrush(string resetDescription)
+        private Brush ResetBrush(string resetDescription)
         {
+            // Floating HUD uses solid colors from the window chrome theme. Application.Current
+            // theme resources resolve against system/app dark mode and paint light-on-light
+            // secondary text (e.g. "(6h 25m)") when the floating window is in light mode.
+            if (UseApplicationChromeColors)
+            {
+                bool light = ThemeService.IsLightChrome(this);
+                return TryParseResetMinutes(resetDescription) switch
+                {
+                    // Urgent / soon: accent blue, darker on light chrome for contrast.
+                    <= 30 => new SolidColorBrush(light
+                        ? Color.FromArgb(255, 0, 90, 158)
+                        : Color.FromArgb(255, 96, 205, 255)),
+                    <= 120 => new SolidColorBrush(light
+                        ? Color.FromArgb(255, 0, 103, 192)
+                        : Color.FromArgb(255, 80, 180, 255)),
+                    // Normal reset countdown: muted primary, never pure theme secondary.
+                    _ => new SolidColorBrush(light
+                        ? Color.FromArgb(210, 28, 28, 28)
+                        : Color.FromArgb(210, 255, 255, 255)),
+                };
+            }
+
             string key = TryParseResetMinutes(resetDescription) switch
             {
                 <= 30 => "AccentFillColorDefaultBrush",
@@ -1600,7 +1790,8 @@ namespace TaskbarQuota.Controls
             Border Bar,
             double BarWidth,
             FrameworkElement? Label,
-            TextBlock Value);
+            TextBlock Value,
+            TextBlock? Reset = null);
 
         private sealed record WidgetLayoutMetrics(double LabelWidth, double ResetWidth, double ValueWidth);
     }

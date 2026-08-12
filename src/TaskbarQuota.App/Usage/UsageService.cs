@@ -92,13 +92,15 @@ namespace TaskbarQuota.Usage
             lock (_lock)
             {
                 if (!force && TryGetValidEntry(id, out var cached))
-                    return cached.Result.AsMemoryCache();
+                    return AttachLocalHistory(id, cached.Result.AsMemoryCache());
             }
 
             var observationSequence = Interlocked.Increment(ref _nextObservationSequence);
             try
             {
                 var fetch = await provider.FetchUsageAsync(ct).ConfigureAwait(false);
+                if (UsageHistoryService.TryLoad(id, out var history))
+                    fetch.Usage.UsageHistory = history;
                 var observedAt = DateTimeOffset.Now;
                 var result = UsageResult.Success(id, provider, fetch)
                     .AsLiveObservation(observationSequence, observedAt);
@@ -136,6 +138,13 @@ namespace TaskbarQuota.Usage
                     return fallback;
                 }
 
+                if (pe.Kind is not ProviderErrorKind.AuthRequired and not ProviderErrorKind.NotInstalled
+                    && TryCreateLocalHistoryResult(id, provider, out var localResult))
+                {
+                    Store(id, localResult, FetchCachePolicy.TtlForFailure(pe.Kind));
+                    return localResult;
+                }
+
                 var result = UsageResult.Failure(id, pe.Message, provider, pe.Kind);
                 Store(id, result, FetchCachePolicy.TtlForFailure(pe.Kind));
                 return result;
@@ -146,6 +155,12 @@ namespace TaskbarQuota.Usage
             }
             catch (Exception ex)
             {
+                if (TryCreateLocalHistoryResult(id, provider, out var localResult))
+                {
+                    Store(id, localResult, FetchCachePolicy.TtlForFailure(null));
+                    return localResult;
+                }
+
                 var result = UsageResult.Failure(id, ex.Message, provider);
                 Store(id, result, FetchCachePolicy.TtlForFailure(null));
                 return result;
@@ -281,6 +296,7 @@ namespace TaskbarQuota.Usage
                 || !SameWindow(left.Monthly, right.Monthly)
                 || left.LoginMethod != right.LoginMethod
                 || left.Email != right.Email
+                || !SameHistory(left.UsageHistory, right.UsageHistory)
                 || !SameCost(left.Cost, right.Cost)
                 || !SameAdditional(left.AdditionalUsage, right.AdditionalUsage)
                 || !SameResetCredits(left.ResetCredits, right.ResetCredits)
@@ -298,6 +314,89 @@ namespace TaskbarQuota.Usage
 
             return true;
         }
+
+        private static UsageResult AttachLocalHistory(ProviderId id, UsageResult result)
+        {
+            if (result.Fetch?.Usage is not { } usage)
+                return result;
+
+            if (UsageHistoryService.TryLoad(id, out var history))
+            {
+                usage.UsageHistory = history;
+            }
+
+            return result;
+        }
+
+        private static bool TryCreateLocalHistoryResult(
+            ProviderId id,
+            IUsageProvider provider,
+            out UsageResult result)
+        {
+            if (!UsageHistoryService.TryLoad(id, out var history))
+            {
+                result = UsageResult.Failure(id, "No local usage history found.", provider);
+                return false;
+            }
+
+            var usage = new UsageSnapshot(new RateWindow(0))
+            {
+                UsageHistory = history,
+            };
+            result = UsageResult.Success(
+                id,
+                provider,
+                new ProviderFetchResult(usage, "Local usage history"));
+            return true;
+        }
+
+        private static bool SameHistory(UsageHistory? left, UsageHistory? right)
+        {
+            if (left is null || right is null)
+                return left is null && right is null;
+
+            return SamePeriod(left.Today, right.Today)
+                && SamePeriod(left.Yesterday, right.Yesterday)
+                && SamePeriod(left.Last7Days, right.Last7Days)
+                && SamePeriod(left.Last30Days, right.Last30Days)
+                && SamePeriod(left.Last90Days, right.Last90Days)
+                && left.Daily.Count == right.Daily.Count
+                && left.Daily.Zip(right.Daily).All(pair =>
+                    pair.First.Date == pair.Second.Date
+                    && pair.First.Tokens == pair.Second.Tokens
+                    && NullableNearlyEqual(pair.First.EstimatedCostUsd, pair.Second.EstimatedCostUsd)
+                    && SameTokens(pair.First.TokenBreakdown, pair.Second.TokenBreakdown)
+                    && NearlyEqual(pair.First.CacheSavingsUsd, pair.Second.CacheSavingsUsd));
+        }
+
+        private static bool SamePeriod(UsagePeriod? left, UsagePeriod? right)
+        {
+            if (left is null || right is null)
+                return left is null && right is null;
+            if (left.Tokens != right.Tokens
+                || !NullableNearlyEqual(left.EstimatedCostUsd, right.EstimatedCostUsd)
+                || left.CostEstimated != right.CostEstimated
+                || left.EstimateComplete != right.EstimateComplete
+                || !SameTokens(left.TokenBreakdown, right.TokenBreakdown)
+                || !NearlyEqual(left.CacheSavingsUsd, right.CacheSavingsUsd))
+                return false;
+
+            var leftModels = left.ModelBreakdown?.Models ?? Array.Empty<ModelUsageEntry>();
+            var rightModels = right.ModelBreakdown?.Models ?? Array.Empty<ModelUsageEntry>();
+            return leftModels.Count == rightModels.Count
+                && leftModels.Zip(rightModels).All(pair =>
+                    pair.First.Model == pair.Second.Model
+                    && pair.First.TotalTokens == pair.Second.TotalTokens
+                    && NullableNearlyEqual(pair.First.CostUsd, pair.Second.CostUsd));
+        }
+
+        private static bool SameTokens(TokenBreakdown left, TokenBreakdown right)
+            => left.Input == right.Input
+                && left.CacheWrite5m == right.CacheWrite5m
+                && left.CacheWrite1h == right.CacheWrite1h
+                && left.CacheRead == right.CacheRead
+                && left.Output == right.Output
+                && left.Reasoning == right.Reasoning;
 
         private static bool SameWindow(RateWindow? left, RateWindow? right)
             => (left, right) switch

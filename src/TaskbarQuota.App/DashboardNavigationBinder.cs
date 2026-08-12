@@ -13,16 +13,23 @@ namespace TaskbarQuota
     internal sealed class DashboardNavigationBinder : IDisposable
     {
         private readonly NavigationView _nav;
+        private readonly NavigationViewItem _providerGroup;
         private readonly DashboardViewModel _viewModel;
         private readonly DispatcherQueueTimer _rebuildTimer;
         private bool _rebuildPending;
         private bool _disposed;
+        private bool _providerPageActive;
+        private ProviderId? _requestedProviderId;
 
         public bool IsSyncing { get; private set; }
 
-        public DashboardNavigationBinder(NavigationView nav, DashboardViewModel viewModel)
+        public DashboardNavigationBinder(
+            NavigationView nav,
+            NavigationViewItem providerGroup,
+            DashboardViewModel viewModel)
         {
             _nav = nav;
+            _providerGroup = providerGroup;
             _viewModel = viewModel;
             _rebuildTimer = nav.DispatcherQueue.CreateTimer();
             _rebuildTimer.Interval = TimeSpan.FromMilliseconds(50);
@@ -33,6 +40,7 @@ namespace TaskbarQuota
                 Rebuild();
             };
             _viewModel.Cards.CollectionChanged += Cards_CollectionChanged;
+            _viewModel.AvailableCards.CollectionChanged += Cards_CollectionChanged;
             _viewModel.SelectedCardChanged += ViewModel_SelectedCardChanged;
             WidgetSettingsService.Changed += OnWidgetSettingsChanged;
             Rebuild();
@@ -55,6 +63,7 @@ namespace TaskbarQuota
             _disposed = true;
             WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
             _viewModel.Cards.CollectionChanged -= Cards_CollectionChanged;
+            _viewModel.AvailableCards.CollectionChanged -= Cards_CollectionChanged;
             _viewModel.SelectedCardChanged -= ViewModel_SelectedCardChanged;
             _rebuildTimer.Stop();
         }
@@ -71,6 +80,16 @@ namespace TaskbarQuota
             IsSyncing = false;
         }
 
+        public void SetProviderPageActive(bool active)
+        {
+            _providerPageActive = active;
+            if (!active)
+                _requestedProviderId = null;
+            IsSyncing = true;
+            SyncSelection();
+            IsSyncing = false;
+        }
+
         public bool SelectFromNavigation(NavigationViewSelectionChangedEventArgs args)
         {
             if (IsSyncing)
@@ -79,7 +98,12 @@ namespace TaskbarQuota
             if (args.SelectedItemContainer is not NavigationViewItem { Tag: ProviderId id })
                 return false;
 
+            _requestedProviderId = id;
+            bool providerIsKnown = _viewModel.Cards.Any(card => card.ProviderId == id)
+                || _viewModel.AvailableCards.Any(card => card.ProviderId == id);
             _viewModel.SelectProvider(id);
+            if (!providerIsKnown)
+                _viewModel.EnableAvailableProvider(id);
             return true;
         }
 
@@ -114,19 +138,21 @@ namespace TaskbarQuota
         private void Rebuild()
         {
             IsSyncing = true;
-            bool iconOnly = _nav.PaneDisplayMode == NavigationViewPaneDisplayMode.Top;
-            _nav.MenuItems.Clear();
-            foreach (var card in _viewModel.Cards)
+            _providerGroup.MenuItems.Clear();
+            foreach (var provider in UsageCoordinator.Instance.Service.All)
             {
+                var card = _viewModel.Cards.Concat(_viewModel.AvailableCards)
+                    .FirstOrDefault(candidate => candidate.ProviderId == provider.Id);
+                var displayName = card?.DisplayName ?? provider.DisplayName;
                 var item = new NavigationViewItem
                 {
-                    Content = iconOnly ? null : card.DisplayName,
-                    Tag = card.ProviderId,
-                    Icon = CreateProviderIcon(card.ProviderId),
-                    HorizontalAlignment = iconOnly ? HorizontalAlignment.Center : HorizontalAlignment.Stretch,
+                    Content = displayName,
+                    Tag = provider.Id,
+                    Icon = CreateProviderIcon(provider.Id),
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
                 };
-                ApplyPinBadge(item, card.ProviderId, card.DisplayName);
-                _nav.MenuItems.Add(item);
+                ApplyPinBadge(item, provider.Id, displayName);
+                _providerGroup.MenuItems.Add(item);
             }
 
             SyncSelection();
@@ -145,13 +171,14 @@ namespace TaskbarQuota
 
         private void SyncSelection()
         {
-            var selected = _viewModel.SelectedCard?.ProviderId;
-            foreach (var item in _nav.MenuItems)
+            var selected = _requestedProviderId ?? _viewModel.SelectedCard?.ProviderId;
+            foreach (var item in _providerGroup.MenuItems)
             {
                 if (item is not NavigationViewItem navItem)
                     continue;
 
-                bool isSelected = selected is ProviderId id
+                bool isSelected = _providerPageActive
+                    && selected is ProviderId id
                     && navItem.Tag is ProviderId tag
                     && id == tag;
 
@@ -178,7 +205,7 @@ namespace TaskbarQuota
                 }
                 : null;
 
-            ToolTipService.SetToolTip(item, pinned ? $"{displayName} — pinned to the taskbar" : displayName);
+            ToolTipService.SetToolTip(item, pinned ? $"{displayName} — pinned in the usage widget" : displayName);
         }
 
         /// <summary>
@@ -187,13 +214,15 @@ namespace TaskbarQuota
         /// </summary>
         private void RefreshPinBadges()
         {
-            foreach (var menuItem in _nav.MenuItems)
+            foreach (var menuItem in _providerGroup.MenuItems)
             {
                 if (menuItem is not NavigationViewItem { Tag: ProviderId id } item)
                     continue;
 
-                var card = _viewModel.Cards.FirstOrDefault(c => c.ProviderId == id);
-                ApplyPinBadge(item, id, card?.DisplayName ?? id.ToString());
+                var card = _viewModel.Cards.Concat(_viewModel.AvailableCards)
+                    .FirstOrDefault(candidate => candidate.ProviderId == id);
+                var provider = UsageCoordinator.Instance.Service.Get(id);
+                ApplyPinBadge(item, id, card?.DisplayName ?? provider?.DisplayName ?? id.ToString());
             }
         }
 

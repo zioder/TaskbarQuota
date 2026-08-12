@@ -21,6 +21,16 @@ public enum PercentageDisplayMode
     Remaining = 1,
 }
 
+/// <summary>
+/// Where the compact usage UI is hosted: injected into each taskbar, or a single always-on-top
+/// floating window. Modes are mutually exclusive.
+/// </summary>
+public enum WidgetSurfaceMode
+{
+    Taskbar = 0,
+    Floating = 1,
+}
+
 public readonly record struct WidgetRowOption(string Id, string Label);
 
 public static class WidgetSettingsService
@@ -38,6 +48,12 @@ public static class WidgetSettingsService
 
     private static readonly string WidgetDisplayModePath =
         Path.Combine(AppStorage.AppDataDirectory, "widget-display-mode.txt");
+
+    private static string WidgetSurfaceModePath =>
+        Path.Combine(AppStorage.AppDataDirectory, "widget-surface-mode.txt");
+
+    private static string FloatingOpacityPath =>
+        Path.Combine(AppStorage.AppDataDirectory, "floating-opacity.txt");
 
     private static readonly string PercentageDisplayModePath =
         Path.Combine(AppStorage.AppDataDirectory, "percentage-display-mode.txt");
@@ -57,17 +73,59 @@ public static class WidgetSettingsService
     private static readonly string AutoHideUnavailablePath =
         Path.Combine(AppStorage.AppDataDirectory, "auto-hide-unavailable.txt");
 
+    private static readonly string HideWhenUnfocusedPath =
+        Path.Combine(AppStorage.AppDataDirectory, "hide-when-unfocused.txt");
+
+    private static readonly string ShowAgentActivityInWidgetPath =
+        Path.Combine(AppStorage.AppDataDirectory, "show-agent-activity-in-widget.txt");
+    private static readonly string EnableAgentActivityMonitoringPath =
+        Path.Combine(AppStorage.AppDataDirectory, "enable-agent-activity-monitoring.txt");
+
     private static readonly Dictionary<string, bool> RowVisibility = LoadRowVisibility();
     private static readonly Dictionary<string, bool> ProviderVisibility = LoadProviderVisibility();
     private static readonly Dictionary<string, bool> DashboardProviderVisibility = LoadDashboardProviderVisibility();
     private static readonly Dictionary<string, bool> ProviderPins = LoadProviderPins();
 
+    /// <summary>Minimum material strength for the floating usage window (35%).</summary>
+    public const double FloatingOpacityMin = 0.35;
+    /// <summary>Maximum material strength for the floating usage window.</summary>
+    public const double FloatingOpacityMax = 1.0;
+    /// <summary>Default floating Acrylic strength.</summary>
+    public const double FloatingOpacityDefault = 0.90;
+
     public static WidgetDisplayMode Current { get; private set; } = LoadWidgetDisplayMode();
+    public static WidgetSurfaceMode CurrentSurface { get; private set; } = LoadWidgetSurfaceMode();
+    /// <summary>Floating window Acrylic strength in the range [<see cref="FloatingOpacityMin"/>, <see cref="FloatingOpacityMax"/>].</summary>
+    public static double FloatingOpacity { get; private set; } = LoadFloatingOpacity();
     public static PercentageDisplayMode CurrentPercentageMode { get; private set; } = LoadPercentageDisplayMode();
     public static bool AutoHideUnavailable { get; private set; } = LoadAutoHideUnavailable();
+    /// <summary>
+    /// Opt-in: the active provider's tile only stays on the taskbar while that provider's app is the
+    /// foreground window. Off (the default) keeps today's behaviour, where the last active provider
+    /// remains on the bar after the user switches to a browser or any other unrelated app. Pinned tiles
+    /// are never affected — a pin is an explicit "always show this" request.
+    /// </summary>
+    public static bool HideWhenProviderUnfocused { get; private set; } = LoadHideWhenUnfocused();
+    /// <summary>Whether the separate Agent Activity island is shown on the taskbar. Enabled by default.</summary>
+    public static bool ShowAgentActivityInWidget { get; private set; } = LoadShowAgentActivityInWidget();
+    /// <summary>Whether local agent processes and transcript stores are inspected for activity visualization.</summary>
+    public static bool EnableAgentActivityMonitoring { get; private set; } = LoadEnableAgentActivityMonitoring();
     public static event EventHandler? Changed;
     public static event EventHandler? DashboardCompositionChanged;
     public static event EventHandler? PercentageModeChanged;
+
+    internal static void ReloadSurfaceSettingsForTesting()
+    {
+        CurrentSurface = LoadWidgetSurfaceMode();
+        FloatingOpacity = LoadFloatingOpacity();
+    }
+
+    internal static void RestoreSurfaceSettingsForTesting(
+        WidgetSurfaceMode surface, double floatingOpacity)
+    {
+        CurrentSurface = surface;
+        FloatingOpacity = floatingOpacity;
+    }
 
     public static void Apply(WidgetDisplayMode mode)
     {
@@ -76,6 +134,35 @@ public static class WidgetSettingsService
 
         Current = mode;
         Save(WidgetDisplayModePath, (int)mode);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ApplySurface(WidgetSurfaceMode mode)
+    {
+        if (CurrentSurface == mode)
+            return;
+
+        CurrentSurface = mode;
+        Save(WidgetSurfaceModePath, (int)mode);
+        // TaskBarManager enforces the taskbar budget after a current widget measurement exists.
+        // Doing it here would use the span cached before floating mode and could remove valid pins.
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Sets floating window Acrylic strength. Values outside
+    /// [<see cref="FloatingOpacityMin"/>, <see cref="FloatingOpacityMax"/>] are clamped.
+    /// </summary>
+    public static void ApplyFloatingOpacity(double opacity)
+    {
+        double clamped = Math.Clamp(opacity, FloatingOpacityMin, FloatingOpacityMax);
+        // Ignore sub-percent noise from slider drag so we don't rewrite disk every pixel.
+        if (Math.Abs(FloatingOpacity - clamped) < 0.005)
+            return;
+
+        FloatingOpacity = clamped;
+        // Persist as integer percent for stable round-trips.
+        Save(FloatingOpacityPath, (int)Math.Round(clamped * 100));
         Changed?.Invoke(null, EventArgs.Empty);
     }
 
@@ -224,6 +311,39 @@ public static class WidgetSettingsService
         AutoHideUnavailable = enabled;
         Save(AutoHideUnavailablePath, enabled ? 1 : 0);
         DashboardCompositionChanged?.Invoke(null, EventArgs.Empty);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ApplyHideWhenProviderUnfocused(bool enabled)
+    {
+        if (HideWhenProviderUnfocused == enabled)
+            return;
+
+        HideWhenProviderUnfocused = enabled;
+        Save(HideWhenUnfocusedPath, enabled ? 1 : 0);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ApplyShowAgentActivityInWidget(bool enabled)
+    {
+        if (ShowAgentActivityInWidget == enabled)
+            return;
+
+        ShowAgentActivityInWidget = enabled;
+        Save(ShowAgentActivityInWidgetPath, enabled ? 1 : 0);
+        // Activity shares the taskbar area with quota tiles. Rebalance pins immediately so enabling it
+        // leaves room for the active quota tile plus one pinned tile (the normal cap is three quota tiles).
+        Services.PinBudgetService.EnforceBudget(notify: false);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ApplyEnableAgentActivityMonitoring(bool enabled)
+    {
+        if (EnableAgentActivityMonitoring == enabled)
+            return;
+
+        EnableAgentActivityMonitoring = enabled;
+        Save(EnableAgentActivityMonitoringPath, enabled ? 1 : 0);
         Changed?.Invoke(null, EventArgs.Empty);
     }
 
@@ -439,6 +559,54 @@ public static class WidgetSettingsService
         }
     }
 
+    private static WidgetSurfaceMode LoadWidgetSurfaceMode()
+    {
+        try
+        {
+            if (!File.Exists(WidgetSurfaceModePath))
+                return WidgetSurfaceMode.Taskbar;
+
+            string raw = File.ReadAllText(WidgetSurfaceModePath);
+            return int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value)
+                && Enum.IsDefined(typeof(WidgetSurfaceMode), value)
+                ? (WidgetSurfaceMode)value
+                : WidgetSurfaceMode.Taskbar;
+        }
+        catch
+        {
+            return WidgetSurfaceMode.Taskbar;
+        }
+    }
+
+    private static double LoadFloatingOpacity()
+    {
+        try
+        {
+            if (!File.Exists(FloatingOpacityPath))
+                return FloatingOpacityDefault;
+
+            string raw = File.ReadAllText(FloatingOpacityPath).Trim();
+            // Stored as integer percent (35–100). Also accept a fractional 0–1 for hand-edited files.
+            if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int percent)
+                && percent is >= 1 and <= 100)
+            {
+                return Math.Clamp(percent / 100d, FloatingOpacityMin, FloatingOpacityMax);
+            }
+
+            if (double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out double fraction)
+                && fraction is > 0 and <= 1)
+            {
+                return Math.Clamp(fraction, FloatingOpacityMin, FloatingOpacityMax);
+            }
+
+            return FloatingOpacityDefault;
+        }
+        catch
+        {
+            return FloatingOpacityDefault;
+        }
+    }
+
     private static PercentageDisplayMode LoadPercentageDisplayMode()
     {
         try
@@ -596,6 +764,58 @@ public static class WidgetSettingsService
 
             string raw = File.ReadAllText(AutoHideUnavailablePath);
             return !int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value) || value != 0;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    // Opt-in, so an absent file means off — the opposite default from AutoHideUnavailable, whose file
+    // absence means "on". Existing installs must not silently start hiding the widget after an update.
+    private static bool LoadHideWhenUnfocused()
+    {
+        try
+        {
+            if (!File.Exists(HideWhenUnfocusedPath))
+                return false;
+
+            string raw = File.ReadAllText(HideWhenUnfocusedPath);
+            return int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value) && value != 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool LoadShowAgentActivityInWidget()
+    {
+        try
+        {
+            if (!File.Exists(ShowAgentActivityInWidgetPath))
+                return true;
+
+            string raw = File.ReadAllText(ShowAgentActivityInWidgetPath);
+            return !int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value)
+                || value != 0;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    private static bool LoadEnableAgentActivityMonitoring()
+    {
+        try
+        {
+            if (!File.Exists(EnableAgentActivityMonitoringPath))
+                return true;
+
+            string raw = File.ReadAllText(EnableAgentActivityMonitoringPath);
+            return !int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value)
+                || value != 0;
         }
         catch
         {

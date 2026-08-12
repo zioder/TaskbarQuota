@@ -17,6 +17,10 @@ internal static class TaskbarSpace
     /// <summary>Widest free span on the taskbar, in logical pixels. Zero until first measured.</summary>
     public static int AvailableLogicalWidth { get; set; } = UnknownWidth;
 
+    /// <summary>Forgets taskbar geometry when no injected widget remains to keep it current.</summary>
+    public static void ResetAvailableWidth()
+        => AvailableLogicalWidth = UnknownWidth;
+
     // Real rendered width per provider. The budget used to model this — an icon plus a column group per
     // two rows — which is close but not close enough: a Credits row or a long label puts a tile tens of
     // pixels over the model, and at that error a set that genuinely fits gets refused. The widget measures

@@ -16,9 +16,9 @@ public class WidgetDisplayProvidersTests
         IReadOnlyList<ProviderId> pinned,
         IReadOnlyList<ProviderId>? recent = null,
         bool present = true,
-        ProviderId? fallback = null,
         Func<ProviderId, bool>? isVisible = null,
-        Func<ProviderId, bool>? isAvailable = null)
+        Func<ProviderId, bool>? isAvailable = null,
+        bool activityWidgetEnabled = false)
         => UsageCoordinator.ComputeWidgetDisplayProviders(
             active,
             present,
@@ -27,7 +27,7 @@ public class WidgetDisplayProvidersTests
             p => pinned.Contains(p),
             isVisible ?? (_ => true),
             isAvailable ?? (_ => true),
-            fallback);
+            activityWidgetEnabled);
 
     [Fact]
     public void ActiveProviderLeadsAndPinnedTrailInRecencyOrder()
@@ -64,14 +64,14 @@ public class WidgetDisplayProvidersTests
     }
 
     [Fact]
-    public void WithoutPinsFallsBackToTheSingleDisplayProvider()
+    public void WithoutActiveProviderOrPins_IsEmptyEvenWhenAToolIsPresent()
     {
         var result = Compute(
             active: null,
             pinned: Array.Empty<ProviderId>(),
-            fallback: ProviderId.Codex);
+            present: true);
 
-        Assert.Equal(new[] { ProviderId.Codex }, result);
+        Assert.Empty(result);
     }
 
     [Fact]
@@ -113,13 +113,23 @@ public class WidgetDisplayProvidersTests
     }
 
     [Fact]
+    public void ActivityWidgetLeavesRoomForActiveAndOnePinnedTile()
+    {
+        var result = Compute(
+            active: ProviderId.Codex,
+            pinned: new[] { ProviderId.Claude, ProviderId.Zai },
+            activityWidgetEnabled: true);
+
+        Assert.Equal(new[] { ProviderId.Codex, ProviderId.Claude }, result);
+    }
+
+    [Fact]
     public void EmptyWhenNothingIsPinnedActiveOrAvailable()
     {
         var result = Compute(
             active: null,
             pinned: Array.Empty<ProviderId>(),
-            present: false,
-            fallback: ProviderId.Codex);
+            present: false);
 
         Assert.Empty(result);
     }

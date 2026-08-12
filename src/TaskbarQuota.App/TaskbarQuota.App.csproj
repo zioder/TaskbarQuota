@@ -31,9 +31,9 @@
     <Product>TaskbarQuota</Product>
     <AssemblyName>TaskbarQuota</AssemblyName>
     <ApplicationIcon>Assets\TaskBarQuota.ico</ApplicationIcon>
-    <Version>1.1.1</Version>
-    <AssemblyVersion>1.1.1.0</AssemblyVersion>
-    <FileVersion>1.1.1.0</FileVersion>
+    <Version>1.3.0</Version>
+    <AssemblyVersion>1.3.0.0</AssemblyVersion>
+    <FileVersion>1.3.0.0</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -53,6 +53,9 @@
     <Content Include="Assets\Square44x44Logo.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="Resources\Pricing\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>
@@ -65,17 +68,33 @@
     <PackageReference Include="System.Management" Version="10.0.0" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <!-- Override Microsoft.Data.Sqlite's vulnerable 2.1.11 native bundle (CVE-2025-6965). -->
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.12" />
   </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="TaskbarQuota.Tests" />
   </ItemGroup>
 
-  <Target Name="AddLooseXbfToPublish" Condition="'$(WindowsPackageType)' == 'None'" AfterTargets="AssignTargetPaths" BeforeTargets="GetCopyToPublishDirectoryItems">
+  <!--
+    The XAML compiler emits loose .xbf files as part of the build. They are not
+    represented by project items, so collecting them during AssignTargetPaths
+    happens before the files exist in a clean dotnet publish. Copy them after
+    Publish has built the app and produced the final publish directory.
+  -->
+  <Target Name="AddLooseXbfToPublish"
+          Condition="'$(WindowsPackageType)' == 'None' and '$(PublishDir)' != ''"
+          AfterTargets="Publish">
     <ItemGroup>
-      <_LooseXbf Include="$(OutputPath)**\*.xbf" />
-      <Content Include="@(_LooseXbf)" CopyToPublishDirectory="PreserveNewest" Link="%(RecursiveDir)%(Filename)%(Extension)" />
+      <_LooseXbf Include="$(TargetDir)**\*.xbf"
+                 Exclude="$(TargetDir)publish\**\*.xbf;$(PublishDir)**\*.xbf" />
     </ItemGroup>
+
+    <Error Condition="'@(_LooseXbf)' == ''"
+           Text="No loose XBF files were generated in '$(TargetDir)'. Unpackaged WinUI publish cannot start without them." />
+    <Copy SourceFiles="@(_LooseXbf)"
+          DestinationFiles="@(_LooseXbf->'$(PublishDir)%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
   </Target>
 
   <Target Name="AddWindowsAppRuntimeNotificationResourceToPublish"
