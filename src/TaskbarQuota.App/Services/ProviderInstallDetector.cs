@@ -111,7 +111,8 @@ internal static class ProviderInstallDetector
         ProviderId.Claude => "Open Claude in your browser, or install the Claude CLI/app and sign in.",
         ProviderId.Copilot => "Install the GitHub CLI or add a token in Settings.",
         ProviderId.Cursor => "Install Cursor and sign in.",
-        ProviderId.OpenCode or ProviderId.OpenCodeGo => "Sign in at opencode.ai or paste cookies via Fix.",
+        ProviderId.OpenCode => "Sign in at opencode.ai or paste cookies via Fix.",
+        ProviderId.OpenCodeGo => "Sign in to OpenCode Go or set OPENCODE_API_KEY.",
         ProviderId.Cline or ProviderId.ClinePass => "Install the Cline CLI (npm i -g cline) and sign in.",
         _ => "Set up this provider to see usage here.",
     };

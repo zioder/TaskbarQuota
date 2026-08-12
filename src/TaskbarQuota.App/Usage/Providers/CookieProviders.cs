@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -60,13 +62,6 @@ namespace TaskbarQuota.Usage.Providers
             var manual = NormalizeCookieHeader(CredentialStore.Instance.ManualCookieHeader(id));
             if (manual != null)
                 return new[] { new CookieCandidate(manual, "manual", true) };
-
-            if (id == ProviderId.OpenCodeGo)
-            {
-                manual = NormalizeCookieHeader(CredentialStore.Instance.ManualCookieHeader(ProviderId.OpenCode));
-                if (manual != null)
-                    return new[] { new CookieCandidate(manual, "manual (OpenCode)", true) };
-            }
 
             var candidates = CookieExtractor.GetCookieSources(domains)
                 .Where(source => source.Cookies.Any(cookie =>
@@ -654,10 +649,15 @@ namespace TaskbarQuota.Usage.Providers
         }
     }
 
-    /// <summary>OpenCode Go subscription usage from the workspace /go page: rolling, weekly and monthly windows.</summary>
+    /// <summary>
+    /// OpenCode Go subscription usage via the public usage API (rolling / weekly / monthly).
+    /// Auth is a bearer API key from OPENCODE_API_KEY, the credential store, or the opencode
+    /// CLI's local auth.json — no browser cookies or workspace page scraping.
+    /// </summary>
     public sealed class OpenCodeGoProvider : IUsageProvider
     {
-        private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
+        private const string UsageUrl = "https://opencode.ai/zen/go/v1/usage";
+        private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
 
         public ProviderId Id => ProviderId.OpenCodeGo;
         public string DisplayName => "OpenCode Go";
@@ -665,60 +665,108 @@ namespace TaskbarQuota.Usage.Providers
         public string WeeklyLabel => "Weekly";
         public BillingKind Billing => BillingKind.Subscription;
 
-        public Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
-            => CookieHelper.FetchWithCandidatesAsync(
-                Id,
-                "OpenCode Go cookies expired.",
-                (cookie, token) => FetchUsageAsync(cookie, token),
-                ct,
-                "opencode.ai");
-
-        private async Task<ProviderFetchResult> FetchUsageAsync(string cookie, CancellationToken ct)
+        public async Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
         {
-            string workspaceId = OpenCodeProvider.NormalizeWorkspaceId(CredentialStore.Instance.WorkspaceId(Id))
-                ?? OpenCodeProvider.NormalizeWorkspaceId(CredentialStore.Instance.WorkspaceId(ProviderId.OpenCode))
-                ?? await OpenCodeProvider.FetchWorkspaceId(cookie, ct, "OpenCode Go").ConfigureAwait(false);
+            var apiKey = LoadApiKey();
+            using var request = new HttpRequestMessage(HttpMethod.Get, UsageUrl);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            request.Headers.Accept.ParseAdd("application/json");
 
-            string usageText = await GetPageText(
-                OpenCodeProvider.WorkspacePageUrl(workspaceId, "go"),
-                cookie,
-                ct).ConfigureAwait(false);
-            if (OpenCodeProvider.LooksSignedOut(usageText)) throw new ProviderException(ProviderErrorKind.AuthRequired, "OpenCode Go cookies expired.");
+            using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                throw new ProviderException(ProviderErrorKind.AuthRequired, "OpenCode Go API key invalid or expired.");
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                throw new ProviderException(ProviderErrorKind.RateLimited, "OpenCode Go API rate limited. Try again later.");
+            if (!response.IsSuccessStatusCode)
+                throw new ProviderException(ProviderErrorKind.Other, $"OpenCode Go API returned {(int)response.StatusCode}");
 
-            var rolling = OpenCodeProvider.ExtractWindow(usageText, 300, "rollingUsage", "rolling_usage", "rolling")
-                ?? throw new ProviderException(ProviderErrorKind.Parse, "OpenCode Go: missing session usage.");
-            var weekly = OpenCodeProvider.ExtractWindow(usageText, 10080, "weeklyUsage", "weekly_usage", "weekly");
-            var monthly = OpenCodeProvider.ExtractWindow(usageText, 43200, "monthlyUsage", "monthly_usage", "monthly");
+            using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+            return BuildResult(doc.RootElement);
+        }
 
-            var usage = new UsageSnapshot(rolling)
+        internal static ProviderFetchResult BuildResult(JsonElement root)
+        {
+            if (!root.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
+                throw new ProviderException(ProviderErrorKind.Parse, "OpenCode Go: missing usage payload.");
+
+            var rolling = ParseWindow(usage, 300, "rolling")
+                ?? throw new ProviderException(ProviderErrorKind.Parse, "OpenCode Go: missing rolling usage.");
+            var weekly = ParseWindow(usage, 10080, "weekly");
+            var monthly = ParseWindow(usage, 43200, "monthly");
+
+            return new ProviderFetchResult(new UsageSnapshot(rolling)
             {
                 Secondary = weekly,
                 Monthly = monthly,
                 LoginMethod = "Go",
-                UsageDashboardUrl = OpenCodeProvider.WorkspacePageUrl(workspaceId, "go"),
-            };
-
-            return new ProviderFetchResult(usage, "opencode");
+            }, "api");
         }
 
-        private static async Task<string> GetPageText(string url, string cookie, CancellationToken ct)
+        private static RateWindow? ParseWindow(JsonElement usage, int windowMinutes, string key)
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            req.Headers.TryAddWithoutValidation("Cookie", cookie);
-            req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-            req.Headers.TryAddWithoutValidation("Origin", "https://opencode.ai");
-            req.Headers.TryAddWithoutValidation("Referer", url);
-            req.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,text/javascript,application/json;q=0.8,*/*;q=0.7");
-            using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
-            var text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden || OpenCodeProvider.LooksSignedOut(text))
-                throw new ProviderException(ProviderErrorKind.AuthRequired, "OpenCode Go cookies expired.");
-            if (resp.StatusCode == HttpStatusCode.TooManyRequests)
-                throw new ProviderException(ProviderErrorKind.RateLimited, "OpenCode Go API rate limited.");
-            if (!resp.IsSuccessStatusCode)
-                throw new ProviderException(ProviderErrorKind.Other, $"OpenCode Go API {(int)resp.StatusCode}");
-            return text;
+            if (!usage.TryGetProperty(key, out var window) || window.ValueKind != JsonValueKind.Object)
+                return null;
+            if (!window.TryGetProperty("percent", out var percent) || percent.ValueKind != JsonValueKind.Number)
+                return null;
+
+            DateTimeOffset? resetAt = window.TryGetProperty("resetsAt", out var resetsAt)
+                && resetsAt.ValueKind == JsonValueKind.String
+                    ? ParseIsoDate(resetsAt.GetString())
+                    : null;
+
+            return new RateWindow(
+                Math.Clamp(percent.GetDouble(), 0, 100),
+                windowMinutes,
+                resetAt,
+                resetAt is null ? null : OpenCodeProvider.FormatTimeUntil(resetAt.Value));
         }
 
+        internal static string LoadApiKey() => LoadApiKey(null);
+
+        internal static string LoadApiKey(string? homeOverride)
+        {
+            var fromEnv = Environment.GetEnvironmentVariable("OPENCODE_API_KEY")?.Trim();
+            if (!string.IsNullOrEmpty(fromEnv)) return fromEnv!;
+
+            var fromStore = CredentialStore.Instance.ApiKey(ProviderId.OpenCodeGo, "OPENCODE_API_KEY");
+            if (!string.IsNullOrWhiteSpace(fromStore)) return fromStore!;
+
+            var fromAuth = TryLoadApiKeyFromAuth(homeOverride);
+            if (!string.IsNullOrWhiteSpace(fromAuth)) return fromAuth!;
+
+            throw new ProviderException(ProviderErrorKind.AuthRequired,
+                "OpenCode Go API key not found. Set OPENCODE_API_KEY or sign in to the OpenCode Go CLI.");
+        }
+
+        internal static string? TryLoadApiKeyFromAuth(string? homeOverride = null)
+        {
+            var profile = homeOverride
+                ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var path = Path.Combine(profile, ".local", "share", "opencode", "auth.json");
+            try
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                if (!doc.RootElement.TryGetProperty("opencode-go", out var go)
+                    || go.ValueKind != JsonValueKind.Object
+                    || !go.TryGetProperty("key", out var key)
+                    || key.ValueKind != JsonValueKind.String)
+                    return null;
+
+                var value = key.GetString()?.Trim();
+                return string.IsNullOrEmpty(value) ? null : value;
+            }
+            catch (IOException) { return null; }
+            catch (UnauthorizedAccessException) { return null; }
+            catch (JsonException) { return null; }
+        }
+
+        private static DateTimeOffset? ParseIsoDate(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            return DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed)
+                ? parsed
+                : null;
+        }
     }
 }

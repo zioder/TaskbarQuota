@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.Text.Json;
 using TaskbarQuota.Usage;
 using TaskbarQuota.Usage.Providers;
 
@@ -159,5 +161,78 @@ public class OpenCodeGoProviderTests
         Assert.Equal(1, OpenCodeProvider.ExtractWindow(html, 300, "rollingUsage")!.UsedPercent);
         Assert.Equal(1, OpenCodeProvider.ExtractWindow(html, 10080, "weeklyUsage")!.UsedPercent);
         Assert.Equal(1, OpenCodeProvider.ExtractWindow(html, 43200, "monthlyUsage")!.UsedPercent);
+    }
+
+    [Fact]
+    public void BuildResult_ParsesApiUsageJson()
+    {
+        const string json = "{\"usage\":{\"rolling\":{\"status\":\"ok\",\"percent\":12,\"resetsAt\":\"2026-08-12T22:13:10.85Z\"}," +
+                            "\"weekly\":{\"status\":\"ok\",\"percent\":8,\"resetsAt\":\"2026-08-17T00:00:00.85Z\"}," +
+                            "\"monthly\":{\"status\":\"ok\",\"percent\":35,\"resetsAt\":\"2026-09-07T14:16:57.85Z\"}}}";
+
+        using var doc = JsonDocument.Parse(json);
+        var result = OpenCodeGoProvider.BuildResult(doc.RootElement);
+
+        Assert.Equal("api", result.SourceLabel);
+        Assert.Equal(12, result.Usage.Primary.UsedPercent, 1);
+        Assert.Equal(300, result.Usage.Primary.WindowMinutes);
+        Assert.NotNull(result.Usage.Primary.ResetAt);
+        Assert.Equal(8, result.Usage.Secondary!.UsedPercent, 1);
+        Assert.Equal(10080, result.Usage.Secondary.WindowMinutes);
+        Assert.Equal(35, result.Usage.Monthly!.UsedPercent, 1);
+        Assert.Equal(43200, result.Usage.Monthly.WindowMinutes);
+        Assert.Equal("Go", result.Usage.LoginMethod);
+    }
+
+    [Fact]
+    public void BuildResult_MissingUsage_ThrowsParse()
+    {
+        using var doc = JsonDocument.Parse("{\"error\":\"nope\"}");
+        var ex = Assert.Throws<ProviderException>(() => OpenCodeGoProvider.BuildResult(doc.RootElement));
+        Assert.Equal(ProviderErrorKind.Parse, ex.Kind);
+    }
+
+    [Fact]
+    public void BuildResult_MissingRolling_ThrowsParse()
+    {
+        using var doc = JsonDocument.Parse("{\"usage\":{\"weekly\":{\"percent\":1},\"monthly\":{\"percent\":1}}}");
+        var ex = Assert.Throws<ProviderException>(() => OpenCodeGoProvider.BuildResult(doc.RootElement));
+        Assert.Equal(ProviderErrorKind.Parse, ex.Kind);
+    }
+
+    [Fact]
+    public void TryLoadApiKeyFromAuth_ReadsOpenCodeGoKey()
+    {
+        var profile = Path.Combine(Path.GetTempPath(), "wincheck-opencode-go-" + Guid.NewGuid().ToString("N"));
+        var authDir = Path.Combine(profile, ".local", "share", "opencode");
+        Directory.CreateDirectory(authDir);
+        try
+        {
+            File.WriteAllText(Path.Combine(authDir, "auth.json"),
+                "{\"opencode-go\":{\"type\":\"api\",\"key\":\"sk-test-12345\"}}");
+
+            Assert.Equal("sk-test-12345", OpenCodeGoProvider.TryLoadApiKeyFromAuth(profile));
+        }
+        finally
+        {
+            try { Directory.Delete(profile, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void TryLoadApiKeyFromAuth_MissingEntry_ReturnsNull()
+    {
+        var profile = Path.Combine(Path.GetTempPath(), "wincheck-opencode-go-" + Guid.NewGuid().ToString("N"));
+        var authDir = Path.Combine(profile, ".local", "share", "opencode");
+        Directory.CreateDirectory(authDir);
+        try
+        {
+            File.WriteAllText(Path.Combine(authDir, "auth.json"), "{\"something-else\":{\"key\":\"nope\"}}");
+            Assert.Null(OpenCodeGoProvider.TryLoadApiKeyFromAuth(profile));
+        }
+        finally
+        {
+            try { Directory.Delete(profile, recursive: true); } catch { }
+        }
     }
 }
