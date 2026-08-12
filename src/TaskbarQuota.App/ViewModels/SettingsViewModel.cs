@@ -87,7 +87,7 @@ namespace TaskbarQuota.ViewModels
             var e = CredentialStore.Instance.For(_id);
             e.ApiKey = string.IsNullOrWhiteSpace(ApiKey) ? null : ApiKey.Trim();
             var cookieInput = string.IsNullOrWhiteSpace(CookieHeader) ? null : CookieHeader.Trim();
-            bool isOpenCode = _id is ProviderId.OpenCode or ProviderId.OpenCodeGo;
+            bool isOpenCode = _id is ProviderId.OpenCode;
             var normalizedCookie = isOpenCode
                 ? CookieHelper.NormalizeCookieHeader(cookieInput)
                 : cookieInput;

@@ -188,7 +188,7 @@ namespace TaskbarQuota.Views
 
             if (vm.IsApiKey)
             {
-                var pwd = new PasswordBox { Password = vm.ApiKey, MinWidth = 280, PlaceholderText = "Paste your GitHub token..." };
+                var pwd = new PasswordBox { Password = vm.ApiKey, MinWidth = 280, PlaceholderText = "Paste your API key..." };
                 pwd.PasswordChanged += (_, _) => vm.ApiKey = pwd.Password;
 
                 stack.Children.Add(new TextBlock { Text = "API key", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
@@ -366,8 +366,8 @@ namespace TaskbarQuota.Views
                 "Paste an opencode.ai Cookie header and optionally enter a Workspace ID (wrk_...).",
                 CredentialKind.Cookie),
             ProviderId.OpenCodeGo => new ProviderCredentialViewModel(id, "OpenCode Go",
-                "Paste an opencode.ai Cookie header and optionally enter a Workspace ID (wrk_...).",
-                CredentialKind.Cookie),
+                "Paste your OpenCode Go API key (OPENCODE_API_KEY). It is read automatically from the opencode CLI auth store when you are signed in.",
+                CredentialKind.ApiKey, "OPENCODE_API_KEY"),
             ProviderId.Kimi => new ProviderCredentialViewModel(id, "Kimi Code",
                 "Paste your Kimi Code API key (KIMI_CODE_API_KEY) to fetch Coding Plan usage without CLI login.",
                 CredentialKind.ApiKey, "KIMI_CODE_API_KEY"),

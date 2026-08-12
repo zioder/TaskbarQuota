@@ -382,5 +382,7 @@ namespace TaskbarQuota.Usage
     {
         public ProviderErrorKind Kind { get; }
         public ProviderException(ProviderErrorKind kind, string message) : base(message) => Kind = kind;
+        public ProviderException(ProviderErrorKind kind, string message, Exception innerException)
+            : base(message, innerException) => Kind = kind;
     }
 }
