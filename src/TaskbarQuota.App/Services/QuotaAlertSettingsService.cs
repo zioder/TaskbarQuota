@@ -88,8 +88,21 @@ internal sealed class QuotaAlertSettingsStore
             if (!File.Exists(_settingsPath))
                 return QuotaAlertSettings.Default;
 
-            var loaded = JsonSerializer.Deserialize<QuotaAlertSettings>(File.ReadAllText(_settingsPath));
-            return (loaded ?? QuotaAlertSettings.Default).Normalized();
+            var json = File.ReadAllText(_settingsPath);
+            var loaded = JsonSerializer.Deserialize<QuotaAlertSettings>(json);
+            if (loaded is null)
+                return QuotaAlertSettings.Default;
+
+            using var document = JsonDocument.Parse(json);
+            if (!document.RootElement.TryGetProperty(nameof(QuotaAlertSettings.ReplenishmentEnabled), out _))
+            {
+                loaded = loaded with
+                {
+                    ReplenishmentEnabled = QuotaAlertSettings.Default.ReplenishmentEnabled,
+                };
+            }
+
+            return loaded.Normalized();
         }
         catch
         {
@@ -134,7 +147,7 @@ public sealed record QuotaAlertSettings
     public static QuotaAlertSettings Default { get; } = new()
     {
         Enabled = false,
-        ReplenishmentEnabled = false,
+        ReplenishmentEnabled = true,
         CrossSessionReplenishmentEnabled = false,
         WarningThreshold = 75,
         CriticalThreshold = 90,

@@ -10,11 +10,11 @@ public sealed class QuotaAlertSettingsServiceTests : IDisposable
     private string SettingsPath => Path.Combine(_directory, "quota-alerts.json");
 
     [Fact]
-    public void MissingFile_UsesDisabledReplenishmentDefault()
+    public void MissingFile_UsesEnabledReplenishmentDefault()
     {
         var store = new QuotaAlertSettingsStore(SettingsPath);
 
-        Assert.False(store.Current.ReplenishmentEnabled);
+        Assert.True(store.Current.ReplenishmentEnabled);
         Assert.False(store.Current.CrossSessionReplenishmentEnabled);
         Assert.Equal(QuotaAlertSettings.Default, store.Current);
     }
@@ -35,7 +35,7 @@ public sealed class QuotaAlertSettingsServiceTests : IDisposable
     }
 
     [Fact]
-    public void LegacyFile_PreservesExistingValuesAndDefaultsReplenishmentOff()
+    public void LegacyFile_PreservesExistingValuesAndDefaultsReplenishmentOn()
     {
         Directory.CreateDirectory(_directory);
         File.WriteAllText(SettingsPath,
@@ -51,11 +51,31 @@ public sealed class QuotaAlertSettingsServiceTests : IDisposable
         var store = new QuotaAlertSettingsStore(SettingsPath);
 
         Assert.True(store.Current.Enabled);
-        Assert.False(store.Current.ReplenishmentEnabled);
+        Assert.True(store.Current.ReplenishmentEnabled);
         Assert.False(store.Current.CrossSessionReplenishmentEnabled);
         Assert.Equal(70, store.Current.WarningThreshold);
         Assert.Equal(95, store.Current.CriticalThreshold);
         Assert.Equal(45, store.Current.CooldownMinutes);
+    }
+
+    [Fact]
+    public void ExplicitReplenishmentOff_IsPreserved()
+    {
+        Directory.CreateDirectory(_directory);
+        File.WriteAllText(SettingsPath,
+            """
+            {
+              "ReplenishmentEnabled": false,
+              "WarningThreshold": 75,
+              "CriticalThreshold": 90,
+              "CooldownMinutes": 30
+            }
+            """);
+
+        var store = new QuotaAlertSettingsStore(SettingsPath);
+
+        Assert.False(store.Current.ReplenishmentEnabled);
+        Assert.False(store.Current.CrossSessionReplenishmentEnabled);
     }
 
     [Fact]
@@ -97,7 +117,7 @@ public sealed class QuotaAlertSettingsServiceTests : IDisposable
 
         Assert.False(store.Current.ReplenishmentEnabled);
         Assert.False(store.Current.CrossSessionReplenishmentEnabled);
-        Assert.Equal(4, changed);
+        Assert.Equal(3, changed);
         Assert.False(new QuotaAlertSettingsStore(SettingsPath).Current.ReplenishmentEnabled);
     }
 

@@ -125,20 +125,24 @@ internal sealed class QuotaReplenishmentTracker
             return Array.Empty<QuotaReplenishmentEvent>();
         }
 
-        if (_lastSequences.TryGetValue(result.Id, out var lastSequence)
-            && result.ObservationSequence <= lastSequence)
+        var hasPreviousLiveObservation = _lastSequences.TryGetValue(result.Id, out var lastSequence);
+        if (hasPreviousLiveObservation && result.ObservationSequence <= lastSequence)
         {
             return Array.Empty<QuotaReplenishmentEvent>();
         }
 
         var identity = NormalizeIdentity(usage.Email);
-        if (_providerIdentities.TryGetValue(result.Id, out var previousIdentity)
-            && identity is null)
+        var hadKnownIdentity = _providerIdentities.TryGetValue(result.Id, out var previousIdentity);
+        if (hasPreviousLiveObservation && !hadKnownIdentity && identity is not null)
+        {
+            ResetProvider(result.Id, "identity-appeared");
+        }
+        else if (hadKnownIdentity && identity is null)
         {
             ResetProvider(result.Id, "identity-missing");
         }
-        else if (identity is not null
-                 && previousIdentity is not null
+        else if (hadKnownIdentity
+                 && identity is not null
                  && !string.Equals(previousIdentity, identity, StringComparison.OrdinalIgnoreCase))
         {
             ResetProvider(result.Id, "identity-changed");

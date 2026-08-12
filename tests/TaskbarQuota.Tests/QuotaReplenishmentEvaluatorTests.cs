@@ -327,6 +327,17 @@ public class QuotaReplenishmentEvaluatorTests
     }
 
     [Fact]
+    public void Tracker_NewlyAvailableIdentityResetsAnonymousBaseline()
+    {
+        var tracker = new QuotaReplenishmentTracker();
+        _ = tracker.Observe(LiveResult(1, 88, email: null), Now());
+
+        var events = tracker.Observe(LiveResult(2, 0, email: "first@example.test"), Now());
+
+        Assert.Empty(events);
+    }
+
+    [Fact]
     public void Tracker_ResetRequiresANewBaseline()
     {
         var tracker = new QuotaReplenishmentTracker();
