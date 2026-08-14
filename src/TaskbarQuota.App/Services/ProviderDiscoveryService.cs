@@ -31,22 +31,25 @@ public static class ProviderDiscoveryService
     {
         ProviderInstallDetector.WarmCliCache();
 
-        bool widgetChanged = false;
-        bool dashboardChanged = false;
-        foreach (ProviderId id in Enum.GetValues<ProviderId>())
+        lock (SyncRoot)
         {
-            if (!ProviderInstallDetector.IsInstalled(id) || IsExplicitlyDisabled(id))
-                continue;
+            bool widgetChanged = false;
+            bool dashboardChanged = false;
+            foreach (ProviderId id in Enum.GetValues<ProviderId>())
+            {
+                if (!ProviderInstallDetector.IsInstalled(id) || ExplicitlyDisabled.Contains(id))
+                    continue;
 
-            widgetChanged |= TryEnableProviderSilent(id, out bool dashChanged);
-            dashboardChanged |= dashChanged;
+                widgetChanged |= TryEnableProviderSilent(id, out bool dashChanged);
+                dashboardChanged |= dashChanged;
+            }
+
+            if (widgetChanged)
+                WidgetSettingsService.SaveProviderVisibilityAndNotify();
+
+            if (dashboardChanged)
+                WidgetSettingsService.SaveDashboardProviderVisibilityAndNotify();
         }
-
-        if (widgetChanged)
-            WidgetSettingsService.SaveProviderVisibilityAndNotify();
-
-        if (dashboardChanged)
-            WidgetSettingsService.SaveDashboardProviderVisibilityAndNotify();
     }
 
     public static void RecordFetchResult(UsageResult result)
@@ -63,7 +66,7 @@ public static class ProviderDiscoveryService
             if (result.Ok || result.ErrorKind == ProviderErrorKind.AuthRequired)
                 Configured.Add(result.Id);
 
-            if (result.Ok)
+            if (!ExplicitlyDisabled.Contains(result.Id) && result.Ok)
             {
                 if (!WidgetSettingsService.IsProviderDashboardVisible(result.Id))
                     WidgetSettingsService.SetProviderDashboardVisible(result.Id, true);
@@ -75,7 +78,8 @@ public static class ProviderDiscoveryService
             }
 
             if (result.ErrorKind == ProviderErrorKind.NotRunning
-                && ProviderInstallDetector.IsInstalled(result.Id))
+                && ProviderInstallDetector.IsInstalled(result.Id)
+                && !ExplicitlyDisabled.Contains(result.Id))
             {
                 if (!WidgetSettingsService.IsProviderDashboardVisible(result.Id))
                     WidgetSettingsService.SetProviderDashboardVisible(result.Id, true);

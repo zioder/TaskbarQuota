@@ -62,6 +62,29 @@ public class ProviderDiscoveryServiceTests
         Assert.True(WidgetSettingsService.IsProviderDashboardVisible(ProviderId.Grok));
     }
 
+    [Theory]
+    [InlineData(ProviderId.OpenCode)]
+    [InlineData(ProviderId.OpenCodeGo)]
+    public void RecordFetchResult_DoesNotRestoreExplicitlyDisabledProvider(ProviderId id)
+    {
+        ProviderInstallDetector.IsInstalledOverrideForTesting = installedId => installedId == id;
+        WidgetSettingsService.SetProviderVisibleForTesting(id, false);
+        WidgetSettingsService.SetProviderDashboardVisibleForTesting(id, false);
+        ProviderDiscoveryService.MarkExplicitlyDisabledForTesting(id);
+
+        var provider = new UsageService().Get(id)!;
+        ProviderDiscoveryService.RecordFetchResult(UsageResult.Success(
+            id,
+            provider,
+            new ProviderFetchResult(new UsageSnapshot(new RateWindow(10)), "test")));
+        ProviderDiscoveryService.RecordFetchResult(
+            UsageResult.Failure(id, "waiting", kind: ProviderErrorKind.NotRunning));
+
+        Assert.True(ProviderDiscoveryService.IsConfigured(id));
+        Assert.False(WidgetSettingsService.IsProviderDashboardVisible(id));
+        Assert.False(WidgetSettingsService.IsProviderVisible(id));
+    }
+
     [Fact]
     public void ShouldShowInAvailable_ReturnsHiddenNotInstalled()
     {
