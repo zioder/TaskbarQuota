@@ -17,8 +17,18 @@ namespace TaskbarQuota.Usage.Providers
     {
         private const string DefaultGlobalBaseUrl = "https://api.z.ai";
         private const string QuotaPath = "api/monitor/usage/quota/limit";
+        private const string SubscriptionPath = "api/biz/subscription/list";
+        private static readonly TimeSpan SubscriptionMetadataTimeout = TimeSpan.FromSeconds(2);
         private const string DashboardUrl = "https://z.ai/manage-apikey/coding-plan/personal/my-plan";
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
+        // Current Z.ai individual credit products published by ZCode's live client catalogue on
+        // 2026-08-13. Tier names are deliberately not enough: legacy products reused Lite/Pro/Max.
+        private static readonly HashSet<string> CurrentCreditProductIds = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "product-52c6b5", "product-448ee2", "product-7e6099", // monthly
+            "product-1c613e", "product-9194ae", "product-7642bb", // quarterly
+            "product-2d5858", "product-074f43", "product-1f179d", // annual
+        };
 
         public ProviderId Id => ProviderId.Zai;
         public string DisplayName => "Z.ai";
@@ -32,10 +42,23 @@ namespace TaskbarQuota.Usage.Providers
             var apiKey = LoadApiKey();
             var baseUrl = ResolveBaseUrl();
             var quotaUrl = BuildQuotaUrl(baseUrl);
-            using var request = new HttpRequestMessage(HttpMethod.Get, quotaUrl);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-            request.Headers.Accept.ParseAdd("application/json");
-            using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
+            var subscriptionUrl = BuildSubscriptionUrl(quotaUrl);
+
+            // The quota endpoint owns balances while the subscription endpoint owns product identity.
+            // Start both together so pairing the responses does not add another network round trip.
+            var quotaTask = FetchRequiredJsonAsync(quotaUrl, apiKey, ct);
+            using var subscriptionTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            subscriptionTimeoutCts.CancelAfter(SubscriptionMetadataTimeout);
+            var subscriptionTask = FetchOptionalJsonAsync(subscriptionUrl, apiKey, subscriptionTimeoutCts.Token, ct);
+            await Task.WhenAll((Task)quotaTask, subscriptionTask).ConfigureAwait(false);
+            using var quotaDoc = quotaTask.Result;
+            using var subscriptionDoc = subscriptionTask.Result;
+            return BuildResult(quotaDoc.RootElement, subscriptionDoc?.RootElement);
+        }
+
+        private static async Task<JsonDocument> FetchRequiredJsonAsync(string url, string apiKey, CancellationToken ct)
+        {
+            using var response = await SendAsync(url, apiKey, ct).ConfigureAwait(false);
             if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
                 throw new ProviderException(ProviderErrorKind.AuthRequired, "z.ai API key invalid or expired. Update your API key.");
             if ((int)response.StatusCode == 429)
@@ -46,12 +69,49 @@ namespace TaskbarQuota.Usage.Providers
                 throw new ProviderException(ProviderErrorKind.Other, $"z.ai API returned {code2}");
             }
             using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
-            return BuildResult(doc.RootElement);
+            return await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+        }
+
+        private static async Task<JsonDocument?> FetchOptionalJsonAsync(
+            string url,
+            string apiKey,
+            CancellationToken requestCt,
+            CancellationToken callerCt)
+        {
+            try
+            {
+                using var response = await SendAsync(url, apiKey, requestCt).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                    return null;
+                using var stream = await response.Content.ReadAsStreamAsync(requestCt).ConfigureAwait(false);
+                return await JsonDocument.ParseAsync(stream, cancellationToken: requestCt).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (callerCt.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                // Metadata is optional and has its own short timeout; quota data remains usable when it expires.
+                return null;
+            }
+            catch (Exception ex) when (ex is HttpRequestException or JsonException)
+            {
+                // Subscription metadata enriches the quota response but must never make usage unavailable.
+                return null;
+            }
+        }
+
+        private static async Task<HttpResponseMessage> SendAsync(string url, string apiKey, CancellationToken ct)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            request.Headers.Accept.ParseAdd("application/json");
+            return await Http.SendAsync(request, ct).ConfigureAwait(false);
         }
 
 
-        internal static ProviderFetchResult BuildResult(JsonElement root)
+        internal static ProviderFetchResult BuildResult(JsonElement root, JsonElement? subscriptionRoot = null)
         {
             if (!root.TryGetProperty("success", out var successEl) || !successEl.GetBoolean())
             {
@@ -60,15 +120,23 @@ namespace TaskbarQuota.Usage.Providers
             }
             if (!root.TryGetProperty("data", out var data) || data.ValueKind == JsonValueKind.Null)
                 throw new ProviderException(ProviderErrorKind.Parse, "z.ai API returned no data.");
-            string? planName = null;
+            var subscription = ParseCurrentSubscription(subscriptionRoot);
+            string? planName = subscription?.ProductName;
             foreach (var key in new[] { "planName", "plan", "plan_type", "packageName" })
             {
+                if (!string.IsNullOrWhiteSpace(planName)) break;
                 if (data.TryGetProperty(key, out var p) && p.ValueKind == JsonValueKind.String)
                 {
                     var raw = p.GetString()?.Trim();
                     if (!string.IsNullOrEmpty(raw)) { planName = raw; break; }
                 }
             }
+            if (string.IsNullOrWhiteSpace(planName)
+                && data.TryGetProperty("level", out var level)
+                && level.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(level.GetString()))
+                planName = $"GLM Coding {ToTitleCase(level.GetString()!)}";
+
             var tokenLimits = new List<LimitEntry>();
             LimitEntry? timeLimit = null;
             if (data.TryGetProperty("limits", out var limitsArr) && limitsArr.ValueKind == JsonValueKind.Array)
@@ -81,6 +149,8 @@ namespace TaskbarQuota.Usage.Providers
                     else if (entry.Value.Type == "TIME_LIMIT") timeLimit = entry;
                 }
             }
+            bool isCreditPlan = IsCurrentCreditPlan(subscription, tokenLimits);
+            var pricing = ResolvePricing(isCreditPlan, subscription?.ProductName, DateTimeOffset.UtcNow);
             LimitEntry? primaryLimit;
             LimitEntry? sessionTokenLimit = null;
             if (tokenLimits.Count >= 2)
@@ -95,12 +165,28 @@ namespace TaskbarQuota.Usage.Providers
             // longer token window in the weekly secondary row. TIME_LIMIT is the
             // separate monthly MCP/tool-call pool.
             var mainLimit = sessionTokenLimit ?? primaryLimit ?? timeLimit;
-            var primary = mainLimit.HasValue ? MakeRateWindow(mainLimit.Value) : new RateWindow(0, windowMinutes: null, resetAt: null, resetDescription: null);
+            var primary = mainLimit.HasValue
+                ? MakeRateWindow(mainLimit.Value)
+                : new RateWindow(0, windowMinutes: null, resetAt: null, resetDescription: null);
             var usage = new UsageSnapshot(primary);
+            usage.Pricing = pricing;
             if (sessionTokenLimit.HasValue && primaryLimit.HasValue)
                 usage.Secondary = MakeRateWindow(primaryLimit.Value);
             if (timeLimit.HasValue)
                 usage.ExtraRateWindows.Add(new NamedRateWindow("zai-mcp", "MCP", MakeRateWindow(timeLimit.Value, label: "MCP")));
+            // Credit plans reuse the Copilot credits meter: the 5-hour pool is the dynamic rolling cap
+            // (remaining in Cost.Amount, cap in Cost.Limit) and its reset becomes the card countdown.
+            // The 7-day window stays as a percentage bar beside it.
+            if (isCreditPlan && sessionTokenLimit is { } sessionLimit)
+            {
+                usage.HasPrimaryWindow = false;
+                var credits = new CostSnapshot(sessionLimit.Remaining ?? 0, "credits", "Credits");
+                if (sessionLimit.Usage is { } cap && cap > 0)
+                    credits.Limit = cap;
+                if (sessionLimit.NextResetTime is { } resetAt)
+                    credits = credits.WithResetsAt(resetAt);
+                usage.Cost = credits;
+            }
             if (!string.IsNullOrWhiteSpace(planName)) usage.LoginMethod = planName;
             usage.UsageDashboardUrl = DashboardUrl;
             return new ProviderFetchResult(usage, "api");
@@ -115,6 +201,111 @@ namespace TaskbarQuota.Usage.Providers
                 : null;
             return new RateWindow(percent, windowMinutes: windowMinutes, resetAt: entry.NextResetTime, resetDescription: resetDesc, label: label);
         }
+
+        private static SubscriptionEntry? ParseCurrentSubscription(JsonElement? root)
+        {
+            if (root is not { } envelope
+                || envelope.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False
+                || envelope.TryGetProperty("code", out var code) && code.ValueKind == JsonValueKind.Number
+                    && code.TryGetInt32(out int codeValue) && codeValue is not 0 and not 200
+                || !envelope.TryGetProperty("data", out var data)
+                || data.ValueKind != JsonValueKind.Array)
+                return null;
+
+            SubscriptionEntry? current = null;
+            int currentPriority = 0;
+            foreach (var item in data.EnumerateArray())
+            {
+                string? productId = StringProperty(item, "productId");
+                string? productName = StringProperty(item, "productName");
+                if (string.IsNullOrWhiteSpace(productId) && string.IsNullOrWhiteSpace(productName))
+                    continue;
+
+                bool inCurrentPeriod = BoolProperty(item, "inCurrentPeriod");
+                bool valid = string.Equals(StringProperty(item, "status"), "VALID", StringComparison.OrdinalIgnoreCase);
+                int priority = inCurrentPeriod && valid ? 3 : inCurrentPeriod ? 2 : valid ? 1 : 0;
+                if (priority > currentPriority)
+                {
+                    current = new SubscriptionEntry(productId, productName);
+                    currentPriority = priority;
+                }
+            }
+            return current;
+        }
+
+        private static bool IsCurrentCreditPlan(SubscriptionEntry? subscription, IReadOnlyList<LimitEntry> tokenLimits)
+        {
+            if (subscription is { } value)
+            {
+                string identity = $"{value.ProductId} {value.ProductName}";
+                if (identity.Contains("legacy", StringComparison.OrdinalIgnoreCase)
+                    || identity.Contains("team edition", StringComparison.OrdinalIgnoreCase))
+                    return false;
+                if (value.ProductId is { } productId && CurrentCreditProductIds.Contains(productId))
+                    return true;
+            }
+
+            // New individual and team plans publish fixed credit allowances. This catches newly issued
+            // product IDs without mistaking a legacy Lite/Pro/Max name for a current credit product.
+            return tokenLimits.Any(static limit => limit is
+            {
+                Unit: 3,
+                Number: 5,
+                Usage: 2_000 or 12_000 or 15_000 or 28_000 or 35_000,
+            }) && tokenLimits.Any(static limit => limit is
+            {
+                Unit: 6,
+                Number: 1,
+                Usage: 10_000 or 60_000 or 66_000 or 140_000 or 155_000,
+            });
+        }
+
+        /// <summary>
+        /// Resolves the current Z.ai coefficient in Singapore time (UTC+8, no DST). New credit plans
+        /// charge 1x at peak and 0.5x off-peak; legacy V2/team plans charge 3x and 1x respectively.
+        /// </summary>
+        internal static UsagePricingSnapshot? ResolvePricing(bool isCreditPlan, string? productName, DateTimeOffset now)
+        {
+            double peakMultiplier;
+            double offPeakMultiplier;
+            if (isCreditPlan)
+            {
+                peakMultiplier = 1.0;
+                offPeakMultiplier = 0.5;
+            }
+            else if (productName?.Contains("Legacy Plan V2", StringComparison.OrdinalIgnoreCase) == true
+                || productName?.Contains("Team Edition", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                peakMultiplier = 3.0;
+                offPeakMultiplier = 1.0;
+            }
+            else
+            {
+                return null;
+            }
+
+            var singaporeTime = now.ToOffset(TimeSpan.FromHours(8));
+            bool isWeekday = singaporeTime.DayOfWeek is not DayOfWeek.Saturday and not DayOfWeek.Sunday;
+            bool isPeak = isWeekday
+                && singaporeTime.TimeOfDay >= TimeSpan.FromHours(14)
+                && singaporeTime.TimeOfDay < TimeSpan.FromHours(18);
+            return new UsagePricingSnapshot(isPeak ? "PEAK" : "OFF-PEAK", isPeak ? peakMultiplier : offPeakMultiplier);
+        }
+
+        private static string? StringProperty(JsonElement element, string name)
+            => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+                ? value.GetString()?.Trim()
+                : null;
+
+        private static bool BoolProperty(JsonElement element, string name)
+            => element.TryGetProperty(name, out var value)
+                && (value.ValueKind == JsonValueKind.True
+                    || value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out int number) && number == 1);
+
+        private static string ToTitleCase(string value)
+            => value.Length == 0 ? value : char.ToUpperInvariant(value[0]) + value[1..].ToLowerInvariant();
+
+        private readonly record struct SubscriptionEntry(string? ProductId, string? ProductName);
 
 
         private static LimitEntry? ParseLimitEntry(JsonElement el)
@@ -228,6 +419,16 @@ namespace TaskbarQuota.Usage.Providers
             var trimmed = baseUrl.TrimEnd('/');
             if (trimmed.Contains(QuotaPath, StringComparison.OrdinalIgnoreCase)) return trimmed;
             return $"{trimmed}/{QuotaPath}";
+        }
+
+        internal static string BuildSubscriptionUrl(string quotaUrl)
+        {
+            var builder = new UriBuilder(quotaUrl)
+            {
+                Path = "/" + SubscriptionPath,
+                Query = string.Empty,
+            };
+            return builder.Uri.ToString();
         }
     }
 }

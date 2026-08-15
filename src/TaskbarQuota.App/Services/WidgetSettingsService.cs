@@ -467,6 +467,7 @@ public static class WidgetSettingsService
             [
                 new(RowPrimary, "Session"),
                 new(RowSecondary, "Weekly"),
+                new(RowCredits, "Credits"),
                 new(RowExtra, "MCP"),
             ],
             ProviderId.Claude =>
@@ -827,7 +828,7 @@ public static class WidgetSettingsService
         => $"{provider}:{rowId}";
 
     private static bool DefaultRowVisible(ProviderId provider, string rowId)
-        => provider == ProviderId.Zai && rowId == RowExtra
+        => provider == ProviderId.Zai && rowId is RowExtra or RowCredits
             || provider != ProviderId.Codex
               || rowId == RowPrimary
               || rowId == RowSecondary

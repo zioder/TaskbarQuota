@@ -186,7 +186,32 @@
                         <muxc:ItemsRepeater.Layout>
                             <muxc:StackLayout Spacing="20"/>
                         </muxc:ItemsRepeater.Layout>
-                    </muxc:ItemsRepeater>
+                        </muxc:ItemsRepeater>
+                </Border>
+
+                <Border Visibility="{x:Bind PricingVisibility}"
+                        HorizontalAlignment="Stretch"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="20,12">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0"
+                                   Text="Quota pricing"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}"
+                                   VerticalAlignment="Center"/>
+                        <TextBlock Grid.Column="1"
+                                   Text="{x:Bind PricingText}"
+                                   Foreground="{x:Bind PricingBrush}"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}"
+                                   TextAlignment="Right"
+                                   VerticalAlignment="Center"/>
+                    </Grid>
                 </Border>
 
                 <Border Visibility="{x:Bind CreditVisibility}"
@@ -498,12 +523,16 @@
                         <StackPanel x:Name="TitlePanel" Grid.Row="0" Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                             <TextBlock Text="{x:Bind ViewModel.SelectedCard.PageTitle, Mode=OneWay}"
                                        Style="{StaticResource SubtitleTextBlockStyle}"
+                                       TextWrapping="NoWrap"
+                                       TextTrimming="CharacterEllipsis"
                                        VerticalAlignment="Center"/>
                             <TextBlock Text="{x:Bind ViewModel.SelectedCard.PageTitleAccent, Mode=OneWay}"
                                        Visibility="{x:Bind ViewModel.SelectedCard.PageTitleAccentVisibility, Mode=OneWay}"
                                        Style="{StaticResource BodyStrongTextBlockStyle}"
                                        FontSize="14"
                                        Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                       TextWrapping="NoWrap"
+                                       TextTrimming="CharacterEllipsis"
                                        VerticalAlignment="Center"/>
                         </StackPanel>
 
@@ -577,32 +606,6 @@
                             </Button>
                         </StackPanel>
 
-                        <VisualStateManager.VisualStateGroups>
-                            <VisualStateGroup>
-                                <VisualState>
-                                    <VisualState.StateTriggers>
-                                        <AdaptiveTrigger MinWindowWidth="0"/>
-                                    </VisualState.StateTriggers>
-                                    <VisualState.Setters>
-                                        <Setter Target="HeaderActionsPanel.(Grid.Row)" Value="2"/>
-                                        <Setter Target="HeaderActionsPanel.(Grid.Column)" Value="0"/>
-                                        <Setter Target="HeaderActionsPanel.(Grid.ColumnSpan)" Value="2"/>
-                                        <Setter Target="ActionsPanel.Orientation" Value="Vertical"/>
-                                    </VisualState.Setters>
-                                </VisualState>
-                                <VisualState>
-                                    <VisualState.StateTriggers>
-                                        <AdaptiveTrigger MinWindowWidth="520"/>
-                                    </VisualState.StateTriggers>
-                                    <VisualState.Setters>
-                                        <Setter Target="HeaderActionsPanel.(Grid.Row)" Value="0"/>
-                                        <Setter Target="HeaderActionsPanel.(Grid.Column)" Value="1"/>
-                                        <Setter Target="HeaderActionsPanel.(Grid.ColumnSpan)" Value="1"/>
-                                        <Setter Target="ActionsPanel.Orientation" Value="Horizontal"/>
-                                    </VisualState.Setters>
-                                </VisualState>
-                            </VisualStateGroup>
-                        </VisualStateManager.VisualStateGroups>
                     </Grid>
                 </Border>
 
