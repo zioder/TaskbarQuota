@@ -199,15 +199,16 @@ namespace TaskbarQuota.Controls
             foreach (var row in _renderedRows)
             {
                 row.Track.Background = track;
-                row.Value.Foreground = Foreground;
+                var rowFg = row.Source.ForegroundBrush ?? Foreground;
+                row.Value.Foreground = rowFg;
                 if (row.Label is TextBlock labelBlock)
-                    labelBlock.Foreground = Foreground;
+                    labelBlock.Foreground = rowFg;
                 else if (row.Label is Panel labelPanel)
                 {
                     foreach (var child in labelPanel.Children)
                     {
                         if (child is TextBlock tb)
-                            tb.Foreground = Foreground;
+                            tb.Foreground = rowFg;
                     }
                 }
                 if (row.Reset is { } resetBlock)
@@ -329,7 +330,7 @@ namespace TaskbarQuota.Controls
                 ApplyAntigravityDisplay(result, usage, providerChanged);
                 return;
             }
-            if (result.Id is ProviderId.Copilot or ProviderId.Grok && usage.Cost is { Label: "Credits" } credits)
+            if (result.Id is ProviderId.Copilot or ProviderId.Grok or ProviderId.Zai && usage.Cost is { Label: "Credits" } credits)
             {
                 ApplyCreditsDisplay(result, usage, credits, providerChanged);
                 return;
@@ -539,6 +540,8 @@ namespace TaskbarQuota.Controls
             if (result.Id is ProviderId.Claude or ProviderId.Zai)
             {
                 var rows = BuildBaseRows(result, usage);
+                if (result.Id == ProviderId.Zai && usage.Pricing is { } pricing)
+                    rows.Insert(0, new WidgetUsageRow(pricing.Period, 0, pricing.MultiplierText, HasBar: false, ForegroundBrush: PricingBrush(pricing)));
                 if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
                 {
                     rows.AddRange(usage.ExtraRateWindows.Select(w => new WidgetUsageRow(
@@ -772,6 +775,10 @@ namespace TaskbarQuota.Controls
 
             var widgetName = WidgetDisplayName(result.DisplayName);
             var rows = new List<WidgetUsageRow>();
+            if (result.Id == ProviderId.Zai && usage.Pricing is { } pricing)
+            {
+                rows.Add(new WidgetUsageRow(pricing.Period, 0, pricing.MultiplierText, HasBar: false, ForegroundBrush: PricingBrush(pricing)));
+            }
             if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowCredits))
             {
                 rows.Add(new WidgetUsageRow(
@@ -812,6 +819,8 @@ namespace TaskbarQuota.Controls
                 tooltip += $"\nAdditional usage: {addl.StatusText} ({addl.SpendText})";
             if (usage.Primary.ResetDescription is { } resetDesc)
                 tooltip += $"\nresets in {resetDesc}";
+            if (usage.Pricing is { } pricingState)
+                tooltip += $"\n{pricingState.Display}";
             tooltip += WidgetUsageHistoryTooltipLine(usage.UsageHistory);
             tooltip += StaleTooltipLine(result);
             ToolTipService.SetToolTip(this, tooltip);
@@ -1348,7 +1357,7 @@ namespace TaskbarQuota.Controls
                 0.86,
                 compactTextOnlyValue ? TextAlignment.Left : TextAlignment.Center,
                 textSize);
-            value.Foreground = Foreground;
+            value.Foreground = usageRow.ForegroundBrush ?? Foreground;
             var reset = CreateResetText(usageRow, textSize);
 
             FrameworkElement label;
@@ -1508,7 +1517,7 @@ namespace TaskbarQuota.Controls
             baseLabel.TextTrimming = TextTrimming.None;
             // Explicit brush: inheritance is unreliable once Application theme resources disagree
             // with the floating window's light/dark chrome.
-            baseLabel.Foreground = Foreground;
+            baseLabel.Foreground = row.ForegroundBrush ?? Foreground;
             return baseLabel;
         }
 
@@ -1602,6 +1611,7 @@ namespace TaskbarQuota.Controls
             parts.Add(usage.LoginMethod ?? string.Empty);
             parts.Add(usage.Email ?? string.Empty);
             parts.Add(usage.Cost?.Display ?? string.Empty);
+            parts.Add(usage.Pricing?.Display ?? string.Empty);
             if (usage.AdditionalUsage is { Enabled: true } additional)
             {
                 parts.Add(additional.SpentUsd.ToString(CultureInfo.InvariantCulture));
@@ -1727,6 +1737,16 @@ namespace TaskbarQuota.Controls
             return (Brush)Application.Current.Resources[key];
         }
 
+        private static Brush? PricingBrush(UsagePricingSnapshot pricing)
+        {
+            if (pricing.Period != "PEAK")
+                return null;
+
+            return Application.Current?.Resources is { } res && res.TryGetValue("SystemFillColorCautionBrush", out var caution) && caution is Brush b
+                ? b
+                : new SolidColorBrush(Color.FromArgb(255, 255, 150, 20));
+        }
+
         private static int? TryParseResetMinutes(string resetDescription)
         {
             if (resetDescription == "now")
@@ -1783,7 +1803,8 @@ namespace TaskbarQuota.Controls
             string Value,
             string? ResetDescription = null,
             bool HasBar = true,
-            string? GlyphData = null);
+            string? GlyphData = null,
+            Brush? ForegroundBrush = null);
 
         private sealed record RenderedRow(
             WidgetUsageRow Source,

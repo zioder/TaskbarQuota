@@ -53,6 +53,38 @@ public class UsageSnapshotStoreTests : IDisposable
     }
 
     [Fact]
+    public void Save_ThenLoad_RestoresCreditWindowDisplayValues()
+    {
+        var usage = new UsageSnapshot(new RateWindow(20, 300))
+        {
+            Secondary = new RateWindow(25, 10080),
+            Cost = new CostSnapshot(9_600, "USD", "Credits")
+            {
+                Limit = 12_000,
+            },
+            Pricing = new UsagePricingSnapshot("OFF-PEAK", 0.5),
+        };
+        UsageSnapshotStore.Save(_dir, new Dictionary<ProviderId, UsageResult>
+        {
+            [ProviderId.Zai] = UsageResult.Success(
+                ProviderId.Zai,
+                Provider(ProviderId.Zai),
+                new ProviderFetchResult(usage, "api")),
+        });
+
+        var restored = UsageSnapshotStore.Load(_dir, id => Provider(id))[ProviderId.Zai];
+
+        Assert.Equal(20d, restored.Fetch!.Usage.Primary.UsedPercent, 0);
+        Assert.Equal(25d, restored.Fetch.Usage.Secondary!.UsedPercent, 0);
+        Assert.NotNull(restored.Fetch.Usage.Cost);
+        Assert.Equal("Credits", restored.Fetch.Usage.Cost!.Label);
+        Assert.Equal(9_600d, restored.Fetch.Usage.Cost.Amount, 0);
+        Assert.Equal(12_000d, restored.Fetch.Usage.Cost.Limit!.Value, 0);
+        Assert.Equal("OFF-PEAK", restored.Fetch.Usage.Pricing!.Period);
+        Assert.Equal(0.5d, restored.Fetch.Usage.Pricing.Multiplier);
+    }
+
+    [Fact]
     public void Load_DropsSnapshotWhoseWindowAlreadyReset()
     {
         UsageSnapshotStore.Save(_dir, new Dictionary<ProviderId, UsageResult>

@@ -168,6 +168,9 @@ namespace TaskbarQuota.ViewModels
         public Brush CreditBrush { get; }
         public Visibility CreditVisibility { get; }
         public double CreditOpacity { get; }
+        public string PricingText { get; }
+        public Brush PricingBrush { get; }
+        public Visibility PricingVisibility { get; }
 
         public string SourceText { get; }
         public Visibility SourceVisibility { get; }
@@ -258,12 +261,23 @@ namespace TaskbarQuota.ViewModels
             CreditPercent = 0;
             CreditBrush = Ui.ConsumedUsageBrush(0);
             CreditOpacity = 1.0;
+            PricingText = string.Empty;
+            PricingBrush = Ui.Res("TextFillColorSecondaryBrush");
+            PricingVisibility = Visibility.Collapsed;
             CreditWidgetToggle = new WidgetRowToggleViewModel(r.Id, new WidgetRowOption(WidgetSettingsService.RowCredits, "Credits"));
             AdditionalUsageWidgetToggle = new WidgetRowToggleViewModel(r.Id, new WidgetRowOption(WidgetSettingsService.RowAdditionalUsage, "Additional usage"));
             ResetCreditsWidgetToggle = new WidgetRowToggleViewModel(r.Id, new WidgetRowOption(WidgetSettingsService.RowResetCredits, "Reset credits"));
             if (r.Ok && r.Fetch is { } f)
             {
                 var u = f.Usage;
+                if (r.Id == ProviderId.Zai && u.Pricing is { } pricing)
+                {
+                    PricingText = pricing.Display;
+                    PricingBrush = Ui.Res(pricing.Period == "PEAK"
+                        ? "SystemFillColorCautionBrush"
+                        : "AccentFillColorSecondaryBrush");
+                    PricingVisibility = Visibility.Visible;
+                }
                 if (r.Id == ProviderId.OpenCode)
                 {
                     var usageVal = u.Cost != null ? u.Cost.Display : "—";
@@ -285,7 +299,7 @@ namespace TaskbarQuota.ViewModels
                 }
                 else
                 {
-                    bool creditsOnly = r.Id is ProviderId.Copilot or ProviderId.Grok && u.Cost is { Label: "Credits" };
+                    bool creditsOnly = r.Id is ProviderId.Copilot or ProviderId.Grok or ProviderId.Zai && u.Cost is { Label: "Credits" };
                     if (!creditsOnly)
                     {
                         if (u.HasPrimaryWindow)
@@ -295,7 +309,7 @@ namespace TaskbarQuota.ViewModels
                         }
                         if (u.Secondary != null)
                         {
-                            var secondaryLabel = r.Provider?.WeeklyLabel ?? "Weekly";
+                            var secondaryLabel = u.Secondary.Label ?? r.Provider?.WeeklyLabel ?? "Weekly";
                             bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowSecondary, secondaryLabel, u.Secondary));
                         }
                         if (u.ModelSpecific != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowModelSpecific, u.ModelSpecific.Label ?? ModelSpecificLabel(r.Id), u.ModelSpecific));
