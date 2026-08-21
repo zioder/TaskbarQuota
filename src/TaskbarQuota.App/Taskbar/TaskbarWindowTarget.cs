@@ -94,6 +94,15 @@ namespace TaskbarQuota.Taskbar
                     : 0;
         }
 
+        internal static string GetDisplayLabel(string displayKey)
+        {
+            if (displayKey == WidgetSettingsService.AllDisplaysPinDestination)
+                return "all screens";
+
+            int number = TryGetDisplayNumber(displayKey);
+            return number > 0 ? $"Screen {number}" : "this screen";
+        }
+
         internal static string GetDisplayKeyForWindow(IntPtr hwnd)
         {
             if (hwnd == IntPtr.Zero || !User32.IsWindow(hwnd))

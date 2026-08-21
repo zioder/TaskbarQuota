@@ -46,6 +46,20 @@ internal sealed class AdaptiveDisplayProviderState
         }
     }
 
+    public ProviderId? GetProviderForWindow(IntPtr window)
+    {
+        foreach (var entries in _providers.Values)
+        {
+            foreach (var entry in entries)
+            {
+                if (entry.Window == window)
+                    return entry.Provider;
+            }
+        }
+
+        return null;
+    }
+
     public bool Observe(ProviderId provider, string displayKey, IntPtr window)
     {
         displayKey = displayKey.Trim();
