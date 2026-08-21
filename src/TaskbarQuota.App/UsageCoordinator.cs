@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using TaskbarQuota.ActiveApp;
+using TaskbarQuota.Interop;
 using TaskbarQuota.Usage;
 
 namespace TaskbarQuota
@@ -345,6 +346,8 @@ namespace TaskbarQuota
         public event Action<UsageResult>? StateChanged;
         public event Action<bool>? ActiveToolPresenceChanged;
         public event Action<ProviderId?>? ActiveProviderChanged;
+        /// <summary>Raised whenever foreground detection confidently associates a provider with a window.</summary>
+        public event Action<ProviderId, IntPtr>? ProviderWindowObserved;
 
         public void Start()
         {
@@ -412,6 +415,14 @@ namespace TaskbarQuota
             if (buttonName == _lastUiaModelName)
                 return false;
             _lastUiaModelName = buttonName;
+
+            // The model-button name changed (model switch / thread navigation), but Chromium may not
+            // have flushed the new localStorage record to the LevelDB log yet, so the file watcher has
+            // not fired and the snapshot cache still holds the pre-switch selection. Invalidate it now:
+            // the next disk read rebuilds from the current log tail, so the authoritative state reader
+            // reflects the new model as soon as the write lands instead of serving the stale snapshot
+            // (which can linger for seconds until the flush reaches disk).
+            SynaraStateReader.InvalidateDraftCache();
 
             if (SynaraModelClassifier.Classify(buttonName) is not { } classification)
                 return false; // Bare model on an unlabelled build; state reader is authoritative.
@@ -1074,6 +1085,9 @@ namespace TaskbarQuota
                     _lastActive = p;
                     _activeProviderSource = detectedSource;
                     PromoteRecentProvider(p);
+                    var foregroundWindow = User32.GetForegroundWindow();
+                    if (foregroundWindow != IntPtr.Zero)
+                        ProviderWindowObserved?.Invoke(p, foregroundWindow);
                     if (previousActive != p)
                     {
                         ActiveProviderChanged?.Invoke(p);

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 
 namespace TaskbarQuota.Usage
 {
@@ -85,6 +86,21 @@ namespace TaskbarQuota.Usage
             string.Equals(Currency, "USD", StringComparison.OrdinalIgnoreCase) ? $"${v:0.00}" : $"{v:0.00} {Currency}";
 
         public string Display => Limit is double lim ? $"{Money(Amount)} / {Money(lim)}" : Money(Amount);
+    }
+
+    /// <summary>Current Z.ai Coding Plan quota coefficient for the active time window.</summary>
+    public sealed class UsagePricingSnapshot
+    {
+        public string Period { get; }
+        public double Multiplier { get; }
+        public string MultiplierText => Multiplier.ToString("0.##", CultureInfo.InvariantCulture) + "×";
+        public string Display => $"{Period} · {MultiplierText}";
+
+        public UsagePricingSnapshot(string period, double multiplier)
+        {
+            Period = period;
+            Multiplier = multiplier;
+        }
     }
 
     /// <summary>
@@ -178,6 +194,7 @@ namespace TaskbarQuota.Usage
         public string? LoginMethod { get; set; }
         public string? Email { get; set; }
         public CostSnapshot? Cost { get; set; }
+        public UsagePricingSnapshot? Pricing { get; set; }
         public AdditionalUsageSnapshot? AdditionalUsage { get; set; }
         public ResetCreditsSnapshot? ResetCredits { get; set; }
         /// <summary>Provider-specific usage dashboard link when known (e.g. OpenCode workspace /go or /usage).</summary>

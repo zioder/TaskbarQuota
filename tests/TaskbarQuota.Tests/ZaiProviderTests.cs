@@ -185,6 +185,218 @@ public class ZaiProviderTests
     }
 
     [Fact]
+    public void BuildResult_PairsCurrentSubscriptionWithCreditWindows()
+    {
+        const string quotaJson = """
+        {
+          "code": 200,
+          "success": true,
+          "data": {
+            "level": "pro",
+            "limits": [
+              {
+                "type": "TOKENS_LIMIT",
+                "unit": 3,
+                "number": 5,
+                "usage": 12000,
+                "currentValue": 2400,
+                "remaining": 9600,
+                "percentage": 20
+              },
+              {
+                "type": "TOKENS_LIMIT",
+                "unit": 6,
+                "number": 1,
+                "usage": 60000,
+                "currentValue": 15000,
+                "remaining": 45000,
+                "percentage": 25
+              }
+            ]
+          }
+        }
+        """;
+        const string subscriptionJson = """
+        {
+          "code": 200,
+          "success": true,
+          "data": [
+            {
+              "productId": "expired-product",
+              "productName": "GLM Coding Lite",
+              "inCurrentPeriod": false,
+              "status": "EXPIRED"
+            },
+            {
+              "productId": "product-448ee2",
+              "productName": "GLM Coding Pro",
+              "inCurrentPeriod": true,
+              "status": "VALID"
+            }
+          ]
+        }
+        """;
+
+        using var quota = JsonDocument.Parse(quotaJson);
+        using var subscription = JsonDocument.Parse(subscriptionJson);
+        var result = ZaiProvider.BuildResult(quota.RootElement, subscription.RootElement);
+
+        Assert.Equal("GLM Coding Pro", result.Usage.LoginMethod);
+        Assert.Equal(20d, result.Usage.Primary.UsedPercent, 0);
+        Assert.Equal(25d, result.Usage.Secondary!.UsedPercent, 0);
+        Assert.False(result.Usage.HasPrimaryWindow);
+        Assert.NotNull(result.Usage.Cost);
+        Assert.Equal("Credits", result.Usage.Cost!.Label);
+        Assert.Equal("credits", result.Usage.Cost.Currency);
+        Assert.Equal(9_600d, result.Usage.Cost.Amount, 0);
+        Assert.Equal(12_000d, result.Usage.Cost.Limit!.Value, 0);
+    }
+
+    [Fact]
+    public void BuildResult_LegacySubscriptionKeepsPercentageDisplay()
+    {
+        const string quotaJson = """
+        {
+          "code": 200,
+          "success": true,
+          "data": {
+            "limits": [
+              {
+                "type": "TOKENS_LIMIT",
+                "unit": 3,
+                "number": 5,
+                "usage": 1000,
+                "currentValue": 250,
+                "remaining": 750,
+                "percentage": 25
+              }
+            ]
+          }
+        }
+        """;
+        const string subscriptionJson = """
+        {
+          "code": 200,
+          "success": true,
+          "data": [
+            {
+              "productId": "legacy-v2",
+              "productName": "Legacy Plan V2",
+              "inCurrentPeriod": true,
+              "status": "VALID"
+            }
+          ]
+        }
+        """;
+
+        using var quota = JsonDocument.Parse(quotaJson);
+        using var subscription = JsonDocument.Parse(subscriptionJson);
+        var result = ZaiProvider.BuildResult(quota.RootElement, subscription.RootElement);
+
+        Assert.Equal("Legacy Plan V2", result.Usage.LoginMethod);
+        Assert.Null(result.Usage.Cost);
+    }
+
+    [Fact]
+    public void BuildResult_GenericLegacyTierNameDoesNotImplyCredits()
+    {
+        const string quotaJson = """
+        {
+          "code": 200,
+          "success": true,
+          "data": {
+            "limits": [
+              { "type": "TOKENS_LIMIT", "unit": 3, "number": 5, "usage": 1000, "remaining": 750, "percentage": 25 }
+            ]
+          }
+        }
+        """;
+        const string subscriptionJson = """
+        {
+          "code": 200,
+          "success": true,
+          "data": [
+            {
+              "productId": "older-product-id",
+              "productName": "GLM Coding Pro",
+              "inCurrentPeriod": true,
+              "status": "VALID"
+            }
+          ]
+        }
+        """;
+
+        using var quota = JsonDocument.Parse(quotaJson);
+        using var subscription = JsonDocument.Parse(subscriptionJson);
+        var result = ZaiProvider.BuildResult(quota.RootElement, subscription.RootElement);
+
+        Assert.Equal("GLM Coding Pro", result.Usage.LoginMethod);
+        Assert.Null(result.Usage.Cost);
+    }
+
+    [Fact]
+    public void BuildResult_FallsBackToQuotaLevelWithoutSubscription()
+    {
+        const string json = """
+        {
+          "code": 200,
+          "success": true,
+          "data": { "level": "MAX", "limits": [] }
+        }
+        """;
+
+        using var doc = JsonDocument.Parse(json);
+        var result = ZaiProvider.BuildResult(doc.RootElement);
+
+        Assert.Equal("GLM Coding Max", result.Usage.LoginMethod);
+        Assert.Null(result.Usage.Cost);
+    }
+
+    [Fact]
+    public void BuildSubscriptionUrl_ReplacesQuotaPathAndQuery()
+    {
+        Assert.Equal(
+            "https://api.z.ai/api/biz/subscription/list",
+            ZaiProvider.BuildSubscriptionUrl("https://api.z.ai/api/monitor/usage/quota/limit?ignored=1"));
+    }
+
+    [Fact]
+    public void ResolvePricing_CreditPlansUseOneXPeakAndHalfXOffPeak()
+    {
+        var peak = ZaiProvider.ResolvePricing(
+            isCreditPlan: true,
+            productName: "GLM Coding Pro",
+            new DateTimeOffset(2026, 8, 14, 6, 0, 0, TimeSpan.Zero)); // 14:00 Singapore
+        var offPeak = ZaiProvider.ResolvePricing(
+            isCreditPlan: true,
+            productName: "GLM Coding Pro",
+            new DateTimeOffset(2026, 8, 14, 10, 0, 0, TimeSpan.Zero)); // 18:00 Singapore
+
+        Assert.Equal("PEAK", peak!.Period);
+        Assert.Equal(1d, peak.Multiplier);
+        Assert.Equal("OFF-PEAK", offPeak!.Period);
+        Assert.Equal(0.5d, offPeak.Multiplier);
+    }
+
+    [Fact]
+    public void ResolvePricing_LegacyV2UsesThreeXPeakAndOneXOffPeak()
+    {
+        var peak = ZaiProvider.ResolvePricing(
+            isCreditPlan: false,
+            productName: "Legacy Plan V2",
+            new DateTimeOffset(2026, 8, 14, 6, 0, 0, TimeSpan.Zero));
+        var offPeak = ZaiProvider.ResolvePricing(
+            isCreditPlan: false,
+            productName: "Legacy Plan V2",
+            new DateTimeOffset(2026, 8, 14, 10, 0, 0, TimeSpan.Zero));
+
+        Assert.Equal("PEAK", peak!.Period);
+        Assert.Equal(3d, peak.Multiplier);
+        Assert.Equal("OFF-PEAK", offPeak!.Period);
+        Assert.Equal(1d, offPeak.Multiplier);
+    }
+
+    [Fact]
     public void BuildResult_ComputesUsedPercentFromRemaining()
     {
         const string json = """
@@ -207,7 +419,7 @@ public class ZaiProviderTests
         """;
         using var doc = JsonDocument.Parse(json);
         var result = ZaiProvider.BuildResult(doc.RootElement);
-        Assert.Equal(25, result.Usage.Primary.UsedPercent, 0);
+        Assert.Equal(25d, result.Usage.Primary.UsedPercent, 0);
     }
 
     [Fact]

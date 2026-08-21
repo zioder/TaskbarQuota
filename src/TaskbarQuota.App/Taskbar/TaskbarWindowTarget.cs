@@ -14,6 +14,8 @@ namespace TaskbarQuota.Taskbar
         internal const string PrimaryClassName = "Shell_TrayWnd";
         internal const string SecondaryClassName = "Shell_SecondaryTrayWnd";
 
+        public int DisplayNumber => TryGetDisplayNumber(DisplayKey);
+
         public static bool TryFindAll(out IReadOnlyList<TaskbarWindowTarget> result)
         {
             var targets = new List<TaskbarWindowTarget>();
@@ -74,6 +76,48 @@ namespace TaskbarQuota.Taskbar
         internal static string BuildPositionFileName(string displayKey)
             => $"taskbar-widget-position-{displayKey}.txt";
 
+        internal static int TryGetDisplayNumber(string? displayKey)
+        {
+            const string prefix = "DISPLAY";
+            if (string.IsNullOrWhiteSpace(displayKey)
+                || !displayKey.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return 0;
+            }
+
+            return int.TryParse(
+                displayKey.AsSpan(prefix.Length),
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out int number)
+                    ? number
+                    : 0;
+        }
+
+        internal static string GetDisplayLabel(string displayKey)
+        {
+            if (displayKey == WidgetSettingsService.AllDisplaysPinDestination)
+                return "all screens";
+
+            int number = TryGetDisplayNumber(displayKey);
+            return number > 0 ? $"Screen {number}" : "this screen";
+        }
+
+        internal static string GetDisplayKeyForWindow(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero || !User32.IsWindow(hwnd))
+                return string.Empty;
+
+            var monitor = User32.MonitorFromWindow(hwnd, MonitorFromFlags.MONITOR_DEFAULTTONULL);
+            if (monitor == IntPtr.Zero)
+                return string.Empty;
+
+            var info = MONITORINFOEX.Create();
+            return User32.GetMonitorInfo(monitor, ref info)
+                ? BuildDisplayKey(info.szDevice, info.rcMonitor)
+                : string.Empty;
+        }
+
         private static bool EnumTaskbarWindow(IntPtr hwnd, IntPtr lParam)
         {
             var builder = new StringBuilder(64);
@@ -83,6 +127,8 @@ namespace TaskbarQuota.Taskbar
                 && GCHandle.FromIntPtr(lParam).Target is List<TaskbarWindowTarget> targets)
             {
                 var bounds = GetBounds(hwnd);
+                if (bounds.right <= bounds.left || bounds.bottom <= bounds.top)
+                    return true;
                 targets.Add(new TaskbarWindowTarget(
                     hwnd,
                     isPrimary,

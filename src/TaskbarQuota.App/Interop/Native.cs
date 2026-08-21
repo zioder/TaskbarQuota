@@ -15,6 +15,12 @@ namespace TaskbarQuota.Interop
         public static extern uint GetDpiForWindow([In] IntPtr hWnd);
 
         [DllImport("user32.dll")]
+        public static extern IntPtr GetWindowDpiAwarenessContext([In] IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr SetThreadDpiAwarenessContext([In] IntPtr dpiContext);
+
+        [DllImport("user32.dll")]
         public static extern bool GetWindowRect([In] IntPtr hWnd, [Out] out RECT lpRect);
 
         [DllImport("user32.dll")]
@@ -32,6 +38,13 @@ namespace TaskbarQuota.Interop
 
         [DllImport("user32.dll")]
         public static extern bool UnregisterClass([In] string lpClassName, [In, Optional] IntPtr hInstance);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool DestroyWindow([In] IntPtr hWnd);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern uint RegisterWindowMessage([In] string lpString);
 
         [DllImport("user32.dll")]
         public static extern IntPtr SetParent([In] IntPtr hWndChild, [In] IntPtr hWndNewParent);
@@ -66,6 +79,7 @@ namespace TaskbarQuota.Interop
         public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowProc lpEnumFunc, IntPtr lParam);
 
         public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+        public const uint EVENT_SYSTEM_MOVESIZEEND = 0x000B;
         public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
         public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
 
@@ -165,6 +179,15 @@ namespace TaskbarQuota.Interop
         public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
         public const uint WM_SETICON = 0x0080;
+        public const uint WM_NCDESTROY = 0x0082;
+        public const uint WM_DISPLAYCHANGE = 0x007E;
+        public const uint WM_DEVICECHANGE = 0x0219;
+        public const uint WM_WTSSESSION_CHANGE = 0x02B1;
+        public const uint WM_POWERBROADCAST = 0x0218;
+        public const uint WM_DPICHANGED = 0x02E0;
+        public const uint WM_DPICHANGED_BEFOREPARENT = 0x02E2;
+        public const uint WM_DPICHANGED_AFTERPARENT = 0x02E3;
+        public static readonly IntPtr HWND_MESSAGE = new(-3);
         public const IntPtr ICON_SMALL = (IntPtr)0;
         public const IntPtr ICON_BIG = (IntPtr)1;
 
@@ -198,6 +221,19 @@ namespace TaskbarQuota.Interop
 
         [DllImport("user32.dll", CharSet = CharSet.Auto, EntryPoint = "GetMonitorInfo")]
         public static extern bool GetMonitorInfo([In] IntPtr hMonitor, ref MONITORINFOEX lpmi);
+    }
+
+    public static class WtsApi32
+    {
+        public const uint NOTIFY_FOR_THIS_SESSION = 0;
+
+        [DllImport("wtsapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool WTSRegisterSessionNotification(IntPtr hWnd, uint dwFlags);
+
+        [DllImport("wtsapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool WTSUnRegisterSessionNotification(IntPtr hWnd);
     }
 
     public static class DwmApi

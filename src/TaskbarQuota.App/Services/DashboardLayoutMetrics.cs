@@ -19,6 +19,31 @@ internal static class DashboardLayoutMetrics
     private const double CardVerticalPadding = 32;
     private const double SetupCardHeight = 112;
     private const double ErrorCardHeight = 72;
+    private const double HeaderCardHorizontalPadding = 42;
+    private const double HeaderColumnSpacing = 12;
+    private const double HeaderActionSpacing = 8;
+    private const double HeaderActionWidth =
+        (14 + 6 + (7 * CharWidth) + 24) // Refresh icon + label + button padding
+        + (14 + 6 + (6 * CharWidth) + 24) // Pinned icon + label + button padding
+        + 76 // Widget toggle's minimum width
+        + (14 + 24) // Share icon + button padding
+        + (HeaderActionSpacing * 3);
+    private const double HeaderWidthSlack = 24;
+
+    /// <summary>
+    /// Width needed by the provider title and its header actions when they remain on one line.
+    /// The flyout uses this value alongside the detail-card measurement so a narrow provider strip
+    /// cannot squeeze the title into one-character wrapping.
+    /// </summary>
+    public static double EstimateHeaderWidth(ProviderCardViewModel? card)
+    {
+        if (card is null)
+            return 0;
+
+        double titleWidth = Math.Max(Estimate(card.PageTitle), Estimate(card.PageTitleAccent));
+        return titleWidth + HeaderActionWidth + HeaderColumnSpacing
+            + HeaderCardHorizontalPadding + HeaderWidthSlack;
+    }
 
     public static double EstimateDetailWidth(ProviderCardViewModel? card)
     {
@@ -41,6 +66,9 @@ internal static class DashboardLayoutMetrics
             maxLine = Math.Max(maxLine,
                 Estimate(card.CreditLeftText) + Estimate(card.CreditLimitText) + 24);
         }
+
+        if (!string.IsNullOrEmpty(card.PricingText))
+            maxLine = Math.Max(maxLine, Estimate("Pricing") + Estimate(card.PricingText) + 24);
 
         if (!string.IsNullOrEmpty(card.AdditionalUsageStatusText))
         {
@@ -91,6 +119,12 @@ internal static class DashboardLayoutMetrics
         {
             sections++;
             height += 104;
+        }
+
+        if (card.PricingVisibility == Microsoft.UI.Xaml.Visibility.Visible)
+        {
+            sections++;
+            height += 56;
         }
 
         if (!string.IsNullOrEmpty(card.ResetCreditsCountText))

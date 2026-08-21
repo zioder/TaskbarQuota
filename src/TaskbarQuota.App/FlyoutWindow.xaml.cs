@@ -19,6 +19,7 @@ using TaskbarQuota.AgentActivity;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Interop;
 using TaskbarQuota.Services;
+using TaskbarQuota.Taskbar;
 using TaskbarQuota.Usage;
 using TaskbarQuota.ViewModels;
 using TaskbarQuota.Views;
@@ -222,6 +223,8 @@ namespace TaskbarQuota
             _selectedActivityId = showActivity ? selectedActivityId : null;
             _showingCost = false;
             EnsureDashboardLoaded();
+            if (ContentFrame.Content is DashboardPage dashboard)
+                dashboard.SetPinHereDisplay(TaskbarWindowTarget.GetDisplayKeyForWindow(widgetHandle));
             if (showActivity)
                 ShowActivityPanel();
             else
@@ -833,7 +836,11 @@ namespace TaskbarQuota
             if (_providerStripItems.TryGetValue(id, out var item))
                 item.Pin.Visibility = pinned ? Visibility.Visible : Visibility.Collapsed;
 
-            ToolTipService.SetToolTip(button, pinned ? $"{displayName} — pinned in the usage widget" : displayName);
+            string? fixedDisplay = WidgetSettingsService.GetPinnedProviderDisplay(id);
+            string pinDescription = fixedDisplay is null
+                ? "pinned — follows app screen"
+                : $"pinned to {TaskbarWindowTarget.GetDisplayLabel(fixedDisplay)}";
+            ToolTipService.SetToolTip(button, pinned ? $"{displayName} — {pinDescription}" : displayName);
         }
 
         /// <summary>

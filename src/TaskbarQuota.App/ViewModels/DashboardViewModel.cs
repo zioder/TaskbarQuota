@@ -374,10 +374,13 @@ namespace TaskbarQuota.ViewModels
 
         private void UpdateDetailContentMetrics(ProviderCardViewModel? card)
         {
-            // Option A: fixed flyout. Width stays at FlyoutLayout.BaseLogicalWidth regardless of how
-            // many providers are installed; the strip only pushes the window wider once its icons
-            // overflow that base. Content is laid out inside the resulting width.
-            int flyoutWidth = FlyoutLayout.ComputeLogicalWidth(Cards.Count, 0);
+            // Keep the title and header actions on one line. The provider strip may be narrow when
+            // only a few providers are installed, so include the widest provider header in the flyout
+            // width calculation instead of letting the title column collapse and wrap vertically.
+            double widestHeader = Cards.Count == 0
+                ? 0
+                : Cards.Max(DashboardLayoutMetrics.EstimateHeaderWidth);
+            int flyoutWidth = FlyoutLayout.ComputeLogicalWidth(Cards.Count, widestHeader);
             DetailContentWidth = flyoutWidth - FlyoutLayout.DetailContentPadding;
 
             DetailContentHeight = FlyoutLayout.FixedLogicalContentHeight;

@@ -51,10 +51,21 @@ namespace TaskbarQuota.Taskbar
                 bool isCentered = SystemInfos.IsTaskBarCentered();
                 bool isHidden = IsTaskbarHidden();
 
-                var reason = TaskbarChangeReason.Other;
-                if (isWidgets != widgetsButtonEnabled) { reason = TaskbarChangeReason.WidgetsButton; widgetsButtonEnabled = isWidgets; }
-                else if (isCentered != taskbarCentered) { reason = TaskbarChangeReason.Alignment; taskbarCentered = isCentered; }
-                else if (isHidden != taskbarHidden) { reason = TaskbarChangeReason.Visibility; taskbarHidden = isHidden; }
+                var reason = DetectChangeReason(
+                    widgetsButtonEnabled,
+                    taskbarCentered,
+                    taskbarHidden,
+                    isWidgets,
+                    isCentered,
+                    isHidden);
+                if (reason == TaskbarChangeReason.None)
+                    return;
+
+                // Commit one coherent snapshot. If several shell properties changed together, the priority
+                // reason still describes the refresh while the next poll sees the complete new baseline.
+                widgetsButtonEnabled = isWidgets;
+                taskbarCentered = isCentered;
+                taskbarHidden = isHidden;
 
                 TaskbarChangedNotificationCompleted?.Invoke(this, new TaskbarChangedEventArgs
                 {
@@ -65,6 +76,23 @@ namespace TaskbarQuota.Taskbar
                 });
             }
             catch { /* best-effort */ }
+        }
+
+        internal static TaskbarChangeReason DetectChangeReason(
+            bool previousWidgets,
+            bool previousCentered,
+            bool previousHidden,
+            bool currentWidgets,
+            bool currentCentered,
+            bool currentHidden)
+        {
+            if (currentWidgets != previousWidgets)
+                return TaskbarChangeReason.WidgetsButton;
+            if (currentCentered != previousCentered)
+                return TaskbarChangeReason.Alignment;
+            if (currentHidden != previousHidden)
+                return TaskbarChangeReason.Visibility;
+            return TaskbarChangeReason.None;
         }
 
         /// <summary>
@@ -206,8 +234,11 @@ namespace TaskbarQuota.Taskbar
             WindowId id = Win32Interop.GetWindowIdFromWindow(hwndTaskbar);
             var area = DisplayArea.GetFromWindowId(id, DisplayAreaFallback.Primary);
             User32.GetWindowRect(hwndTaskbar, out var rect);
-            return rect.bottom > area.OuterBounds.Height;
+            return IsAutoHideTaskbarOffscreen(rect.bottom, area.OuterBounds.Y, area.OuterBounds.Height);
         }
+
+        internal static bool IsAutoHideTaskbarOffscreen(int taskbarBottom, int displayTop, int displayHeight)
+            => taskbarBottom > displayTop + displayHeight;
 
         public void Dispose()
         {

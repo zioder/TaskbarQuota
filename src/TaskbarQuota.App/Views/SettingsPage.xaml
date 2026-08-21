@@ -21,7 +21,7 @@
             <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,8"/>
 
             <!-- Explains a refused pin, matching DashboardPage. A tooltip is no use here: the user has just
-                 flicked the switch and watched it spring back, so the reason has to appear unprompted. -->
+                 selected a destination and watched it revert, so the reason has to appear unprompted. -->
             <muxc:InfoBar x:Name="PinBlockedBar"
                           Severity="Warning"
                           Title="Can't pin this provider"
@@ -86,6 +86,19 @@
                     <ComboBoxItem Content="In the taskbar" Tag="Taskbar"/>
                     <ComboBoxItem Content="Floating always-on-top window" Tag="Floating"/>
                 </ComboBox>
+            </tk:SettingsCard>
+
+            <tk:SettingsCard x:Name="TaskbarPlacementCard"
+                             Header="Taskbar screens"
+                             Description="Show the same usage on every taskbar, choose one screen, or keep one active provider per screen. With two or more screens, Adaptive mode also lets each pinned provider target a fixed screen.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE7F4;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <ComboBox x:Name="TaskbarPlacementCombo"
+                          SelectionChanged="OnTaskbarPlacementChanged"
+                          MinWidth="200"
+                          AutomationProperties.Name="Taskbar screens"
+                          AutomationProperties.AutomationId="TaskbarPlacementCombo"/>
             </tk:SettingsCard>
 
             <tk:SettingsCard x:Name="FloatingOpacityCard"

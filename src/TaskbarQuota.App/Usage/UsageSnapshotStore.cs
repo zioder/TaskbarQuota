@@ -127,6 +127,9 @@ namespace TaskbarQuota.Usage
                 Email = stored.Email,
                 UsageDashboardUrl = stored.UsageDashboardUrl,
                 Cost = ToCost(stored.Cost),
+                Pricing = stored.Pricing is { } pricing
+                    ? new UsagePricingSnapshot(pricing.Period ?? string.Empty, pricing.Multiplier)
+                    : null,
                 AdditionalUsage = stored.AdditionalUsage is { } a
                     ? new AdditionalUsageSnapshot
                     {
@@ -168,6 +171,9 @@ namespace TaskbarQuota.Usage
             UsageDashboardUrl = usage.UsageDashboardUrl,
             Cost = usage.Cost is { } c
                 ? new StoredCost { Amount = c.Amount, Currency = c.Currency, Label = c.Label, Limit = c.Limit, ResetsAt = c.ResetsAt }
+                : null,
+            Pricing = usage.Pricing is { } pricing
+                ? new StoredPricing { Period = pricing.Period, Multiplier = pricing.Multiplier }
                 : null,
             AdditionalUsage = usage.AdditionalUsage is { } a
                 ? new StoredAdditionalUsage { Enabled = a.Enabled, SpentUsd = a.SpentUsd, BudgetUsd = a.BudgetUsd, IsCredits = a.IsCredits }
@@ -249,6 +255,7 @@ namespace TaskbarQuota.Usage
             public string? Email { get; set; }
             public string? UsageDashboardUrl { get; set; }
             public StoredCost? Cost { get; set; }
+            public StoredPricing? Pricing { get; set; }
             public StoredAdditionalUsage? AdditionalUsage { get; set; }
             public StoredResetCredits? ResetCredits { get; set; }
         }
@@ -277,6 +284,12 @@ namespace TaskbarQuota.Usage
             public string? Label { get; set; }
             public double? Limit { get; set; }
             public DateTimeOffset? ResetsAt { get; set; }
+        }
+
+        private sealed class StoredPricing
+        {
+            public string? Period { get; set; }
+            public double Multiplier { get; set; }
         }
 
         private sealed class StoredAdditionalUsage
