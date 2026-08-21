@@ -58,7 +58,9 @@ internal static class TaskbarContentRouter
         string targetDisplayKey,
         string primaryDisplayKey,
         IReadOnlySet<string> availableDisplayKeys,
-        Func<ProviderId, string?> adaptiveDisplayForProvider)
+        Func<ProviderId, string?> adaptiveDisplayForProvider,
+        Func<ProviderId, bool> isPinned,
+        Func<ProviderId, string?> pinnedDisplayForProvider)
     {
         if (mode == TaskbarPlacementMode.AllDisplays)
             return snapshot;
@@ -71,7 +73,9 @@ internal static class TaskbarContentRouter
                 targetDisplayKey,
                 primaryDisplayKey,
                 availableDisplayKeys,
-                adaptiveDisplayForProvider))
+                adaptiveDisplayForProvider,
+                isPinned,
+                pinnedDisplayForProvider))
             .ToArray();
         var runItems = snapshot.RunItems?
             .Where(item => IsRoutedToDisplay(
@@ -81,7 +85,9 @@ internal static class TaskbarContentRouter
                 targetDisplayKey,
                 primaryDisplayKey,
                 availableDisplayKeys,
-                adaptiveDisplayForProvider))
+                adaptiveDisplayForProvider,
+                isPinned,
+                pinnedDisplayForProvider))
             .ToArray();
         return new AgentActivitySnapshot(items, runItems);
     }

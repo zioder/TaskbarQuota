@@ -107,9 +107,33 @@ public class TaskbarContentRouterTests
             "DISPLAY2",
             "DISPLAY1",
             Displays,
-            provider => provider == ProviderId.Antigravity ? "DISPLAY2" : "DISPLAY1");
+            provider => provider == ProviderId.Antigravity ? "DISPLAY2" : "DISPLAY1",
+            _ => false,
+            _ => null);
 
         Assert.Equal([antigravity], routed.Items);
+    }
+
+    [Fact]
+    public void Adaptive_activity_honors_a_fixed_pin_destination()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var codex = new AgentActivityItem(
+            "codex", ProviderId.Codex, "Codex", "Working", AgentActivityStatus.Working, now, now);
+        var snapshot = new AgentActivitySnapshot([codex]);
+
+        var routed = TaskbarContentRouter.ActivityForDisplay(
+            snapshot,
+            TaskbarPlacementMode.Adaptive,
+            string.Empty,
+            "DISPLAY2",
+            "DISPLAY1",
+            Displays,
+            _ => "DISPLAY1",
+            _ => true,
+            _ => "DISPLAY2");
+
+        Assert.Equal([codex], routed.Items);
     }
 
     [Fact]

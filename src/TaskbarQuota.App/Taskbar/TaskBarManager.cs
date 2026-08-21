@@ -384,7 +384,15 @@ namespace TaskbarQuota.Taskbar
                     return;
                 }
 
-                EnsureWidgets();
+                if (_topologyRecoveryPending)
+                {
+                    if (TryRecoverTaskbarTopology())
+                        CompleteTopologyRecovery();
+                }
+                else
+                {
+                    EnsureWidgets();
+                }
                 RefreshPinnedTiles();
                 // The free span is only known once a widget has measured it, so a set pinned before that
                 // (or pinned when the bar was emptier) is reconciled here rather than rendering badly.
@@ -556,10 +564,17 @@ namespace TaskbarQuota.Taskbar
                 WidgetSettingsService.GetPinnedProviderDisplay);
         }
 
-        private static ProviderId? ActiveProviderForWidget(TaskBarWidget widget, ProviderId? globalActive)
-            => WidgetSettingsService.CurrentTaskbarPlacement == TaskbarPlacementMode.Adaptive
-                ? AdaptiveProviderForDisplay(widget.DisplayKey)
-                : globalActive;
+        private static ProviderId? ActiveProviderForWidget(
+            TaskBarWidget widget,
+            IReadOnlyList<ProviderId> providers,
+            ProviderId? globalActive)
+        {
+            if (WidgetSettingsService.CurrentTaskbarPlacement != TaskbarPlacementMode.Adaptive)
+                return globalActive;
+
+            return AdaptiveProviderForDisplay(widget.DisplayKey)
+                ?? (globalActive is { } active && providers.Contains(active) ? active : null);
+        }
 
         private static ProviderId? AdaptiveProviderForDisplay(string displayKey)
             => AdaptiveDisplayProviders.GetProvider(
@@ -685,7 +700,9 @@ namespace TaskbarQuota.Taskbar
                 widget.DisplayKey,
                 primary,
                 available,
-                WidgetSettingsService.GetAdaptiveProviderDisplay);
+                WidgetSettingsService.GetAdaptiveProviderDisplay,
+                WidgetSettingsService.IsProviderPinned,
+                WidgetSettingsService.GetPinnedProviderDisplay);
         }
 
         private static void SyncWidgetState()
@@ -718,12 +735,14 @@ namespace TaskbarQuota.Taskbar
             if (providers.Count == 0)
             {
                 widget.HideDisplayProviders(
-                    ActiveProviderForWidget(widget, coordinator.ActiveProvider),
+                    ActiveProviderForWidget(widget, providers, coordinator.ActiveProvider),
                     keepActivityVisible: widget.HasVisibleActivity);
                 return;
             }
 
-            widget.SetDisplayProviders(providers, ActiveProviderForWidget(widget, coordinator.ActiveProvider));
+            widget.SetDisplayProviders(
+                providers,
+                ActiveProviderForWidget(widget, providers, coordinator.ActiveProvider));
             widget.SetVisible(true);
 
             bool needsFetch = false;
@@ -933,12 +952,14 @@ namespace TaskbarQuota.Taskbar
                 if (providers.Count == 0)
                 {
                     widget.HideDisplayProviders(
-                        ActiveProviderForWidget(widget, coordinator.ActiveProvider),
+                        ActiveProviderForWidget(widget, providers, coordinator.ActiveProvider),
                         keepActivityVisible: widget.HasVisibleActivity);
                     continue;
                 }
 
-                widget.SetDisplayProviders(providers, ActiveProviderForWidget(widget, coordinator.ActiveProvider));
+                widget.SetDisplayProviders(
+                    providers,
+                    ActiveProviderForWidget(widget, providers, coordinator.ActiveProvider));
                 widget.SetVisible(true);
                 if (!isDisplayedOnWidget)
                     continue;
@@ -996,7 +1017,7 @@ namespace TaskbarQuota.Taskbar
         {
             if (hwnd == IntPtr.Zero || User32.GetForegroundWindow() != hwnd)
                 return;
-            if (UsageCoordinator.Instance.ActiveProvider is not { } provider)
+            if (AdaptiveDisplayProviders.GetProviderForWindow(hwnd) is not { } provider)
                 return;
 
             string displayKey = TaskbarWindowTarget.GetDisplayKeyForWindow(hwnd);

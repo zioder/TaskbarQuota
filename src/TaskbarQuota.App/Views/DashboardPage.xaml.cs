@@ -524,20 +524,12 @@ namespace TaskbarQuota.Views
 
             string? fixedDisplay = WidgetSettingsService.GetPinnedProviderDisplay(card.ProviderId);
             string tooltip = card.IsProviderPinned && fixedDisplay is not null
-                ? $"Pinned to {DisplayLabel(fixedDisplay)}"
+                ? $"Pinned to {TaskbarWindowTarget.GetDisplayLabel(fixedDisplay)}"
                 : canPinHere
-                    ? $"Pin {card.DisplayName} to {DisplayLabel(_pinHereDisplayKey)}"
+                    ? $"Pin {card.DisplayName} to {TaskbarWindowTarget.GetDisplayLabel(_pinHereDisplayKey)}"
                     : DefaultPinTooltip;
             ToolTipService.SetToolTip(ProviderPinToggle, tooltip);
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ProviderPinToggle, tooltip);
-        }
-
-        private static string DisplayLabel(string displayKey)
-        {
-            if (displayKey == WidgetSettingsService.AllDisplaysPinDestination)
-                return "all screens";
-            int number = TaskbarWindowTarget.TryGetDisplayNumber(displayKey);
-            return number > 0 ? $"Screen {number}" : "this screen";
         }
 
         private void OpenSetupUrl_Click(object sender, RoutedEventArgs e)
