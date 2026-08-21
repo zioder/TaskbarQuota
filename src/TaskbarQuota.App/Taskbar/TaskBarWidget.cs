@@ -753,9 +753,9 @@ namespace TaskbarQuota.Taskbar
 
         private void WidgetSummary_DesiredHostWidthChanged(int logicalWidth) => RecomputeLayout();
 
-        public void SetActivitySnapshot(AgentActivitySnapshot snapshot)
+        public void SetActivitySnapshot(AgentActivitySnapshot snapshot, bool allowEmptyGrace = true)
         {
-            if (snapshot.Primary is null && activitySnapshot.Primary is not null)
+            if (ShouldDeferEmptyActivitySnapshot(activitySnapshot, snapshot, allowEmptyGrace))
             {
                 // Discovery can publish an empty intermediate snapshot while transcript sources are being
                 // rescanned. Keep the visible activity island for a short grace period instead of hiding
@@ -770,6 +770,12 @@ namespace TaskbarQuota.Taskbar
             pendingEmptyActivitySnapshot = null;
             ApplyActivitySnapshot(snapshot);
         }
+
+        internal static bool ShouldDeferEmptyActivitySnapshot(
+            AgentActivitySnapshot current,
+            AgentActivitySnapshot next,
+            bool allowEmptyGrace)
+            => allowEmptyGrace && next.Primary is null && current.Primary is not null;
 
         private void ActivityEmptySnapshotTimer_Tick(object? sender, object e)
         {

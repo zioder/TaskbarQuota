@@ -700,13 +700,14 @@ namespace TaskbarQuota.Taskbar
 
             var coordinator = UsageCoordinator.Instance;
             var providers = ProvidersForWidget(widget, coordinator.WidgetDisplayProviders);
-            var activity = ActivityForWidget(widget, AgentActivityService.Instance.Snapshot);
+            var sourceActivity = AgentActivityService.Instance.Snapshot;
+            var activity = ActivityForWidget(widget, sourceActivity);
 
-            widget.SetActivitySnapshot(activity);
-            // window over the notification area (#10). The tiles are deliberately left bound while it
-            // hides: unbinding collapses them in the same frame, which wiped out the fade and made the
-            // widget look like it had blinked out of existence. SetVisible re-binds nothing on the way
-            // back in either — the set below runs first on show.
+            // A non-empty source filtered to empty by the selected-screen policy is intentional and must
+            // hide immediately. Reserve the empty grace period for genuinely empty scanner snapshots.
+            widget.SetActivitySnapshot(activity, allowEmptyGrace: sourceActivity.Primary is null);
+            // Keep outgoing tiles bound until the host fade completes. Clearing them first makes the
+            // animation run over an empty window and turns a cross-screen handoff into a visible blink.
             if (providers.Count == 0)
             {
                 widget.SetDisplayProviders(Array.Empty<ProviderId>(), ActiveProviderForWidget(widget, coordinator.ActiveProvider));
@@ -924,9 +925,9 @@ namespace TaskbarQuota.Taskbar
 
                 // Reconcile the tile set first, so a provider that just became active already owns a slot
                 // before its result is routed. SetDisplayProviders is a cheap no-op when nothing changed.
-                widget.SetActivitySnapshot(routedActivity);
-                // As in SyncWidgetState, clear the quota slots before hiding the quota host so a later
-                // provider return cannot reveal stale tiles.
+                widget.SetActivitySnapshot(routedActivity, allowEmptyGrace: activity.Primary is null);
+                // Keep the outgoing slots bound until their fade completes; the widget clears them in the
+                // completion callback, guarded so an interrupted hide cannot erase a returning provider.
                 if (providers.Count == 0)
                 {
                     widget.SetDisplayProviders(Array.Empty<ProviderId>(), ActiveProviderForWidget(widget, coordinator.ActiveProvider));
