@@ -332,6 +332,36 @@ namespace TaskbarQuota.Views
             }
         }
 
+        private void RefreshProviderPinOptions()
+        {
+            _suppressProviderToggleEvents = true;
+            try
+            {
+                foreach (var item in ViewModel.Providers)
+                {
+                    if (!_providerRows.TryGetValue(item.Id, out var row) || row.Pin is not { } pin)
+                        continue;
+
+                    pin.Items.Clear();
+                    pin.SelectedIndex = -1;
+                    foreach (var option in _pinOptions)
+                    {
+                        pin.Items.Add(new ComboBoxItem { Content = option.Label, Tag = option });
+                        if (PinOptionMatches(item.Id, option))
+                            pin.SelectedIndex = pin.Items.Count - 1;
+                    }
+
+                    if (pin.SelectedIndex < 0)
+                        pin.SelectedIndex = 0;
+                    pin.IsEnabled = item.IsWidgetVisible;
+                }
+            }
+            finally
+            {
+                _suppressProviderToggleEvents = false;
+            }
+        }
+
         private void BuildTaskbarPlacementOptions()
         {
             _suppressTaskbarPlacementEvents = true;
@@ -486,7 +516,7 @@ namespace TaskbarQuota.Views
 
             WidgetSettingsService.ApplyTaskbarPlacement(option.Mode, option.DisplayKey);
             BuildPinOptions();
-            RebuildProviderSettings();
+            RefreshProviderPinOptions();
         }
 
         /// <summary>
