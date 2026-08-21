@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -7,6 +8,7 @@ using Microsoft.UI.Xaml.Media;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Helpers;
 using TaskbarQuota.Services;
+using TaskbarQuota.Taskbar;
 using TaskbarQuota.Usage;
 using TaskbarQuota.ViewModels;
 
@@ -18,15 +20,28 @@ namespace TaskbarQuota.Views
         private bool _isInitializing;
         // Suppresses the Toggled handlers while a row's toggles are synced programmatically.
         private bool _suppressProviderToggleEvents;
+        private bool _suppressTaskbarPlacementEvents;
         private Slider? _floatingOpacitySlider;
-        // Per-provider toggles, so changing one updates only its own row instead of rebuilding the list.
+        // Per-provider controls, so changing one updates only its own row instead of rebuilding the list.
         private readonly Dictionary<ProviderId, ProviderToggleRow> _providerRows = new();
+        private readonly List<PinOption> _pinOptions = new();
+
+        private sealed record TaskbarPlacementOption(
+            string Label,
+            TaskbarPlacementMode Mode,
+            string DisplayKey = "");
+
+        private sealed record PinOption(
+            string Label,
+            bool IsPinned,
+            string DisplayKey = "",
+            bool MatchesAnyDestination = false);
 
         private sealed class ProviderToggleRow
         {
             public ToggleSwitch? Dashboard;
             public ToggleSwitch? Widget;
-            public ToggleSwitch? Pinned;
+            public ComboBox? Pin;
         }
 
         public SettingsPage()
@@ -41,11 +56,14 @@ namespace TaskbarQuota.Views
                 _ => 0,
             };
             WidgetSurfaceCombo.SelectedIndex = WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Floating ? 1 : 0;
+            BuildTaskbarPlacementOptions();
+            BuildPinOptions();
             int opacityPercent = (int)System.Math.Round(WidgetSettingsService.FloatingOpacity * 100);
             if (_floatingOpacitySlider is { } slider)
                 slider.Value = opacityPercent;
             FloatingOpacityLabel.Text = $"{opacityPercent}%";
             FloatingOpacityCard.IsEnabled = WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Floating;
+            TaskbarPlacementCard.IsEnabled = WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Taskbar;
             WidgetModeCombo.SelectedIndex = WidgetSettingsService.Current switch
             {
                 WidgetDisplayMode.PercentagesOnly => 1,
@@ -65,6 +83,8 @@ namespace TaskbarQuota.Views
                 Log.Information(
                     $"Settings page loaded (surface={WidgetSettingsService.CurrentSurface}, layout={WidgetSettingsService.Current})");
                 ViewModel.ReloadProviders();
+                BuildTaskbarPlacementOptions();
+                BuildPinOptions();
                 RebuildProviderSettings();
             };
             _isInitializing = false;
@@ -101,14 +121,14 @@ namespace TaskbarQuota.Views
                 var content = new StackPanel { Spacing = 8, MinWidth = 180 };
                 content.Children.Add(CreateProviderToggleRow("Dashboard", item, ProviderToggleKind.Dashboard, toggles));
                 content.Children.Add(CreateProviderToggleRow("Widget", item, ProviderToggleKind.Widget, toggles));
-                content.Children.Add(CreateProviderToggleRow("Pinned", item, ProviderToggleKind.Pinned, toggles));
+                content.Children.Add(CreateProviderPinRow(item, toggles));
                 card.Content = content;
 
                 ProviderSettingsPanel.Children.Add(card);
             }
         }
 
-        private enum ProviderToggleKind { Dashboard, Widget, Pinned }
+        private enum ProviderToggleKind { Dashboard, Widget }
 
         private FrameworkElement CreateProviderToggleRow(
             string label,
@@ -130,31 +150,60 @@ namespace TaskbarQuota.Views
                 IsOn = kind switch
                 {
                     ProviderToggleKind.Dashboard => item.IsDashboardVisible,
-                    ProviderToggleKind.Pinned => item.IsPinned,
                     _ => item.IsWidgetVisible,
                 },
-                // A provider can only be pinned to the taskbar when the widget may draw it at all.
-                IsEnabled = kind != ProviderToggleKind.Pinned || item.IsWidgetVisible,
                 Tag = item,
             };
             switch (kind)
             {
                 case ProviderToggleKind.Dashboard: toggles.Dashboard = toggle; break;
-                case ProviderToggleKind.Pinned: toggles.Pinned = toggle; break;
                 default: toggles.Widget = toggle; break;
             }
             toggle.Toggled += kind switch
             {
                 ProviderToggleKind.Dashboard => OnProviderDashboardToggled,
-                ProviderToggleKind.Pinned => OnProviderPinnedToggled,
                 _ => OnProviderWidgetToggled,
             };
             row.Children.Add(toggle);
             return row;
         }
 
-        // Syncs one provider's toggles to its current state in place. Enabling/disabling a provider and
-        // pinning both flip sibling toggles, and a whole-list rebuild would flash the page.
+        private FrameworkElement CreateProviderPinRow(
+            ProviderSettingItemViewModel item,
+            ProviderToggleRow toggles)
+        {
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            row.Children.Add(new TextBlock
+            {
+                Text = "Pin",
+                Width = 72,
+                VerticalAlignment = VerticalAlignment.Center,
+                Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
+            });
+
+            var combo = new ComboBox
+            {
+                MinWidth = 150,
+                Tag = item,
+                IsEnabled = item.IsWidgetVisible,
+            };
+            foreach (var option in _pinOptions)
+            {
+                combo.Items.Add(new ComboBoxItem { Content = option.Label, Tag = option });
+                if (PinOptionMatches(item.Id, option))
+                    combo.SelectedIndex = combo.Items.Count - 1;
+            }
+            if (combo.SelectedIndex < 0)
+                combo.SelectedIndex = 0;
+
+            combo.SelectionChanged += OnProviderPinChanged;
+            toggles.Pin = combo;
+            row.Children.Add(combo);
+            return row;
+        }
+
+        // Syncs one provider's controls to its current state in place. Enabling/disabling a provider and
+        // pinning both affect sibling controls, and a whole-list rebuild would flash the page.
         private void RefreshProviderRow(ProviderSettingItemViewModel item)
         {
             if (!_providerRows.TryGetValue(item.Id, out var row))
@@ -165,10 +214,18 @@ namespace TaskbarQuota.Views
             {
                 if (row.Dashboard is { } dashboard) dashboard.IsOn = item.IsDashboardVisible;
                 if (row.Widget is { } widget) widget.IsOn = item.IsWidgetVisible;
-                if (row.Pinned is { } pinned)
+                if (row.Pin is { } pin)
                 {
-                    pinned.IsOn = item.IsPinned;
-                    pinned.IsEnabled = item.IsWidgetVisible;
+                    pin.IsEnabled = item.IsWidgetVisible;
+                    for (int i = 0; i < pin.Items.Count; i++)
+                    {
+                        if (pin.Items[i] is ComboBoxItem { Tag: PinOption option }
+                            && PinOptionMatches(item.Id, option))
+                        {
+                            pin.SelectedIndex = i;
+                            break;
+                        }
+                    }
                 }
             }
             finally
@@ -217,25 +274,31 @@ namespace TaskbarQuota.Views
             RefreshProviderRow(item);
         }
 
-        private void OnProviderPinnedToggled(object sender, RoutedEventArgs e)
+        private void OnProviderPinChanged(object sender, SelectionChangedEventArgs e)
         {
             if (_isInitializing || _suppressProviderToggleEvents)
                 return;
-            if (sender is not ToggleSwitch toggle || toggle.Tag is not ProviderSettingItemViewModel item)
-                return;
-
-            if (toggle.IsOn && !PinBudgetService.CanPin(item.Id, out var reason))
+            if (sender is not ComboBox
+                {
+                    Tag: ProviderSettingItemViewModel item,
+                    SelectedItem: ComboBoxItem { Tag: PinOption option },
+                })
             {
-                _suppressProviderToggleEvents = true;
-                try { toggle.IsOn = false; }
-                finally { _suppressProviderToggleEvents = false; }
+                return;
+            }
+
+            if (option.IsPinned && !item.IsPinned && !PinBudgetService.CanPin(item.Id, out var reason))
+            {
                 PinBlockedBar.Message = reason;
                 PinBlockedBar.IsOpen = true;
+                RefreshProviderRow(item);
                 return;
             }
 
             PinBlockedBar.IsOpen = false;
-            ViewModel.ApplyPinned(item, toggle.IsOn);
+            ViewModel.ApplyPinned(item, option.IsPinned);
+            if (option.IsPinned)
+                WidgetSettingsService.SetPinnedProviderDisplay(item.Id, option.DisplayKey);
             RefreshProviderRow(item);
         }
 
@@ -265,7 +328,195 @@ namespace TaskbarQuota.Views
                     : WidgetSurfaceMode.Taskbar;
                 WidgetSettingsService.ApplySurface(mode);
                 FloatingOpacityCard.IsEnabled = mode == WidgetSurfaceMode.Floating;
+                TaskbarPlacementCard.IsEnabled = mode == WidgetSurfaceMode.Taskbar;
             }
+        }
+
+        private void RefreshProviderPinOptions()
+        {
+            _suppressProviderToggleEvents = true;
+            try
+            {
+                foreach (var item in ViewModel.Providers)
+                {
+                    if (!_providerRows.TryGetValue(item.Id, out var row) || row.Pin is not { } pin)
+                        continue;
+
+                    pin.Items.Clear();
+                    pin.SelectedIndex = -1;
+                    foreach (var option in _pinOptions)
+                    {
+                        pin.Items.Add(new ComboBoxItem { Content = option.Label, Tag = option });
+                        if (PinOptionMatches(item.Id, option))
+                            pin.SelectedIndex = pin.Items.Count - 1;
+                    }
+
+                    if (pin.SelectedIndex < 0)
+                        pin.SelectedIndex = 0;
+                    pin.IsEnabled = item.IsWidgetVisible;
+                }
+            }
+            finally
+            {
+                _suppressProviderToggleEvents = false;
+            }
+        }
+
+        private void BuildTaskbarPlacementOptions()
+        {
+            _suppressTaskbarPlacementEvents = true;
+            try
+            {
+                TaskbarPlacementCombo.Items.Clear();
+                AddTaskbarPlacementOption(new("All screens", TaskbarPlacementMode.AllDisplays));
+
+                var seen = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+                if (TaskbarWindowTarget.TryFindAll(out var targets))
+                {
+                    foreach (var target in targets
+                        .OrderBy(target => target.DisplayNumber == 0 ? int.MaxValue : target.DisplayNumber)
+                        .ThenByDescending(target => target.IsPrimary))
+                    {
+                        if (!seen.Add(target.DisplayKey))
+                            continue;
+
+                        string screenName = target.DisplayNumber > 0
+                            ? $"Screen {target.DisplayNumber}"
+                            : "Detected screen";
+                        if (target.IsPrimary)
+                            screenName += " (primary)";
+                        AddTaskbarPlacementOption(new(
+                            screenName,
+                            TaskbarPlacementMode.SelectedDisplay,
+                            target.DisplayKey));
+                    }
+                }
+
+                string selectedKey = WidgetSettingsService.SelectedTaskbarDisplayKey;
+                if (WidgetSettingsService.CurrentTaskbarPlacement == TaskbarPlacementMode.SelectedDisplay
+                    && selectedKey.Length > 0
+                    && seen.Add(selectedKey))
+                {
+                    AddTaskbarPlacementOption(new(
+                        $"{selectedKey} (disconnected)",
+                        TaskbarPlacementMode.SelectedDisplay,
+                        selectedKey));
+                }
+
+                AddTaskbarPlacementOption(new("Adaptive (follow each agent)", TaskbarPlacementMode.Adaptive));
+
+                for (int i = 0; i < TaskbarPlacementCombo.Items.Count; i++)
+                {
+                    if (TaskbarPlacementCombo.Items[i] is not ComboBoxItem { Tag: TaskbarPlacementOption option })
+                        continue;
+                    if (option.Mode != WidgetSettingsService.CurrentTaskbarPlacement)
+                        continue;
+                    if (option.Mode == TaskbarPlacementMode.SelectedDisplay
+                        && !string.Equals(
+                            option.DisplayKey,
+                            selectedKey,
+                            System.StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    TaskbarPlacementCombo.SelectedIndex = i;
+                    break;
+                }
+            }
+            finally
+            {
+                _suppressTaskbarPlacementEvents = false;
+            }
+        }
+
+        private void BuildPinOptions()
+        {
+            _pinOptions.Clear();
+            _pinOptions.Add(new("Not pinned", false));
+
+            if (WidgetSettingsService.CurrentTaskbarPlacement != TaskbarPlacementMode.Adaptive)
+            {
+                _pinOptions.Add(new("Pinned", true, MatchesAnyDestination: true));
+                return;
+            }
+
+            if (!TaskbarWindowTarget.TryFindAll(out var targets))
+            {
+                _pinOptions.Add(new("Pinned", true, MatchesAnyDestination: true));
+                return;
+            }
+
+            var displays = targets
+                .GroupBy(target => target.DisplayKey, System.StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .OrderBy(target => target.DisplayNumber == 0 ? int.MaxValue : target.DisplayNumber)
+                .ThenByDescending(target => target.IsPrimary)
+                .ToList();
+            if (displays.Count < 2)
+            {
+                _pinOptions.Add(new("Pinned", true, MatchesAnyDestination: true));
+                return;
+
+            }
+
+            _pinOptions.Add(new("Pinned — follow app", true));
+            _pinOptions.Add(new(
+                "Pinned — all screens",
+                true,
+                WidgetSettingsService.AllDisplaysPinDestination));
+
+            foreach (var target in displays)
+            {
+                string screenName = target.DisplayNumber > 0
+                    ? $"Screen {target.DisplayNumber}"
+                    : "Detected screen";
+                if (target.IsPrimary)
+                    screenName += " (primary)";
+                _pinOptions.Add(new($"Pinned — {screenName}", true, target.DisplayKey));
+            }
+
+            var known = displays.Select(target => target.DisplayKey)
+                .ToHashSet(System.StringComparer.OrdinalIgnoreCase);
+            foreach (ProviderId provider in System.Enum.GetValues<ProviderId>())
+            {
+                string? saved = WidgetSettingsService.GetPinnedProviderDisplay(provider);
+                if (saved is not null && known.Add(saved))
+                    _pinOptions.Add(new($"Pinned — {saved} (disconnected)", true, saved));
+            }
+        }
+
+        private static bool PinOptionMatches(ProviderId provider, PinOption option)
+        {
+            bool pinned = WidgetSettingsService.IsProviderPinned(provider);
+            if (pinned != option.IsPinned)
+                return false;
+            if (!pinned)
+                return true;
+            if (option.MatchesAnyDestination)
+                return true;
+
+            string selected = WidgetSettingsService.GetPinnedProviderDisplay(provider) ?? string.Empty;
+            return string.Equals(selected, option.DisplayKey, System.StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void AddTaskbarPlacementOption(TaskbarPlacementOption option)
+            => TaskbarPlacementCombo.Items.Add(new ComboBoxItem
+            {
+                Content = option.Label,
+                Tag = option,
+            });
+
+        private void OnTaskbarPlacementChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_isInitializing || _suppressTaskbarPlacementEvents)
+                return;
+            if (TaskbarPlacementCombo.SelectedItem is not ComboBoxItem { Tag: TaskbarPlacementOption option })
+                return;
+
+            WidgetSettingsService.ApplyTaskbarPlacement(option.Mode, option.DisplayKey);
+            BuildPinOptions();
+            RefreshProviderPinOptions();
         }
 
         /// <summary>

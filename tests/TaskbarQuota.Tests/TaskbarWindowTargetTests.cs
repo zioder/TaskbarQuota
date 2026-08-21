@@ -42,4 +42,12 @@ public class TaskbarWindowTargetTests
         Assert.Equal("-1920_0_0_1080", displayKey);
         Assert.Equal("taskbar-widget-position--1920_0_0_1080.txt", TaskbarWindowTarget.BuildPositionFileName(displayKey));
     }
+
+    [Theory]
+    [InlineData("DISPLAY1", 1)]
+    [InlineData("display12", 12)]
+    [InlineData("-1920_0_0_1080", 0)]
+    [InlineData("", 0)]
+    public void TryGetDisplayNumber_reads_gdi_display_key(string displayKey, int expected)
+        => Assert.Equal(expected, TaskbarWindowTarget.TryGetDisplayNumber(displayKey));
 }

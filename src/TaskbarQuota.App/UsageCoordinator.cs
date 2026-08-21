@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using TaskbarQuota.ActiveApp;
+using TaskbarQuota.Interop;
 using TaskbarQuota.Usage;
 
 namespace TaskbarQuota
@@ -345,6 +346,8 @@ namespace TaskbarQuota
         public event Action<UsageResult>? StateChanged;
         public event Action<bool>? ActiveToolPresenceChanged;
         public event Action<ProviderId?>? ActiveProviderChanged;
+        /// <summary>Raised whenever foreground detection confidently associates a provider with a window.</summary>
+        public event Action<ProviderId, IntPtr>? ProviderWindowObserved;
 
         public void Start()
         {
@@ -1074,6 +1077,9 @@ namespace TaskbarQuota
                     _lastActive = p;
                     _activeProviderSource = detectedSource;
                     PromoteRecentProvider(p);
+                    var foregroundWindow = User32.GetForegroundWindow();
+                    if (foregroundWindow != IntPtr.Zero)
+                        ProviderWindowObserved?.Invoke(p, foregroundWindow);
                     if (previousActive != p)
                     {
                         ActiveProviderChanged?.Invoke(p);

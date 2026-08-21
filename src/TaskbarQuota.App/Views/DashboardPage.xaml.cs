@@ -11,6 +11,7 @@ using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Navigation;
 using TaskbarQuota.Usage;
 using TaskbarQuota.Services;
+using TaskbarQuota.Taskbar;
 using TaskbarQuota.ViewModels;
 using Windows.System;
 
@@ -25,6 +26,7 @@ namespace TaskbarQuota.Views
         private Storyboard? _selectionStoryboard;
         private TranslateTransform? _dashboardTranslate;
         private ProviderId? _lastAnimatedProvider;
+        private string _pinHereDisplayKey = string.Empty;
 
         public DashboardViewModel ViewModel { get; }
         public static DashboardViewModel? SharedViewModel { get; set; }
@@ -34,6 +36,16 @@ namespace TaskbarQuota.Views
 
         public static void SetSuppressWidgetEvents(bool suppress)
             => _suppressWidgetEvents = suppress;
+
+        /// <summary>
+        /// Gives the compact taskbar flyout a contextual pin target. The main dashboard leaves this empty,
+        /// so its pin action preserves the provider's configured destination.
+        /// </summary>
+        public void SetPinHereDisplay(string? displayKey)
+        {
+            _pinHereDisplayKey = displayKey?.Trim() ?? string.Empty;
+            UpdatePinPresentation(ViewModel.SelectedCard);
+        }
 
         public DashboardPage()
         {
@@ -46,10 +58,12 @@ namespace TaskbarQuota.Views
             ViewModel.SelectedCardChanged += OnSelectedCardChanged;
             ViewModel.DetailContentWidthChanged += OnDetailContentWidthChanged;
             DashboardContent.SizeChanged += DashboardContent_SizeChanged;
+            WidgetSettingsService.Changed += OnWidgetSettingsChanged;
             Loaded += (_, _) =>
             {
                 _lastAnimatedProvider = ViewModel.SelectedCard?.ProviderId;
                 ApplyLayoutState();
+                UpdatePinPresentation(ViewModel.SelectedCard);
                 QueueMeasuredHeightReport();
                 DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => _ = ViewModel.LoadAsync());
             };
@@ -59,6 +73,7 @@ namespace TaskbarQuota.Views
                 ViewModel.SelectedCardChanged -= OnSelectedCardChanged;
                 ViewModel.DetailContentWidthChanged -= OnDetailContentWidthChanged;
                 DashboardContent.SizeChanged -= DashboardContent_SizeChanged;
+                WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
                 if (_ownsViewModel)
                     ViewModel.Dispose();
             };
@@ -99,9 +114,13 @@ namespace TaskbarQuota.Views
         private void DashboardContent_SizeChanged(object sender, SizeChangedEventArgs e)
             => QueueMeasuredHeightReport();
 
+        private void OnWidgetSettingsChanged(object? sender, EventArgs e)
+            => DispatcherQueue.TryEnqueue(() => UpdatePinPresentation(ViewModel.SelectedCard));
+
         private void OnSelectedCardChanged(ProviderCardViewModel? card)
         {
             QueueMeasuredHeightReport();
+            UpdatePinPresentation(card);
             if (card is null)
                 return;
 
@@ -451,6 +470,7 @@ namespace TaskbarQuota.Views
             card.IsProviderPinned = WidgetSettingsService.IsProviderPinned(card.ProviderId);
             ProviderPinToggle.IsChecked = card.IsProviderPinned;
             ProviderPinToggle.IsEnabled = card.IsProviderPinToggleEnabled;
+            UpdatePinPresentation(card);
         }
 
         private void ProviderPinToggle_Click(object sender, RoutedEventArgs e)
@@ -475,14 +495,50 @@ namespace TaskbarQuota.Views
 
             PinBlockedTip.IsOpen = false;
 
+            if (wantPinned
+                && _pinHereDisplayKey.Length > 0
+                && WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Taskbar
+                && WidgetSettingsService.CurrentTaskbarPlacement == TaskbarPlacementMode.Adaptive)
+            {
+                WidgetSettingsService.SetPinnedProviderDisplay(card.ProviderId, _pinHereDisplayKey);
+            }
             WidgetSettingsService.SetProviderPinned(card.ProviderId, wantPinned);
             card.IsProviderPinned = WidgetSettingsService.IsProviderPinned(card.ProviderId);
             card.IsProviderWidgetVisible = WidgetSettingsService.IsProviderVisible(card.ProviderId);
-            ToolTipService.SetToolTip(toggle, DefaultPinTooltip);
+            UpdatePinPresentation(card);
         }
 
         private const string DefaultPinTooltip =
             "Keep this provider on the taskbar even when another tool is active";
+
+        private void UpdatePinPresentation(ProviderCardViewModel? card)
+        {
+            if (card is null || ProviderPinText is null || ProviderPinToggle is null)
+                return;
+
+            bool canPinHere = !card.IsProviderPinned
+                && _pinHereDisplayKey.Length > 0
+                && WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Taskbar
+                && WidgetSettingsService.CurrentTaskbarPlacement == TaskbarPlacementMode.Adaptive;
+            ProviderPinText.Text = canPinHere ? "Pin here" : card.ProviderPinToggleText;
+
+            string? fixedDisplay = WidgetSettingsService.GetPinnedProviderDisplay(card.ProviderId);
+            string tooltip = card.IsProviderPinned && fixedDisplay is not null
+                ? $"Pinned to {DisplayLabel(fixedDisplay)}"
+                : canPinHere
+                    ? $"Pin {card.DisplayName} to {DisplayLabel(_pinHereDisplayKey)}"
+                    : DefaultPinTooltip;
+            ToolTipService.SetToolTip(ProviderPinToggle, tooltip);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ProviderPinToggle, tooltip);
+        }
+
+        private static string DisplayLabel(string displayKey)
+        {
+            if (displayKey == WidgetSettingsService.AllDisplaysPinDestination)
+                return "all screens";
+            int number = TaskbarWindowTarget.TryGetDisplayNumber(displayKey);
+            return number > 0 ? $"Screen {number}" : "this screen";
+        }
 
         private void OpenSetupUrl_Click(object sender, RoutedEventArgs e)
         {
