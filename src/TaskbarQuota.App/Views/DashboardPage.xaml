@@ -553,7 +553,8 @@
                                           Click="ProviderPinToggle_Click">
                                 <StackPanel Orientation="Horizontal" Spacing="6">
                                     <FontIcon Glyph="&#xE718;" FontSize="14"/>
-                                    <TextBlock Text="{x:Bind ViewModel.SelectedCard.ProviderPinToggleText, Mode=OneWay}"/>
+                                    <TextBlock x:Name="ProviderPinText"
+                                               Text="{x:Bind ViewModel.SelectedCard.ProviderPinToggleText, Mode=OneWay}"/>
                                 </StackPanel>
                             </ToggleButton>
                             <ToggleButton x:Name="ProviderWidgetToggle"
