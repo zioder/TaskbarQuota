@@ -84,12 +84,100 @@ public class TaskbarContentRouterTests
         Assert.Equal([antigravity], routed.Items);
     }
 
+    [Fact]
+    public void Adaptive_fixed_pin_destination_overrides_the_apps_display()
+    {
+        ProviderId[] providers = [ProviderId.Codex];
+
+        var appDisplay = Route(
+            providers,
+            TaskbarPlacementMode.Adaptive,
+            string.Empty,
+            "DISPLAY1",
+            _ => "DISPLAY1",
+            _ => true,
+            _ => "DISPLAY2");
+        var pinDisplay = Route(
+            providers,
+            TaskbarPlacementMode.Adaptive,
+            string.Empty,
+            "DISPLAY2",
+            _ => "DISPLAY1",
+            _ => true,
+            _ => "DISPLAY2");
+
+        Assert.Empty(appDisplay);
+        Assert.Equal(providers, pinDisplay);
+    }
+
+    [Fact]
+    public void Adaptive_unpinned_provider_ignores_a_saved_pin_destination()
+    {
+        ProviderId[] providers = [ProviderId.Codex];
+
+        var routed = Route(
+            providers,
+            TaskbarPlacementMode.Adaptive,
+            string.Empty,
+            "DISPLAY1",
+            _ => "DISPLAY1",
+            _ => false,
+            _ => "DISPLAY2");
+
+        Assert.Equal(providers, routed);
+    }
+
+    [Fact]
+    public void Adaptive_disconnected_pin_destination_temporarily_falls_back_to_primary()
+    {
+        ProviderId[] providers = [ProviderId.Codex];
+
+        var routed = Route(
+            providers,
+            TaskbarPlacementMode.Adaptive,
+            string.Empty,
+            "DISPLAY1",
+            _ => "DISPLAY2",
+            _ => true,
+            _ => "DISPLAY9");
+
+        Assert.Equal(providers, routed);
+    }
+
+    [Fact]
+    public void Adaptive_all_screens_pin_routes_to_every_display()
+    {
+        ProviderId[] providers = [ProviderId.Codex];
+
+        var primary = Route(
+            providers,
+            TaskbarPlacementMode.Adaptive,
+            string.Empty,
+            "DISPLAY1",
+            _ => "DISPLAY1",
+            _ => true,
+            _ => WidgetSettingsService.AllDisplaysPinDestination);
+        var secondary = Route(
+            providers,
+            TaskbarPlacementMode.Adaptive,
+            string.Empty,
+            "DISPLAY2",
+            _ => "DISPLAY1",
+            _ => true,
+            _ => WidgetSettingsService.AllDisplaysPinDestination);
+
+        Assert.Equal(providers, primary);
+        Assert.Equal(providers, secondary);
+    }
+
     private static IReadOnlyList<ProviderId> Route(
         IReadOnlyList<ProviderId> providers,
         TaskbarPlacementMode mode,
         string selected,
         string target,
-        Func<ProviderId, string?> assignment)
+        Func<ProviderId, string?> assignment,
+        Func<ProviderId, bool>? isPinned = null,
+        Func<ProviderId, string?>? pinAssignment = null)
         => TaskbarContentRouter.ProvidersForDisplay(
             providers,
             mode,
@@ -97,5 +185,7 @@ public class TaskbarContentRouterTests
             target,
             "DISPLAY1",
             Displays,
-            assignment);
+            assignment,
+            isPinned ?? (_ => false),
+            pinAssignment ?? (_ => null));
 }

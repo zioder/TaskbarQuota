@@ -46,6 +46,7 @@ namespace TaskbarQuota.Taskbar
         private const int MaxTopologyRecoveryAttempts = 12;
         private static readonly TopologyStabilityTracker TopologyStability = new();
         private static readonly Dictionary<IntPtr, int> MissingTaskbarObservations = new();
+        private static readonly AdaptiveDisplayProviderState AdaptiveDisplayProviders = new();
         private static ProviderId? _lastLoggedWidgetApplyProvider;
         private static WidgetSurfaceMode _activeSurface = WidgetSurfaceMode.Taskbar;
         // Foreground hook: fires the instant Windows switches windows so the focus-follows-provider
@@ -525,15 +526,42 @@ namespace TaskbarQuota.Taskbar
                 .Select(candidate => candidate.DisplayKey)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             string primary = PrimaryWidget()?.DisplayKey ?? widget.DisplayKey;
+            var mode = WidgetSettingsService.CurrentTaskbarPlacement;
+            if (mode == TaskbarPlacementMode.Adaptive
+                && AdaptiveProviderForDisplay(widget.DisplayKey) is { } displayActive
+                && WidgetSettingsService.IsProviderVisible(displayActive))
+            {
+                providers = new[] { displayActive }
+                    .Concat(providers)
+                    .Distinct()
+                    .ToArray();
+            }
+
             return TaskbarContentRouter.ProvidersForDisplay(
                 providers,
-                WidgetSettingsService.CurrentTaskbarPlacement,
+                mode,
                 WidgetSettingsService.SelectedTaskbarDisplayKey,
                 widget.DisplayKey,
                 primary,
                 available,
-                WidgetSettingsService.GetAdaptiveProviderDisplay);
+                WidgetSettingsService.GetAdaptiveProviderDisplay,
+                WidgetSettingsService.IsProviderPinned,
+                WidgetSettingsService.GetPinnedProviderDisplay);
         }
+
+        private static ProviderId? ActiveProviderForWidget(TaskBarWidget widget, ProviderId? globalActive)
+            => WidgetSettingsService.CurrentTaskbarPlacement == TaskbarPlacementMode.Adaptive
+                ? AdaptiveProviderForDisplay(widget.DisplayKey)
+                : globalActive;
+
+        private static ProviderId? AdaptiveProviderForDisplay(string displayKey)
+            => AdaptiveDisplayProviders.GetProvider(
+                displayKey,
+                hwnd => User32.IsWindow(hwnd)
+                    && string.Equals(
+                        TaskbarWindowTarget.GetDisplayKeyForWindow(hwnd),
+                        displayKey,
+                        StringComparison.OrdinalIgnoreCase));
 
         internal static bool ShouldRemoveMissingTaskbar(int consecutiveMisses, bool hostAlive)
             => !hostAlive || consecutiveMisses >= 2;
@@ -681,7 +709,7 @@ namespace TaskbarQuota.Taskbar
             // back in either — the set below runs first on show.
             if (providers.Count == 0)
             {
-                widget.SetDisplayProviders(Array.Empty<ProviderId>(), coordinator.ActiveProvider);
+                widget.SetDisplayProviders(Array.Empty<ProviderId>(), ActiveProviderForWidget(widget, coordinator.ActiveProvider));
                 if (widget.HasVisibleActivity)
                 {
                     widget.SetVisible(true);
@@ -692,7 +720,7 @@ namespace TaskbarQuota.Taskbar
                 return;
             }
 
-            widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
+            widget.SetDisplayProviders(providers, ActiveProviderForWidget(widget, coordinator.ActiveProvider));
             widget.SetVisible(true);
 
             bool needsFetch = false;
@@ -743,7 +771,11 @@ namespace TaskbarQuota.Taskbar
         private static void RefreshPinnedTiles()
         {
             var coordinator = UsageCoordinator.Instance;
-            foreach (var provider in coordinator.WidgetDisplayProviders)
+            IEnumerable<ProviderId> providers = coordinator.WidgetDisplayProviders;
+            if (WidgetSettingsService.CurrentTaskbarPlacement == TaskbarPlacementMode.Adaptive)
+                providers = providers.Concat(AdaptiveDisplayProviders.Providers).Distinct();
+
+            foreach (var provider in providers)
             {
                 if (provider != coordinator.ActiveProvider)
                     _ = coordinator.RefreshWidgetProviderAsync(provider);
@@ -897,7 +929,7 @@ namespace TaskbarQuota.Taskbar
                 // provider return cannot reveal stale tiles.
                 if (providers.Count == 0)
                 {
-                    widget.SetDisplayProviders(Array.Empty<ProviderId>(), coordinator.ActiveProvider);
+                    widget.SetDisplayProviders(Array.Empty<ProviderId>(), ActiveProviderForWidget(widget, coordinator.ActiveProvider));
                     if (widget.HasVisibleActivity)
                     {
                         widget.SetVisible(true);
@@ -908,7 +940,7 @@ namespace TaskbarQuota.Taskbar
                     continue;
                 }
 
-                widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
+                widget.SetDisplayProviders(providers, ActiveProviderForWidget(widget, coordinator.ActiveProvider));
                 widget.SetVisible(true);
                 if (!isDisplayedOnWidget)
                     continue;
@@ -959,7 +991,7 @@ namespace TaskbarQuota.Taskbar
             if (displayKey.Length == 0)
                 return;
 
-            _dispatcher?.TryEnqueue(() => RecordAdaptiveProviderDisplay(provider, displayKey));
+            _dispatcher?.TryEnqueue(() => RecordAdaptiveProviderDisplay(provider, displayKey, hwnd));
         }
 
         private static void OnWindowMoveSizeEnded(IntPtr hwnd)
@@ -971,15 +1003,18 @@ namespace TaskbarQuota.Taskbar
 
             string displayKey = TaskbarWindowTarget.GetDisplayKeyForWindow(hwnd);
             if (displayKey.Length != 0)
-                RecordAdaptiveProviderDisplay(provider, displayKey);
+                RecordAdaptiveProviderDisplay(provider, displayKey, hwnd);
         }
 
-        private static void RecordAdaptiveProviderDisplay(ProviderId provider, string displayKey)
+        private static void RecordAdaptiveProviderDisplay(ProviderId provider, string displayKey, IntPtr hwnd)
         {
-            if (!WidgetSettingsService.SetAdaptiveProviderDisplay(provider, displayKey))
+            bool activeChanged = AdaptiveDisplayProviders.Observe(provider, displayKey, hwnd);
+            bool destinationChanged = WidgetSettingsService.SetAdaptiveProviderDisplay(provider, displayKey);
+            if (!activeChanged && !destinationChanged)
                 return;
 
-            Log.Information($"Adaptive placement: provider={provider}, display={displayKey}");
+            if (destinationChanged)
+                Log.Information($"Adaptive placement: provider={provider}, display={displayKey}");
             if (!IsFloatingSurface
                 && WidgetSettingsService.CurrentTaskbarPlacement == TaskbarPlacementMode.Adaptive)
             {
@@ -1038,6 +1073,7 @@ namespace TaskbarQuota.Taskbar
             _topologyRecoveryReason = string.Empty;
             TopologyStability.Reset();
             MissingTaskbarObservations.Clear();
+            AdaptiveDisplayProviders.Clear();
             _activityTimer?.Stop();
             _activityTimer = null;
             _activityCts?.Cancel();

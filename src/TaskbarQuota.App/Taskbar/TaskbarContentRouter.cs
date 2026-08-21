@@ -16,7 +16,9 @@ internal static class TaskbarContentRouter
         string targetDisplayKey,
         string primaryDisplayKey,
         IReadOnlySet<string> availableDisplayKeys,
-        Func<ProviderId, string?> adaptiveDisplayForProvider)
+        Func<ProviderId, string?> adaptiveDisplayForProvider,
+        Func<ProviderId, bool> isPinned,
+        Func<ProviderId, string?> pinnedDisplayForProvider)
         => providers
             .Where(provider => IsRoutedToDisplay(
                 provider,
@@ -25,7 +27,9 @@ internal static class TaskbarContentRouter
                 targetDisplayKey,
                 primaryDisplayKey,
                 availableDisplayKeys,
-                adaptiveDisplayForProvider))
+                adaptiveDisplayForProvider,
+                isPinned,
+                pinnedDisplayForProvider))
             .ToArray();
 
     public static AgentActivitySnapshot ActivityForDisplay(
@@ -70,14 +74,32 @@ internal static class TaskbarContentRouter
         string targetDisplayKey,
         string primaryDisplayKey,
         IReadOnlySet<string> availableDisplayKeys,
-        Func<ProviderId, string?> adaptiveDisplayForProvider)
+        Func<ProviderId, string?> adaptiveDisplayForProvider,
+        Func<ProviderId, bool>? isPinned = null,
+        Func<ProviderId, string?>? pinnedDisplayForProvider = null)
     {
         if (mode == TaskbarPlacementMode.AllDisplays)
             return true;
 
-        string destination = mode == TaskbarPlacementMode.SelectedDisplay
-            ? selectedDisplayKey
-            : adaptiveDisplayForProvider(provider) ?? string.Empty;
+        string destination;
+        if (mode == TaskbarPlacementMode.SelectedDisplay)
+        {
+            destination = selectedDisplayKey;
+        }
+        else
+        {
+            string? pinnedDestination = isPinned?.Invoke(provider) == true
+                ? pinnedDisplayForProvider?.Invoke(provider)
+                : null;
+            if (string.Equals(
+                pinnedDestination,
+                WidgetSettingsService.AllDisplaysPinDestination,
+                StringComparison.Ordinal))
+            {
+                return true;
+            }
+            destination = pinnedDestination ?? adaptiveDisplayForProvider(provider) ?? string.Empty;
+        }
 
         // A disconnected/unknown selection must not make content disappear. It temporarily falls back
         // to the primary taskbar while retaining the persisted destination for when that display returns.
