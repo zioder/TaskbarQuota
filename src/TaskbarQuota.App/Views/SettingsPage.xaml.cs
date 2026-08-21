@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -7,6 +8,7 @@ using Microsoft.UI.Xaml.Media;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Helpers;
 using TaskbarQuota.Services;
+using TaskbarQuota.Taskbar;
 using TaskbarQuota.Usage;
 using TaskbarQuota.ViewModels;
 
@@ -18,9 +20,15 @@ namespace TaskbarQuota.Views
         private bool _isInitializing;
         // Suppresses the Toggled handlers while a row's toggles are synced programmatically.
         private bool _suppressProviderToggleEvents;
+        private bool _suppressTaskbarPlacementEvents;
         private Slider? _floatingOpacitySlider;
         // Per-provider toggles, so changing one updates only its own row instead of rebuilding the list.
         private readonly Dictionary<ProviderId, ProviderToggleRow> _providerRows = new();
+
+        private sealed record TaskbarPlacementOption(
+            string Label,
+            TaskbarPlacementMode Mode,
+            string DisplayKey = "");
 
         private sealed class ProviderToggleRow
         {
@@ -41,11 +49,13 @@ namespace TaskbarQuota.Views
                 _ => 0,
             };
             WidgetSurfaceCombo.SelectedIndex = WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Floating ? 1 : 0;
+            BuildTaskbarPlacementOptions();
             int opacityPercent = (int)System.Math.Round(WidgetSettingsService.FloatingOpacity * 100);
             if (_floatingOpacitySlider is { } slider)
                 slider.Value = opacityPercent;
             FloatingOpacityLabel.Text = $"{opacityPercent}%";
             FloatingOpacityCard.IsEnabled = WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Floating;
+            TaskbarPlacementCard.IsEnabled = WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Taskbar;
             WidgetModeCombo.SelectedIndex = WidgetSettingsService.Current switch
             {
                 WidgetDisplayMode.PercentagesOnly => 1,
@@ -66,6 +76,7 @@ namespace TaskbarQuota.Views
                     $"Settings page loaded (surface={WidgetSettingsService.CurrentSurface}, layout={WidgetSettingsService.Current})");
                 ViewModel.ReloadProviders();
                 RebuildProviderSettings();
+                BuildTaskbarPlacementOptions();
             };
             _isInitializing = false;
         }
@@ -265,7 +276,93 @@ namespace TaskbarQuota.Views
                     : WidgetSurfaceMode.Taskbar;
                 WidgetSettingsService.ApplySurface(mode);
                 FloatingOpacityCard.IsEnabled = mode == WidgetSurfaceMode.Floating;
+                TaskbarPlacementCard.IsEnabled = mode == WidgetSurfaceMode.Taskbar;
             }
+        }
+
+        private void BuildTaskbarPlacementOptions()
+        {
+            _suppressTaskbarPlacementEvents = true;
+            try
+            {
+                TaskbarPlacementCombo.Items.Clear();
+                AddTaskbarPlacementOption(new("All screens", TaskbarPlacementMode.AllDisplays));
+
+                var seen = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+                if (TaskbarWindowTarget.TryFindAll(out var targets))
+                {
+                    foreach (var target in targets
+                        .OrderBy(target => target.DisplayNumber == 0 ? int.MaxValue : target.DisplayNumber)
+                        .ThenByDescending(target => target.IsPrimary))
+                    {
+                        if (!seen.Add(target.DisplayKey))
+                            continue;
+
+                        string screenName = target.DisplayNumber > 0
+                            ? $"Screen {target.DisplayNumber}"
+                            : "Detected screen";
+                        if (target.IsPrimary)
+                            screenName += " (primary)";
+                        AddTaskbarPlacementOption(new(
+                            screenName,
+                            TaskbarPlacementMode.SelectedDisplay,
+                            target.DisplayKey));
+                    }
+                }
+
+                string selectedKey = WidgetSettingsService.SelectedTaskbarDisplayKey;
+                if (WidgetSettingsService.CurrentTaskbarPlacement == TaskbarPlacementMode.SelectedDisplay
+                    && selectedKey.Length > 0
+                    && seen.Add(selectedKey))
+                {
+                    AddTaskbarPlacementOption(new(
+                        $"{selectedKey} (disconnected)",
+                        TaskbarPlacementMode.SelectedDisplay,
+                        selectedKey));
+                }
+
+                AddTaskbarPlacementOption(new("Adaptive (follow each agent)", TaskbarPlacementMode.Adaptive));
+
+                for (int i = 0; i < TaskbarPlacementCombo.Items.Count; i++)
+                {
+                    if (TaskbarPlacementCombo.Items[i] is not ComboBoxItem { Tag: TaskbarPlacementOption option })
+                        continue;
+                    if (option.Mode != WidgetSettingsService.CurrentTaskbarPlacement)
+                        continue;
+                    if (option.Mode == TaskbarPlacementMode.SelectedDisplay
+                        && !string.Equals(
+                            option.DisplayKey,
+                            selectedKey,
+                            System.StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    TaskbarPlacementCombo.SelectedIndex = i;
+                    break;
+                }
+            }
+            finally
+            {
+                _suppressTaskbarPlacementEvents = false;
+            }
+        }
+
+        private void AddTaskbarPlacementOption(TaskbarPlacementOption option)
+            => TaskbarPlacementCombo.Items.Add(new ComboBoxItem
+            {
+                Content = option.Label,
+                Tag = option,
+            });
+
+        private void OnTaskbarPlacementChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_isInitializing || _suppressTaskbarPlacementEvents)
+                return;
+            if (TaskbarPlacementCombo.SelectedItem is not ComboBoxItem { Tag: TaskbarPlacementOption option })
+                return;
+
+            WidgetSettingsService.ApplyTaskbarPlacement(option.Mode, option.DisplayKey);
         }
 
         /// <summary>

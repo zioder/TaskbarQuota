@@ -88,6 +88,19 @@
                 </ComboBox>
             </tk:SettingsCard>
 
+            <tk:SettingsCard x:Name="TaskbarPlacementCard"
+                             Header="Taskbar screens"
+                             Description="Show the same usage on every taskbar, choose one screen, or place each provider on the screen where its window was last used.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE7F4;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <ComboBox x:Name="TaskbarPlacementCombo"
+                          SelectionChanged="OnTaskbarPlacementChanged"
+                          MinWidth="200"
+                          AutomationProperties.Name="Taskbar screens"
+                          AutomationProperties.AutomationId="TaskbarPlacementCombo"/>
+            </tk:SettingsCard>
+
             <tk:SettingsCard x:Name="FloatingOpacityCard"
                              Header="Floating acrylic strength"
                              Description="How opaque the native Acrylic tint is (lower values reveal more of the blurred desktop behind it).">

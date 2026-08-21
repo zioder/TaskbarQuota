@@ -31,6 +31,14 @@ public enum WidgetSurfaceMode
     Floating = 1,
 }
 
+/// <summary>How taskbar-hosted usage is distributed across available displays.</summary>
+public enum TaskbarPlacementMode
+{
+    AllDisplays = 0,
+    SelectedDisplay = 1,
+    Adaptive = 2,
+}
+
 public readonly record struct WidgetRowOption(string Id, string Label);
 
 public static class WidgetSettingsService
@@ -54,6 +62,15 @@ public static class WidgetSettingsService
 
     private static string FloatingOpacityPath =>
         Path.Combine(AppStorage.AppDataDirectory, "floating-opacity.txt");
+
+    private static string TaskbarPlacementModePath =>
+        Path.Combine(AppStorage.AppDataDirectory, "taskbar-placement-mode.txt");
+
+    private static string SelectedTaskbarDisplayPath =>
+        Path.Combine(AppStorage.AppDataDirectory, "taskbar-placement-display.txt");
+
+    private static string AdaptiveProviderDisplaysPath =>
+        Path.Combine(AppStorage.AppDataDirectory, "adaptive-provider-displays.json");
 
     private static readonly string PercentageDisplayModePath =
         Path.Combine(AppStorage.AppDataDirectory, "percentage-display-mode.txt");
@@ -85,6 +102,7 @@ public static class WidgetSettingsService
     private static readonly Dictionary<string, bool> ProviderVisibility = LoadProviderVisibility();
     private static readonly Dictionary<string, bool> DashboardProviderVisibility = LoadDashboardProviderVisibility();
     private static readonly Dictionary<string, bool> ProviderPins = LoadProviderPins();
+    private static readonly Dictionary<string, string> AdaptiveProviderDisplays = LoadAdaptiveProviderDisplays();
 
     /// <summary>Minimum material strength for the floating usage window (35%).</summary>
     public const double FloatingOpacityMin = 0.35;
@@ -95,6 +113,8 @@ public static class WidgetSettingsService
 
     public static WidgetDisplayMode Current { get; private set; } = LoadWidgetDisplayMode();
     public static WidgetSurfaceMode CurrentSurface { get; private set; } = LoadWidgetSurfaceMode();
+    public static TaskbarPlacementMode CurrentTaskbarPlacement { get; private set; } = LoadTaskbarPlacementMode();
+    public static string SelectedTaskbarDisplayKey { get; private set; } = LoadSelectedTaskbarDisplayKey();
     /// <summary>Floating window Acrylic strength in the range [<see cref="FloatingOpacityMin"/>, <see cref="FloatingOpacityMax"/>].</summary>
     public static double FloatingOpacity { get; private set; } = LoadFloatingOpacity();
     public static PercentageDisplayMode CurrentPercentageMode { get; private set; } = LoadPercentageDisplayMode();
@@ -118,6 +138,27 @@ public static class WidgetSettingsService
     {
         CurrentSurface = LoadWidgetSurfaceMode();
         FloatingOpacity = LoadFloatingOpacity();
+    }
+
+    internal static void ReloadTaskbarPlacementForTesting()
+    {
+        CurrentTaskbarPlacement = LoadTaskbarPlacementMode();
+        SelectedTaskbarDisplayKey = LoadSelectedTaskbarDisplayKey();
+        AdaptiveProviderDisplays.Clear();
+        foreach (var pair in LoadAdaptiveProviderDisplays())
+            AdaptiveProviderDisplays[pair.Key] = pair.Value;
+    }
+
+    internal static void RestoreTaskbarPlacementForTesting(
+        TaskbarPlacementMode mode,
+        string selectedDisplayKey,
+        IReadOnlyDictionary<string, string> adaptiveDisplays)
+    {
+        CurrentTaskbarPlacement = mode;
+        SelectedTaskbarDisplayKey = selectedDisplayKey;
+        AdaptiveProviderDisplays.Clear();
+        foreach (var pair in adaptiveDisplays)
+            AdaptiveProviderDisplays[pair.Key] = pair.Value;
     }
 
     internal static void RestoreSurfaceSettingsForTesting(
@@ -147,6 +188,45 @@ public static class WidgetSettingsService
         // TaskBarManager enforces the taskbar budget after a current widget measurement exists.
         // Doing it here would use the span cached before floating mode and could remove valid pins.
         Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ApplyTaskbarPlacement(TaskbarPlacementMode mode, string? selectedDisplayKey = null)
+    {
+        string normalizedKey = mode == TaskbarPlacementMode.SelectedDisplay
+            ? selectedDisplayKey?.Trim() ?? string.Empty
+            : string.Empty;
+        if (CurrentTaskbarPlacement == mode
+            && string.Equals(SelectedTaskbarDisplayKey, normalizedKey, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        CurrentTaskbarPlacement = mode;
+        SelectedTaskbarDisplayKey = normalizedKey;
+        Save(TaskbarPlacementModePath, (int)mode);
+        SaveText(SelectedTaskbarDisplayPath, normalizedKey);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static string? GetAdaptiveProviderDisplay(ProviderId provider)
+        => AdaptiveProviderDisplays.TryGetValue(provider.ToString(), out string? displayKey)
+            && !string.IsNullOrWhiteSpace(displayKey)
+                ? displayKey
+                : null;
+
+    /// <summary>Remembers the last display on which a provider window was observed.</summary>
+    internal static bool SetAdaptiveProviderDisplay(ProviderId provider, string displayKey)
+    {
+        displayKey = displayKey.Trim();
+        if (displayKey.Length == 0
+            || string.Equals(GetAdaptiveProviderDisplay(provider), displayKey, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        AdaptiveProviderDisplays[provider.ToString()] = displayKey;
+        SaveAdaptiveProviderDisplays();
+        return true;
     }
 
     /// <summary>
@@ -578,6 +658,39 @@ public static class WidgetSettingsService
         }
     }
 
+    private static TaskbarPlacementMode LoadTaskbarPlacementMode()
+    {
+        try
+        {
+            if (!File.Exists(TaskbarPlacementModePath))
+                return TaskbarPlacementMode.AllDisplays;
+
+            string raw = File.ReadAllText(TaskbarPlacementModePath);
+            return int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value)
+                && Enum.IsDefined(typeof(TaskbarPlacementMode), value)
+                ? (TaskbarPlacementMode)value
+                : TaskbarPlacementMode.AllDisplays;
+        }
+        catch
+        {
+            return TaskbarPlacementMode.AllDisplays;
+        }
+    }
+
+    private static string LoadSelectedTaskbarDisplayKey()
+    {
+        try
+        {
+            return File.Exists(SelectedTaskbarDisplayPath)
+                ? File.ReadAllText(SelectedTaskbarDisplayPath).Trim()
+                : string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
     private static double LoadFloatingOpacity()
     {
         try
@@ -636,6 +749,53 @@ public static class WidgetSettingsService
         catch
         {
             // Best effort. The widget can still use the in-memory value for this run.
+        }
+    }
+
+    private static void SaveText(string path, string value)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, value);
+        }
+        catch
+        {
+            // Best effort. The widget can still use the in-memory value for this run.
+        }
+    }
+
+    private static Dictionary<string, string> LoadAdaptiveProviderDisplays()
+    {
+        try
+        {
+            if (!File.Exists(AdaptiveProviderDisplaysPath))
+                return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            var loaded = JsonSerializer.Deserialize<Dictionary<string, string>>(
+                File.ReadAllText(AdaptiveProviderDisplaysPath));
+            return loaded is null
+                ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, string>(loaded, StringComparer.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private static void SaveAdaptiveProviderDisplays()
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(AdaptiveProviderDisplaysPath)!);
+            File.WriteAllText(
+                AdaptiveProviderDisplaysPath,
+                JsonSerializer.Serialize(AdaptiveProviderDisplays, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch
+        {
+            // Best effort. Adaptive routing still works for the current process.
         }
     }
 

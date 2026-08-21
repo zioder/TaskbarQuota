@@ -9,6 +9,7 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media.Imaging;
 using TaskbarQuota.Diagnostics;
+using TaskbarQuota.Interop;
 using TaskbarQuota.Usage;
 using TaskbarQuota.AgentActivity;
 
@@ -31,17 +32,26 @@ namespace TaskbarQuota.Taskbar
         private static DispatcherQueue? _dispatcher;
         private static Action? _showMainWindow;
         private static DispatcherTimer? _widgetHealthTimer;
+        private static DispatcherTimer? _topologyRecoveryTimer;
         private static DispatcherTimer? _activityTimer;
         private static CancellationTokenSource? _activityCts;
         private static readonly TimeSpan ActiveActivityInterval = TimeSpan.FromSeconds(2);
         private static readonly TimeSpan IdleActivityInterval = TimeSpan.FromSeconds(10);
         private static bool _initialized;
         private static bool _isReconcilingWidgets;
+        private static bool _topologyRecoveryPending;
+        private static bool _topologyForceReset;
+        private static int _topologyRecoveryAttempts;
+        private static string _topologyRecoveryReason = string.Empty;
+        private const int MaxTopologyRecoveryAttempts = 12;
+        private static readonly TopologyStabilityTracker TopologyStability = new();
+        private static readonly Dictionary<IntPtr, int> MissingTaskbarObservations = new();
         private static ProviderId? _lastLoggedWidgetApplyProvider;
         private static WidgetSurfaceMode _activeSurface = WidgetSurfaceMode.Taskbar;
         // Foreground hook: fires the instant Windows switches windows so the focus-follows-provider
         // widget reacts on the switch itself instead of waiting for the next 500 ms detect tick.
         private static ActiveApp.ForegroundWatcher? _foregroundWatcher;
+        private static SessionTopologyWatcher? _sessionTopologyWatcher;
 
         private static bool IsFloatingSurface => _activeSurface == WidgetSurfaceMode.Floating;
 
@@ -58,6 +68,7 @@ namespace TaskbarQuota.Taskbar
                 UsageCoordinator.Instance.StateChanged += OnStateChanged;
                 UsageCoordinator.Instance.ActiveProviderChanged += OnActiveProviderChanged;
                 UsageCoordinator.Instance.ActiveToolPresenceChanged += OnActiveToolPresenceChanged;
+                UsageCoordinator.Instance.ProviderWindowObserved += OnProviderWindowObserved;
                 AgentActivityService.Instance.Changed += OnActivityChanged;
                 UsageCoordinator.Instance.ProviderForegroundChanged += OnProviderForegroundChanged;
                 // Lets the coordinator's focus tracker treat our flyout and an active widget drag as neutral
@@ -73,7 +84,24 @@ namespace TaskbarQuota.Taskbar
                 // that thread's message pump, which this one has and background threads do not.
                 _foregroundWatcher = new ActiveApp.ForegroundWatcher();
                 _foregroundWatcher.ForegroundChanged += OnForegroundChanged;
+                _foregroundWatcher.WindowMoveSizeEnded += OnWindowMoveSizeEnded;
                 _foregroundWatcher.Start();
+                try
+                {
+                    _sessionTopologyWatcher = new SessionTopologyWatcher();
+                    _sessionTopologyWatcher.Changed += OnTopologyChanged;
+                    _sessionTopologyWatcher.Start();
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, "Session/display recovery watcher could not be started; periodic health recovery remains active");
+                    if (_sessionTopologyWatcher is { } topologyWatcher)
+                    {
+                        topologyWatcher.Changed -= OnTopologyChanged;
+                        topologyWatcher.Dispose();
+                        _sessionTopologyWatcher = null;
+                    }
+                }
                 _initialized = true;
             }
 
@@ -96,7 +124,15 @@ namespace TaskbarQuota.Taskbar
             {
                 DisposeFloatingWindow();
                 _activeSurface = WidgetSurfaceMode.Taskbar;
-                EnsureWidgets();
+                if (_topologyRecoveryPending)
+                {
+                    if (TryRecoverTaskbarTopology())
+                        CompleteTopologyRecovery();
+                }
+                else
+                {
+                    EnsureWidgets();
+                }
                 SyncWidgetState();
                 ScheduleFloatingPrewarm();
             }
@@ -388,19 +424,38 @@ namespace TaskbarQuota.Taskbar
 
                 foreach (var pair in Widgets.ToArray())
                 {
-                    if (targetsByHandle.TryGetValue(pair.Key, out var target)
-                        && pair.Value.IsAlive
-                        // A window whose host content was never built renders nothing and cannot recover on
-                        // its own — it is dead in every way that matters to the user, so recreate it.
-                        && pair.Value.IsHostContentReady
-                        && pair.Value.IsDpiCurrent
-                        && pair.Value.MatchesTarget(target))
+                    string? recreateReason = null;
+                    if (!pair.Value.IsAlive)
+                        recreateReason = "host window unavailable";
+                    else if (!targetsByHandle.TryGetValue(pair.Key, out var target))
                     {
+                        int misses = MissingTaskbarObservations.TryGetValue(pair.Key, out int previous)
+                            ? previous + 1
+                            : 1;
+                        MissingTaskbarObservations[pair.Key] = misses;
+                        if (ShouldRemoveMissingTaskbar(misses, hostAlive: true))
+                            recreateReason = $"taskbar absent for {misses} consecutive scans";
+                    }
+                    else if (!pair.Value.IsHostContentReady)
+                        recreateReason = "XAML host content unavailable";
+                    else if (pair.Value.IsConfirmedTargetMismatch(target))
+                        recreateReason = $"display identity changed ({pair.Value.DisplayKey}->{target.DisplayKey})";
+
+                    if (targetsByHandle.ContainsKey(pair.Key))
+                        MissingTaskbarObservations.Remove(pair.Key);
+
+                    if (recreateReason is null)
+                    {
+                        // A stable host can absorb per-monitor DPI changes in place. Recreating the complete
+                        // XAML island on one anomalous reading caused mixed-DPI systems to enter a slow
+                        // destroy/create loop whenever Explorer was rebuilding its display topology.
+                        pair.Value.RefreshDpiFromWindows();
                         continue;
                     }
 
                     Widgets.Remove(pair.Key);
-                    Log.Warning($"Taskbar widget, target taskbar, or DPI changed; recreating taskbar=0x{pair.Key.ToInt64():X}");
+                    MissingTaskbarObservations.Remove(pair.Key);
+                    Log.Warning($"Taskbar widget recreating: taskbar=0x{pair.Key.ToInt64():X}, reason={recreateReason}");
                     try { pair.Value.Dispose(); }
                     catch (Exception ex) { Log.Warning(ex, "Failed to dispose missing taskbar widget"); }
                 }
@@ -410,6 +465,9 @@ namespace TaskbarQuota.Taskbar
                     if (!Widgets.ContainsKey(target.Handle))
                         CreateWidget(target);
                 }
+
+                foreach (var handle in MissingTaskbarObservations.Keys.Where(handle => !Widgets.ContainsKey(handle)).ToArray())
+                    MissingTaskbarObservations.Remove(handle);
             }
             finally
             {
@@ -458,6 +516,143 @@ namespace TaskbarQuota.Taskbar
             => Widgets.Values.FirstOrDefault(widget => widget.IsAlive && widget.IsPrimaryTaskbar)
                 ?? Widgets.Values.FirstOrDefault(widget => widget.IsAlive);
 
+        private static IReadOnlyList<ProviderId> ProvidersForWidget(
+            TaskBarWidget widget,
+            IReadOnlyList<ProviderId> providers)
+        {
+            var available = Widgets.Values
+                .Where(candidate => candidate.IsAlive)
+                .Select(candidate => candidate.DisplayKey)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            string primary = PrimaryWidget()?.DisplayKey ?? widget.DisplayKey;
+            return TaskbarContentRouter.ProvidersForDisplay(
+                providers,
+                WidgetSettingsService.CurrentTaskbarPlacement,
+                WidgetSettingsService.SelectedTaskbarDisplayKey,
+                widget.DisplayKey,
+                primary,
+                available,
+                WidgetSettingsService.GetAdaptiveProviderDisplay);
+        }
+
+        internal static bool ShouldRemoveMissingTaskbar(int consecutiveMisses, bool hostAlive)
+            => !hostAlive || consecutiveMisses >= 2;
+
+        private static void OnTopologyChanged(TopologyChange change)
+            => _dispatcher?.TryEnqueue(() => ScheduleTopologyRecovery(change));
+
+        private static void ScheduleTopologyRecovery(TopologyChange change)
+        {
+            _topologyRecoveryPending = true;
+            _topologyForceReset |= change.RequiresHostReset;
+            _topologyRecoveryAttempts = 0;
+            _topologyRecoveryReason = change.Reason;
+            TopologyStability.Reset();
+
+            _topologyRecoveryTimer ??= CreateTopologyRecoveryTimer();
+            ArmTopologyRecoveryTimer();
+            Log.Information($"Taskbar topology recovery scheduled: reason={change.Reason}, resetHosts={change.RequiresHostReset}");
+        }
+
+        private static DispatcherTimer CreateTopologyRecoveryTimer()
+        {
+            var timer = new DispatcherTimer();
+            timer.Tick += (_, _) =>
+            {
+                timer.Stop();
+                if (!_topologyRecoveryPending)
+                    return;
+
+                if (TryRecoverTaskbarTopology())
+                {
+                    CompleteTopologyRecovery();
+                    return;
+                }
+
+                _topologyRecoveryAttempts++;
+                if (_topologyRecoveryAttempts < MaxTopologyRecoveryAttempts)
+                    ArmTopologyRecoveryTimer();
+                else
+                    Log.Warning($"Taskbar topology did not stabilize after {_topologyRecoveryAttempts} attempts; health checks will continue recovery ({_topologyRecoveryReason})");
+            };
+            return timer;
+        }
+
+        private static void ArmTopologyRecoveryTimer()
+        {
+            if (_topologyRecoveryTimer is not { } timer)
+                return;
+
+            timer.Stop();
+            timer.Interval = SessionTopologyWatcher.RetryDelay(_topologyRecoveryAttempts);
+            timer.Start();
+        }
+
+        private static bool TryRecoverTaskbarTopology()
+        {
+            if (IsFloatingSurface)
+                return true;
+
+            if (!TaskbarWindowTarget.TryFindAll(out var targets) || targets.Count == 0)
+            {
+                TopologyStability.Reset();
+                return false;
+            }
+
+            string signature = string.Join(
+                "|",
+                targets.Select(target => $"{target.Handle.ToInt64():X}:{target.DisplayKey}:{target.IsPrimary}"));
+            if (!TopologyStability.Observe(signature))
+                return false;
+
+            if (_topologyForceReset)
+            {
+                Log.Information($"Rebuilding taskbar hosts after {_topologyRecoveryReason}");
+                DisposeAllTaskbarWidgets();
+                MissingTaskbarObservations.Clear();
+                _topologyForceReset = false;
+            }
+
+            EnsureWidgets();
+            SyncWidgetState();
+
+            return targets.All(target =>
+                Widgets.TryGetValue(target.Handle, out var widget)
+                && widget.IsAlive
+                && widget.IsHostContentReady
+                && string.Equals(widget.DisplayKey, target.DisplayKey, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static void CompleteTopologyRecovery()
+        {
+            _topologyRecoveryTimer?.Stop();
+            _topologyRecoveryPending = false;
+            _topologyForceReset = false;
+            _topologyRecoveryAttempts = 0;
+            TopologyStability.Reset();
+            Log.Information($"Taskbar topology recovery completed ({_topologyRecoveryReason})");
+            _topologyRecoveryReason = string.Empty;
+        }
+
+        private static AgentActivitySnapshot ActivityForWidget(
+            TaskBarWidget widget,
+            AgentActivitySnapshot snapshot)
+        {
+            var available = Widgets.Values
+                .Where(candidate => candidate.IsAlive)
+                .Select(candidate => candidate.DisplayKey)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            string primary = PrimaryWidget()?.DisplayKey ?? widget.DisplayKey;
+            return TaskbarContentRouter.ActivityForDisplay(
+                snapshot,
+                WidgetSettingsService.CurrentTaskbarPlacement,
+                WidgetSettingsService.SelectedTaskbarDisplayKey,
+                widget.DisplayKey,
+                primary,
+                available,
+                WidgetSettingsService.GetAdaptiveProviderDisplay);
+        }
+
         private static void SyncWidgetState()
         {
             if (IsFloatingSurface)
@@ -476,8 +671,8 @@ namespace TaskbarQuota.Taskbar
                 return;
 
             var coordinator = UsageCoordinator.Instance;
-            var providers = coordinator.WidgetDisplayProviders;
-            var activity = AgentActivityService.Instance.Snapshot;
+            var providers = ProvidersForWidget(widget, coordinator.WidgetDisplayProviders);
+            var activity = ActivityForWidget(widget, AgentActivityService.Instance.Snapshot);
 
             widget.SetActivitySnapshot(activity);
             // window over the notification area (#10). The tiles are deliberately left bound while it
@@ -488,7 +683,10 @@ namespace TaskbarQuota.Taskbar
             {
                 widget.SetDisplayProviders(Array.Empty<ProviderId>(), coordinator.ActiveProvider);
                 if (widget.HasVisibleActivity)
+                {
+                    widget.SetVisible(true);
                     widget.SetQuotaVisible(false);
+                }
                 else
                     widget.SetVisible(false);
                 return;
@@ -667,9 +865,9 @@ namespace TaskbarQuota.Taskbar
         private static void ApplyStateChanged(UsageResult result)
         {
             var coordinator = UsageCoordinator.Instance;
-            var providers = coordinator.WidgetDisplayProviders;
+            var allProviders = coordinator.WidgetDisplayProviders;
             var activity = AgentActivityService.Instance.Snapshot;
-            bool isDisplayed = providers.Contains(result.Id);
+            bool isDisplayed = allProviders.Contains(result.Id);
 
             if (IsFloatingSurface)
             {
@@ -688,16 +886,23 @@ namespace TaskbarQuota.Taskbar
                 if (!widget.IsAlive)
                     continue;
 
+                var providers = ProvidersForWidget(widget, allProviders);
+                var routedActivity = ActivityForWidget(widget, activity);
+                bool isDisplayedOnWidget = providers.Contains(result.Id);
+
                 // Reconcile the tile set first, so a provider that just became active already owns a slot
                 // before its result is routed. SetDisplayProviders is a cheap no-op when nothing changed.
-                widget.SetActivitySnapshot(activity);
+                widget.SetActivitySnapshot(routedActivity);
                 // As in SyncWidgetState, clear the quota slots before hiding the quota host so a later
                 // provider return cannot reveal stale tiles.
                 if (providers.Count == 0)
                 {
                     widget.SetDisplayProviders(Array.Empty<ProviderId>(), coordinator.ActiveProvider);
                     if (widget.HasVisibleActivity)
+                    {
+                        widget.SetVisible(true);
                         widget.SetQuotaVisible(false);
+                    }
                     else
                         widget.SetVisible(false);
                     continue;
@@ -705,7 +910,7 @@ namespace TaskbarQuota.Taskbar
 
                 widget.SetDisplayProviders(providers, coordinator.ActiveProvider);
                 widget.SetVisible(true);
-                if (!isDisplayed)
+                if (!isDisplayedOnWidget)
                     continue;
 
                 widget.ApplyResult(result);
@@ -745,8 +950,42 @@ namespace TaskbarQuota.Taskbar
         /// coordinator so it can re-detect whether a provider is in front without waiting for the
         /// next 500 ms tick — this is what makes "switch away" hide the widget right away.
         /// </summary>
-        private static void OnForegroundChanged()
+        private static void OnForegroundChanged(IntPtr _)
             => UsageCoordinator.Instance.NotifyForegroundChanged();
+
+        private static void OnProviderWindowObserved(ProviderId provider, IntPtr hwnd)
+        {
+            string displayKey = TaskbarWindowTarget.GetDisplayKeyForWindow(hwnd);
+            if (displayKey.Length == 0)
+                return;
+
+            _dispatcher?.TryEnqueue(() => RecordAdaptiveProviderDisplay(provider, displayKey));
+        }
+
+        private static void OnWindowMoveSizeEnded(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero || User32.GetForegroundWindow() != hwnd)
+                return;
+            if (UsageCoordinator.Instance.ActiveProvider is not { } provider)
+                return;
+
+            string displayKey = TaskbarWindowTarget.GetDisplayKeyForWindow(hwnd);
+            if (displayKey.Length != 0)
+                RecordAdaptiveProviderDisplay(provider, displayKey);
+        }
+
+        private static void RecordAdaptiveProviderDisplay(ProviderId provider, string displayKey)
+        {
+            if (!WidgetSettingsService.SetAdaptiveProviderDisplay(provider, displayKey))
+                return;
+
+            Log.Information($"Adaptive placement: provider={provider}, display={displayKey}");
+            if (!IsFloatingSurface
+                && WidgetSettingsService.CurrentTaskbarPlacement == TaskbarPlacementMode.Adaptive)
+            {
+                SyncWidgetState();
+            }
+        }
 
         private static void OnActiveToolPresenceChanged(bool isPresent)
             => _dispatcher?.TryEnqueue(() => ApplyActiveToolPresenceChanged(isPresent));
@@ -763,37 +1002,8 @@ namespace TaskbarQuota.Taskbar
             SyncWidgetState();
         }
 
-        private static void OnActivityChanged(AgentActivitySnapshot snapshot)
-            => _dispatcher?.TryEnqueue(() =>
-            {
-                if (IsFloatingSurface)
-                {
-                    SyncFloatingState();
-                    return;
-                }
-
-                foreach (var widget in Widgets.Values.ToArray())
-                {
-                    if (!widget.IsAlive)
-                        continue;
-
-                    widget.SetActivitySnapshot(snapshot);
-                    var providers = UsageCoordinator.Instance.WidgetDisplayProviders;
-                    if (providers.Count == 0)
-                    {
-                        widget.SetDisplayProviders(Array.Empty<ProviderId>(), UsageCoordinator.Instance.ActiveProvider);
-                        if (widget.HasVisibleActivity)
-                            widget.SetQuotaVisible(false);
-                        else
-                            widget.SetVisible(false);
-                    }
-                    else
-                    {
-                        widget.SetDisplayProviders(providers, UsageCoordinator.Instance.ActiveProvider);
-                        widget.SetVisible(true);
-                    }
-                }
-            });
+        private static void OnActivityChanged(AgentActivitySnapshot _)
+            => _dispatcher?.TryEnqueue(SyncWidgetState);
 
         private static void OnWidgetSettingsChanged(object? sender, EventArgs e)
         {
@@ -812,6 +1022,7 @@ namespace TaskbarQuota.Taskbar
             UsageCoordinator.Instance.StateChanged -= OnStateChanged;
             UsageCoordinator.Instance.ActiveProviderChanged -= OnActiveProviderChanged;
             UsageCoordinator.Instance.ActiveToolPresenceChanged -= OnActiveToolPresenceChanged;
+            UsageCoordinator.Instance.ProviderWindowObserved -= OnProviderWindowObserved;
             AgentActivityService.Instance.Changed -= OnActivityChanged;
             UsageCoordinator.Instance.ProviderForegroundChanged -= OnProviderForegroundChanged;
             UsageCoordinator.Instance.IsOwnUiEngaged = null;
@@ -819,6 +1030,14 @@ namespace TaskbarQuota.Taskbar
             _initialized = false;
             _widgetHealthTimer?.Stop();
             _widgetHealthTimer = null;
+            _topologyRecoveryTimer?.Stop();
+            _topologyRecoveryTimer = null;
+            _topologyRecoveryPending = false;
+            _topologyForceReset = false;
+            _topologyRecoveryAttempts = 0;
+            _topologyRecoveryReason = string.Empty;
+            TopologyStability.Reset();
+            MissingTaskbarObservations.Clear();
             _activityTimer?.Stop();
             _activityTimer = null;
             _activityCts?.Cancel();
@@ -827,8 +1046,15 @@ namespace TaskbarQuota.Taskbar
             if (_foregroundWatcher is { } watcher)
             {
                 watcher.ForegroundChanged -= OnForegroundChanged;
+                watcher.WindowMoveSizeEnded -= OnWindowMoveSizeEnded;
                 watcher.Dispose();
                 _foregroundWatcher = null;
+            }
+            if (_sessionTopologyWatcher is { } topologyWatcher)
+            {
+                topologyWatcher.Changed -= OnTopologyChanged;
+                topologyWatcher.Dispose();
+                _sessionTopologyWatcher = null;
             }
             if (_trayIcon != null) { _trayIcon.TryRemove(); _trayIcon.Dispose(); _trayIcon = null; }
             try { _flyout?.Close(); } catch { }

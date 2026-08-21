@@ -3,6 +3,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Input;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
@@ -67,6 +68,7 @@ namespace TaskbarQuota.Taskbar
 
         private static readonly bool IsRtlUI = System.Globalization.CultureInfo.CurrentUICulture.TextInfo.IsRightToLeft;
         private static readonly object WindowClassLock = new();
+        private static readonly ConcurrentDictionary<IntPtr, WeakReference<TaskBarWidget>> HostOwners = new();
         private static readonly WndProc SharedWndProc = SharedWindowProc;
         private static bool windowClassRegistered;
         private static int windowClassUsers;
@@ -76,8 +78,8 @@ namespace TaskbarQuota.Taskbar
         private int RepositionDeadbandPx => (int)Math.Ceiling(2 * dpiScale);
         private int TrayClearancePx => (int)Math.Ceiling(TrayClearanceLogicalPx * dpiScale);
 
-        private readonly double dpiScale;
-        private readonly uint taskbarDpi;
+        private double dpiScale;
+        private uint taskbarDpi;
         private readonly IntPtr hwndShell;
         private readonly IntPtr hwndTrayNotify;
         private readonly IntPtr hwndReBar;
@@ -94,6 +96,9 @@ namespace TaskbarQuota.Taskbar
         private readonly CancellationTokenSource positionUpdateCancellation = new();
         private readonly SemaphoreSlim positionUpdateGate = new(1, 1);
         private readonly object positionRequestLock = new();
+        private readonly DpiChangeDebouncer dpiChangeDebouncer = new();
+        private string? pendingDisplayKey;
+        private int pendingDisplayKeySamples;
 
         private IntPtr hwnd;
         private AppWindow? appWindow;
@@ -226,18 +231,10 @@ namespace TaskbarQuota.Taskbar
         /// <summary>True once <see cref="Initialize"/> has built the tile panel. A live window without it can
         /// render nothing at all, so the manager treats that pairing as a dead widget and recreates it.</summary>
         public bool IsHostContentReady => summaryPanel is not null;
-        public bool IsDpiCurrent
-        {
-            get
-            {
-                if (!User32.IsWindow(hwndShell))
-                    return false;
-                uint currentDpi = User32.GetDpiForWindow(hwndShell);
-                return (currentDpi == 0 ? 96u : currentDpi) == taskbarDpi;
-            }
-        }
+        public uint CurrentDpi => taskbarDpi;
         public IntPtr TaskbarHandle => hwndShell;
         public bool IsPrimaryTaskbar => isPrimaryTaskbar;
+        public string DisplayKey => displayKey;
         /// <summary>
         /// Supplies the best available snapshot for a provider when a slot is (re)assigned to it, so a
         /// re-ordered tile paints its new provider immediately instead of holding the previous one's rows
@@ -439,6 +436,113 @@ namespace TaskbarQuota.Taskbar
             => target.Handle == hwndShell
                 && target.IsPrimary == isPrimaryTaskbar
                 && string.Equals(target.DisplayKey, displayKey, StringComparison.Ordinal);
+
+        /// <summary>
+        /// Display identity can be temporarily unavailable while Explorer rebuilds its monitor topology.
+        /// Require the same changed key twice before replacing a healthy XAML island.
+        /// </summary>
+        public bool IsConfirmedTargetMismatch(TaskbarWindowTarget target)
+        {
+            if (target.Handle != hwndShell || target.IsPrimary != isPrimaryTaskbar)
+                return true;
+            if (string.Equals(target.DisplayKey, displayKey, StringComparison.OrdinalIgnoreCase))
+            {
+                pendingDisplayKey = null;
+                pendingDisplayKeySamples = 0;
+                return false;
+            }
+
+            if (!string.Equals(pendingDisplayKey, target.DisplayKey, StringComparison.OrdinalIgnoreCase))
+            {
+                pendingDisplayKey = target.DisplayKey;
+                pendingDisplayKeySamples = 1;
+                return false;
+            }
+
+            return ++pendingDisplayKeySamples >= 2;
+        }
+
+        /// <summary>Health-check fallback for DPI notifications lost during an Explorer topology rebuild.</summary>
+        public void RefreshDpiFromWindows()
+        {
+            // The Explorer taskbar is the canonical scale owner. The injected host can briefly retain its
+            // previous DPI while parent-change messages are still traversing the child window tree.
+            IntPtr source = hwndShell;
+            if (source == IntPtr.Zero || !User32.IsWindow(source))
+                return;
+
+            uint observed = User32.GetDpiForWindow(source);
+            observed = observed == 0 ? 96u : observed;
+            if (dpiChangeDebouncer.Observe(taskbarDpi, observed))
+                ApplyDpi(observed, "health-check");
+        }
+
+        private void HandleHostDpiNotification(IntPtr changedHwnd, bool authoritative)
+        {
+            if (disposedValue || changedHwnd == IntPtr.Zero || !User32.IsWindow(changedHwnd))
+                return;
+
+            uint observed = User32.GetDpiForWindow(changedHwnd);
+            observed = observed == 0 ? 96u : observed;
+            if (authoritative || dpiChangeDebouncer.Observe(taskbarDpi, observed))
+                ApplyDpi(observed, authoritative ? "window-message" : "display-change");
+        }
+
+        private void ApplyDpi(uint newDpi, string source)
+        {
+            if (newDpi == 0)
+                newDpi = 96;
+            if (newDpi == taskbarDpi)
+            {
+                dpiChangeDebouncer.Reset();
+                return;
+            }
+
+            uint previousDpi = taskbarDpi;
+            int nextActivityWidth = RescalePhysicalWidth(
+                ActivityHostWidth,
+                previousDpi,
+                newDpi,
+                AgentActivitySummary.MinimumLogicalWidth);
+            taskbarDpi = newDpi;
+            dpiScale = newDpi / 96d;
+            dpiChangeDebouncer.Reset();
+
+            ActivityHostWidth = nextActivityWidth;
+            int taskbarHeight = appWindow?.Size.Height ?? 0;
+            if (User32.GetWindowRect(hwndShell, out RECT taskbarRect)
+                && taskbarRect.bottom > taskbarRect.top)
+            {
+                taskbarHeight = taskbarRect.bottom - taskbarRect.top;
+            }
+
+            if (taskbarHeight > 0)
+            {
+                appWindow?.ResizeClient(new SizeInt32(WidgetHostWidth, taskbarHeight));
+                activityAppWindow?.ResizeClient(new SizeInt32(ActivityHostWidth, taskbarHeight));
+            }
+
+            lastWidgetsButtonClientRect = null;
+            lastTaskButtonClientRects.Clear();
+            availableLogicalWidth = DefaultAvailableLogicalWidth;
+            Log.Information(
+                $"Taskbar widget DPI updated in place: taskbar=0x{hwndShell.ToInt64():X}, {previousDpi}->{newDpi}, source={source}");
+            RecomputeLayout(forceReposition: true);
+        }
+
+        internal static int RescalePhysicalWidth(
+            int physicalWidth,
+            uint previousDpi,
+            uint newDpi,
+            int minimumLogicalWidth = 0)
+        {
+            double oldScale = (previousDpi == 0 ? 96u : previousDpi) / 96d;
+            double nextScale = (newDpi == 0 ? 96u : newDpi) / 96d;
+            int logicalWidth = Math.Max(
+                minimumLogicalWidth,
+                (int)Math.Round(physicalWidth / oldScale));
+            return (int)Math.Ceiling(logicalWidth * nextScale);
+        }
 
         /// <summary>
         /// Shows or hides the widget with a short cross-fade. A native window can't be animated, so the
@@ -3001,10 +3105,39 @@ namespace TaskbarQuota.Taskbar
 
         private IntPtr CreateHostWindow(IntPtr parent)
         {
-            RegisterWindowClass();
-            return User32.CreateWindowEx(
-                WindowStylesExtended.WS_EX_LAYERED, WidgetClassName, "WidgetHost",
-                WindowStyles.WS_POPUP, 0, 0, 0, 0, parent, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            IntPtr previousContext = IntPtr.Zero;
+            IntPtr targetContext = User32.GetWindowDpiAwarenessContext(parent);
+            if (targetContext != IntPtr.Zero)
+                previousContext = User32.SetThreadDpiAwarenessContext(targetContext);
+
+            try
+            {
+                RegisterWindowClass();
+                // A layered popup is retained for compatibility with the existing XAML-island injection,
+                // but create it on the target monitor rather than at virtual-screen (0,0). This gives the
+                // host the correct initial per-monitor scale before it is reparented into Explorer.
+                int x = 0;
+                int y = 0;
+                if (User32.GetWindowRect(parent, out RECT parentRect))
+                {
+                    x = parentRect.left;
+                    y = parentRect.top;
+                }
+
+                IntPtr created = User32.CreateWindowEx(
+                    WindowStylesExtended.WS_EX_LAYERED, WidgetClassName, "WidgetHost",
+                    WindowStyles.WS_POPUP, x, y, 0, 0, parent, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                if (created == IntPtr.Zero)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not create the taskbar widget host window.");
+
+                HostOwners[created] = new WeakReference<TaskBarWidget>(this);
+                return created;
+            }
+            finally
+            {
+                if (previousContext != IntPtr.Zero)
+                    User32.SetThreadDpiAwarenessContext(previousContext);
+            }
         }
 
         private void RegisterWindowClass()
@@ -3040,7 +3173,29 @@ namespace TaskbarQuota.Taskbar
         }
 
         private static IntPtr SharedWindowProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam)
-            => User32.DefWindowProc(hWnd, uMsg, wParam, lParam);
+        {
+            if (uMsg == User32.WM_NCDESTROY)
+            {
+                HostOwners.TryRemove(hWnd, out _);
+            }
+            else if (uMsg is User32.WM_DPICHANGED
+                or User32.WM_DPICHANGED_BEFOREPARENT
+                or User32.WM_DPICHANGED_AFTERPARENT
+                or User32.WM_DISPLAYCHANGE)
+            {
+                bool authoritative = uMsg is User32.WM_DPICHANGED
+                    or User32.WM_DPICHANGED_BEFOREPARENT
+                    or User32.WM_DPICHANGED_AFTERPARENT;
+                if (HostOwners.TryGetValue(hWnd, out var weak)
+                    && weak.TryGetTarget(out var owner))
+                {
+                    App.Dispatcher?.TryEnqueue(
+                        () => owner.HandleHostDpiNotification(hWnd, authoritative));
+                }
+            }
+
+            return User32.DefWindowProc(hWnd, uMsg, wParam, lParam);
+        }
 
         private void ReleaseWindowClass()
         {
@@ -3190,6 +3345,10 @@ namespace TaskbarQuota.Taskbar
 
         private void DisposeWindowResources()
         {
+            if (hwnd != IntPtr.Zero)
+                HostOwners.TryRemove(hwnd, out _);
+            if (activityHwnd != IntPtr.Zero)
+                HostOwners.TryRemove(activityHwnd, out _);
             try
             {
                 if (!destroyed)

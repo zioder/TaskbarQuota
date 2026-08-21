@@ -12,10 +12,12 @@ namespace TaskbarQuota.ActiveApp
     internal sealed class ForegroundWatcher : IDisposable
     {
         private readonly User32.WinEventProc _callback;
-        private IntPtr _hook;
+        private IntPtr _foregroundHook;
+        private IntPtr _moveSizeHook;
         private bool _disposed;
 
-        public event Action? ForegroundChanged;
+        public event Action<IntPtr>? ForegroundChanged;
+        public event Action<IntPtr>? WindowMoveSizeEnded;
 
         public ForegroundWatcher()
         {
@@ -26,10 +28,10 @@ namespace TaskbarQuota.ActiveApp
 
         public void Start()
         {
-            if (_hook != IntPtr.Zero || _disposed)
+            if (_foregroundHook != IntPtr.Zero || _disposed)
                 return;
 
-            _hook = User32.SetWinEventHook(
+            _foregroundHook = User32.SetWinEventHook(
                 User32.EVENT_SYSTEM_FOREGROUND,
                 User32.EVENT_SYSTEM_FOREGROUND,
                 IntPtr.Zero,
@@ -38,19 +40,33 @@ namespace TaskbarQuota.ActiveApp
                 idThread: 0,
                 User32.WINEVENT_OUTOFCONTEXT);
 
-            if (_hook == IntPtr.Zero)
+            _moveSizeHook = User32.SetWinEventHook(
+                User32.EVENT_SYSTEM_MOVESIZEEND,
+                User32.EVENT_SYSTEM_MOVESIZEEND,
+                IntPtr.Zero,
+                _callback,
+                idProcess: 0,
+                idThread: 0,
+                User32.WINEVENT_OUTOFCONTEXT);
+
+            if (_foregroundHook == IntPtr.Zero)
                 Diagnostics.Log.Warning("[focus] foreground hook could not be installed; falling back to the detect tick");
+            if (_moveSizeHook == IntPtr.Zero)
+                Diagnostics.Log.Warning("[adaptive] move/size hook could not be installed; falling back to foreground observations");
         }
 
         private void OnWinEvent(IntPtr hook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
         {
             // idObject/idChild filter out the per-control accessibility noise that shares this event id.
-            if (eventType != User32.EVENT_SYSTEM_FOREGROUND || hwnd == IntPtr.Zero || idObject != 0)
+            if (hwnd == IntPtr.Zero || idObject != 0)
                 return;
 
             try
             {
-                ForegroundChanged?.Invoke();
+                if (eventType == User32.EVENT_SYSTEM_FOREGROUND)
+                    ForegroundChanged?.Invoke(hwnd);
+                else if (eventType == User32.EVENT_SYSTEM_MOVESIZEEND)
+                    WindowMoveSizeEnded?.Invoke(hwnd);
             }
             catch (Exception ex)
             {
@@ -64,12 +80,18 @@ namespace TaskbarQuota.ActiveApp
                 return;
 
             _disposed = true;
-            if (_hook == IntPtr.Zero)
-                return;
-
-            try { User32.UnhookWinEvent(_hook); }
-            catch { }
-            _hook = IntPtr.Zero;
+            if (_foregroundHook != IntPtr.Zero)
+            {
+                try { User32.UnhookWinEvent(_foregroundHook); }
+                catch { }
+                _foregroundHook = IntPtr.Zero;
+            }
+            if (_moveSizeHook != IntPtr.Zero)
+            {
+                try { User32.UnhookWinEvent(_moveSizeHook); }
+                catch { }
+                _moveSizeHook = IntPtr.Zero;
+            }
         }
     }
 }
