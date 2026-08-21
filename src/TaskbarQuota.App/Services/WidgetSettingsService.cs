@@ -325,11 +325,17 @@ public static class WidgetSettingsService
         return ProviderVisibility.TryGetValue(key, out bool visible) ? visible : true;
     }
 
+    internal static bool TryGetProviderVisibilityOverride(ProviderId provider, out bool visible)
+        => ProviderVisibility.TryGetValue(provider.ToString(), out visible);
+
     public static bool IsProviderDashboardVisible(ProviderId provider)
     {
         var key = provider.ToString();
         return DashboardProviderVisibility.TryGetValue(key, out bool visible) ? visible : true;
     }
+
+    internal static bool TryGetDashboardProviderVisibilityOverride(ProviderId provider, out bool visible)
+        => DashboardProviderVisibility.TryGetValue(provider.ToString(), out visible);
 
     public static void SetProviderVisible(ProviderId provider, bool visible)
     {

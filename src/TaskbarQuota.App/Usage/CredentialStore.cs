@@ -16,8 +16,9 @@ namespace TaskbarQuota.Usage
     {
         public static CredentialStore Instance { get; } = new();
 
-        private static readonly string Dir = AppStorage.AppDataDirectory;
-        private static readonly string Path_ = Path.Combine(Dir, "credentials.json");
+        private readonly string _directory;
+        private readonly string _path;
+        private readonly string _backupPath;
 
         private Dictionary<string, Entry> _entries = new(StringComparer.OrdinalIgnoreCase);
 
@@ -29,7 +30,15 @@ namespace TaskbarQuota.Usage
             public string? Extra { get; set; } // provider-specific (e.g. MiniMax group id)
         }
 
-        private CredentialStore() => Load();
+        private CredentialStore() : this(AppStorage.AppDataDirectory) { }
+
+        internal CredentialStore(string directory)
+        {
+            _directory = directory;
+            _path = Path.Combine(directory, "credentials.json");
+            _backupPath = _path + ".bak";
+            Load();
+        }
 
         public Entry For(ProviderId id)
         {
@@ -77,25 +86,52 @@ namespace TaskbarQuota.Usage
 
         public void Save()
         {
+            string tempPath = _path + ".tmp";
             try
             {
-                Directory.CreateDirectory(Dir);
-                File.WriteAllText(Path_, JsonSerializer.Serialize(_entries, new JsonSerializerOptions { WriteIndented = true }));
+                Directory.CreateDirectory(_directory);
+                File.WriteAllText(tempPath, JsonSerializer.Serialize(_entries, new JsonSerializerOptions { WriteIndented = true }));
+
+                if (File.Exists(_path))
+                    File.Replace(tempPath, _path, _backupPath, ignoreMetadataErrors: true);
+                else
+                    File.Move(tempPath, _path);
             }
-            catch (Exception ex) { Diagnostics.Log.Warning(ex, "Failed to save credentials"); }
+            catch (Exception ex)
+            {
+                Diagnostics.Log.Warning(ex, "Failed to save credentials");
+                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+            }
         }
 
         private void Load()
         {
+            if (TryLoad(_path))
+                return;
+
+            if (TryLoad(_backupPath))
+                Diagnostics.Log.Warning("Recovered credentials from backup after the primary store could not be loaded.");
+        }
+
+        private bool TryLoad(string path)
+        {
             try
             {
-                if (File.Exists(Path_))
-                {
-                    var d = JsonSerializer.Deserialize<Dictionary<string, Entry>>(File.ReadAllText(Path_));
-                    if (d != null) _entries = new Dictionary<string, Entry>(d, StringComparer.OrdinalIgnoreCase);
-                }
+                if (!File.Exists(path))
+                    return false;
+
+                var loaded = JsonSerializer.Deserialize<Dictionary<string, Entry>>(File.ReadAllText(path));
+                if (loaded is null)
+                    return false;
+
+                _entries = new Dictionary<string, Entry>(loaded, StringComparer.OrdinalIgnoreCase);
+                return true;
             }
-            catch (Exception ex) { Diagnostics.Log.Warning(ex, "Failed to load credentials"); }
+            catch (Exception ex)
+            {
+                Diagnostics.Log.Warning(ex, $"Failed to load credential store '{Path.GetFileName(path)}'");
+                return false;
+            }
         }
     }
 }
