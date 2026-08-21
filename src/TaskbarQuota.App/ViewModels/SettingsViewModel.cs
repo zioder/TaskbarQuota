@@ -143,7 +143,7 @@ namespace TaskbarQuota.ViewModels
 
         public void ApplyWidgetVisibility(ProviderSettingItemViewModel item, bool visible)
         {
-            WidgetSettingsService.SetProviderVisible(item.Id, visible);
+            ProviderDiscoveryService.SetWidgetVisibilityPreference(item.Id, visible);
             item.IsWidgetVisible = WidgetSettingsService.IsProviderVisible(item.Id);
             // Hiding a provider from the widget drops its pin.
             item.IsPinned = WidgetSettingsService.IsProviderPinned(item.Id);
@@ -151,6 +151,8 @@ namespace TaskbarQuota.ViewModels
 
         public void ApplyPinned(ProviderSettingItemViewModel item, bool pinned)
         {
+            if (pinned)
+                ProviderDiscoveryService.SetWidgetVisibilityPreference(item.Id, true);
             WidgetSettingsService.SetProviderPinned(item.Id, pinned);
             item.IsPinned = WidgetSettingsService.IsProviderPinned(item.Id);
             // Pinning implies widget-visible, so reflect the possibly-flipped widget toggle.

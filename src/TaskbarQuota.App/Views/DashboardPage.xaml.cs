@@ -445,7 +445,7 @@ namespace TaskbarQuota.Views
             if (sender is not ToggleButton toggle || toggle.Tag is not ProviderCardViewModel card)
                 return;
 
-            WidgetSettingsService.SetProviderVisible(card.ProviderId, toggle.IsChecked == true);
+            ProviderDiscoveryService.SetWidgetVisibilityPreference(card.ProviderId, toggle.IsChecked == true);
             card.IsProviderWidgetVisible = WidgetSettingsService.IsProviderVisible(card.ProviderId);
             // Hiding a provider from the widget also drops its pin, so keep the pin button in step.
             card.IsProviderPinned = WidgetSettingsService.IsProviderPinned(card.ProviderId);
@@ -475,6 +475,8 @@ namespace TaskbarQuota.Views
 
             PinBlockedTip.IsOpen = false;
 
+            if (wantPinned)
+                ProviderDiscoveryService.SetWidgetVisibilityPreference(card.ProviderId, true);
             WidgetSettingsService.SetProviderPinned(card.ProviderId, wantPinned);
             card.IsProviderPinned = WidgetSettingsService.IsProviderPinned(card.ProviderId);
             card.IsProviderWidgetVisible = WidgetSettingsService.IsProviderVisible(card.ProviderId);

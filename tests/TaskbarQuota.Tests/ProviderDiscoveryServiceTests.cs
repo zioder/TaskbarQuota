@@ -116,6 +116,19 @@ public class ProviderDiscoveryServiceTests
     }
 
     [Fact]
+    public void SyncInstalledProviderVisibility_PreservesExplicitWidgetHide()
+    {
+        ProviderInstallDetector.IsInstalledOverrideForTesting = id => id == ProviderId.Grok;
+        WidgetSettingsService.SetProviderVisibleForTesting(ProviderId.Grok, false);
+        ProviderDiscoveryService.MarkExplicitlyWidgetDisabledForTesting(ProviderId.Grok);
+
+        ProviderDiscoveryService.SyncInstalledProviderVisibility();
+
+        Assert.True(WidgetSettingsService.IsProviderDashboardVisible(ProviderId.Grok));
+        Assert.False(WidgetSettingsService.IsProviderVisible(ProviderId.Grok));
+    }
+
+    [Fact]
     public void ShouldFetch_SkipsExplicitlyDisabledInstalledProvider()
     {
         ProviderDiscoveryService.MarkExplicitlyDisabledForTesting(ProviderId.Grok);
