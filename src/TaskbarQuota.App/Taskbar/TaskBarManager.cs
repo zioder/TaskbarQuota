@@ -710,14 +710,9 @@ namespace TaskbarQuota.Taskbar
             // animation run over an empty window and turns a cross-screen handoff into a visible blink.
             if (providers.Count == 0)
             {
-                widget.SetDisplayProviders(Array.Empty<ProviderId>(), ActiveProviderForWidget(widget, coordinator.ActiveProvider));
-                if (widget.HasVisibleActivity)
-                {
-                    widget.SetVisible(true);
-                    widget.SetQuotaVisible(false);
-                }
-                else
-                    widget.SetVisible(false);
+                widget.HideDisplayProviders(
+                    ActiveProviderForWidget(widget, coordinator.ActiveProvider),
+                    keepActivityVisible: widget.HasVisibleActivity);
                 return;
             }
 
@@ -930,14 +925,9 @@ namespace TaskbarQuota.Taskbar
                 // completion callback, guarded so an interrupted hide cannot erase a returning provider.
                 if (providers.Count == 0)
                 {
-                    widget.SetDisplayProviders(Array.Empty<ProviderId>(), ActiveProviderForWidget(widget, coordinator.ActiveProvider));
-                    if (widget.HasVisibleActivity)
-                    {
-                        widget.SetVisible(true);
-                        widget.SetQuotaVisible(false);
-                    }
-                    else
-                        widget.SetVisible(false);
+                    widget.HideDisplayProviders(
+                        ActiveProviderForWidget(widget, coordinator.ActiveProvider),
+                        keepActivityVisible: widget.HasVisibleActivity);
                     continue;
                 }
 

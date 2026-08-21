@@ -151,13 +151,14 @@ namespace TaskbarQuota.Taskbar
         private Microsoft.UI.Xaml.FrameworkElement? activityHostContent;
         // Show/hide cross-fade state. Short on purpose: the widget lives on the taskbar, so anything
         // slower reads as lag rather than as a transition.
-        private const int HostFadeMilliseconds = 100;
+        private const int HostFadeMilliseconds = 160;
         private Anim.Storyboard? hostFadeStoryboard;
         private Anim.Storyboard? activityFadeStoryboard;
         private Anim.Storyboard? quotaLayoutStoryboard;
         private Anim.Storyboard? activityLayoutStoryboard;
         private int hostFadeGeneration;
         private int activityFadeGeneration;
+        private bool quotaHideInProgress;
         private int WidgetHostWidth;
         private int ActivityHostWidth;
         private int currentOffsetX = int.MinValue;
@@ -567,6 +568,7 @@ namespace TaskbarQuota.Taskbar
 
             if (visible)
             {
+                quotaHideInProgress = false;
                 QueuePositionUpdate(TaskbarChangeReason.None);
                 if (hostContent is not null)
                     hostContent.Opacity = 0;
@@ -688,6 +690,53 @@ namespace TaskbarQuota.Taskbar
                 classicTaskbarReservation.Restore();
                 appWindow.Hide();
             }
+        }
+
+        /// <summary>
+        /// Fades the outgoing quota content before clearing its slots. Keeping the old pixels alive for
+        /// the fade lets another display reveal the incoming provider in the same frame, producing a
+        /// cross-screen handoff instead of an empty-window blink.
+        /// </summary>
+        public void HideDisplayProviders(ProviderId? activeProvider, bool keepActivityVisible)
+        {
+            if (appWindow is null)
+                return;
+
+            // A hide already in flight owns the eventual clear. Re-entering on every activity/usage
+            // publish would restart the storyboard indefinitely.
+            if (quotaHideInProgress || !isVisible && !appWindow.IsVisible)
+                return;
+
+            isVisible = false;
+            quotaHideInProgress = true;
+            hostFadeGeneration++;
+            int generation = hostFadeGeneration;
+
+            if (isDragging)
+                EndDragging(revert: true);
+
+            void CompleteHide()
+            {
+                if (generation != hostFadeGeneration || destroyed || appWindow is null)
+                    return;
+
+                quotaHideInProgress = false;
+                SetDisplayProviders(Array.Empty<ProviderId>(), activeProvider);
+                classicTaskbarReservation.Restore();
+                appWindow.Hide();
+                if (!keepActivityVisible)
+                    activityAppWindow?.Hide();
+                if (hostContent is { } content)
+                    content.Opacity = 1;
+            }
+
+            if (hostContent is null)
+            {
+                CompleteHide();
+                return;
+            }
+
+            AnimateHostOpacity(0, CompleteHide);
         }
 
         private Microsoft.UI.Xaml.Controls.StackPanel BuildSummaryPanel()
