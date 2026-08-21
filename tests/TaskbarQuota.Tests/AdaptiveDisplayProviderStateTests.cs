@@ -30,7 +30,7 @@ public class AdaptiveDisplayProviderStateTests
     }
 
     [Fact]
-    public void ADisplayTracksItsMostRecentlyFocusedProvider()
+    public void ADisplayRestoresItsPreviousValidProvider()
     {
         var state = new AdaptiveDisplayProviderState();
         state.Observe(ProviderId.Codex, "DISPLAY1", new IntPtr(1));
@@ -38,7 +38,39 @@ public class AdaptiveDisplayProviderStateTests
         state.Observe(ProviderId.OpenCode, "display1", new IntPtr(2));
 
         Assert.Equal(ProviderId.OpenCode, state.GetProvider("DISPLAY1"));
-        Assert.DoesNotContain(ProviderId.Codex, state.Providers);
+        Assert.Equal(
+            ProviderId.Codex,
+            state.GetProvider("DISPLAY1", window => window != new IntPtr(2)));
+    }
+
+    [Fact]
+    public void MovingProviderAwayRevealsTheProviderItDisplaced()
+    {
+        var state = new AdaptiveDisplayProviderState();
+        state.Observe(ProviderId.OpenCode, "DISPLAY2", new IntPtr(20));
+        state.Observe(ProviderId.Antigravity, "DISPLAY1", new IntPtr(10));
+
+        state.Observe(ProviderId.Antigravity, "DISPLAY2", new IntPtr(10));
+        Assert.Equal(ProviderId.Antigravity, state.GetProvider("DISPLAY2"));
+
+        state.Observe(ProviderId.Antigravity, "DISPLAY1", new IntPtr(10));
+
+        Assert.Equal(ProviderId.Antigravity, state.GetProvider("DISPLAY1"));
+        Assert.Equal(ProviderId.OpenCode, state.GetProvider("DISPLAY2"));
+    }
+
+    [Fact]
+    public void ReclassifyingTheSameWindowDoesNotRetainItsOldProvider()
+    {
+        var state = new AdaptiveDisplayProviderState();
+        var terminal = new IntPtr(10);
+        state.Observe(ProviderId.Codex, "DISPLAY1", terminal);
+
+        state.Observe(ProviderId.OpenCode, "DISPLAY1", terminal);
+        state.Observe(ProviderId.OpenCode, "DISPLAY2", terminal);
+
+        Assert.Null(state.GetProvider("DISPLAY1"));
+        Assert.Equal(ProviderId.OpenCode, state.GetProvider("DISPLAY2"));
     }
 
     [Fact]
