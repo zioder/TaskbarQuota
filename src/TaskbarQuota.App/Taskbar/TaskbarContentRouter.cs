@@ -9,6 +9,25 @@ namespace TaskbarQuota.Taskbar;
 /// <summary>Pure routing rules for distributing quota and activity content between taskbars.</summary>
 internal static class TaskbarContentRouter
 {
+    public static IReadOnlyList<ProviderId> AdaptiveCandidatesForDisplay(
+        IReadOnlyList<ProviderId> providers,
+        ProviderId? currentProvider,
+        Func<ProviderId, bool> isVisible,
+        Func<ProviderId, bool> isPinned)
+    {
+        var result = new List<ProviderId>();
+        if (currentProvider is { } current && isVisible(current))
+            result.Add(current);
+
+        foreach (var provider in providers)
+        {
+            if (isPinned(provider) && !result.Contains(provider))
+                result.Add(provider);
+        }
+
+        return result;
+    }
+
     public static IReadOnlyList<ProviderId> ProvidersForDisplay(
         IReadOnlyList<ProviderId> providers,
         TaskbarPlacementMode mode,

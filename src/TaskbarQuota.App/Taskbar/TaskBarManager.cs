@@ -527,14 +527,19 @@ namespace TaskbarQuota.Taskbar
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             string primary = PrimaryWidget()?.DisplayKey ?? widget.DisplayKey;
             var mode = WidgetSettingsService.CurrentTaskbarPlacement;
-            if (mode == TaskbarPlacementMode.Adaptive
-                && AdaptiveProviderForDisplay(widget.DisplayKey) is { } displayActive
-                && WidgetSettingsService.IsProviderVisible(displayActive))
+            ProviderId? displayActive = mode == TaskbarPlacementMode.Adaptive
+                ? AdaptiveProviderForDisplay(widget.DisplayKey)
+                : null;
+            if (mode == TaskbarPlacementMode.Adaptive)
             {
-                providers = new[] { displayActive }
-                    .Concat(providers)
-                    .Distinct()
-                    .ToArray();
+                // The per-display history is authoritative for unpinned content. Keeping every global
+                // candidate here lets a provider's stale persisted destination briefly join the restored
+                // provider during a move, rendering two unpinned tiles on one taskbar.
+                providers = TaskbarContentRouter.AdaptiveCandidatesForDisplay(
+                    providers,
+                    displayActive,
+                    WidgetSettingsService.IsProviderVisible,
+                    WidgetSettingsService.IsProviderPinned);
             }
 
             return TaskbarContentRouter.ProvidersForDisplay(
@@ -544,7 +549,9 @@ namespace TaskbarQuota.Taskbar
                 widget.DisplayKey,
                 primary,
                 available,
-                WidgetSettingsService.GetAdaptiveProviderDisplay,
+                provider => displayActive == provider
+                    ? widget.DisplayKey
+                    : WidgetSettingsService.GetAdaptiveProviderDisplay(provider),
                 WidgetSettingsService.IsProviderPinned,
                 WidgetSettingsService.GetPinnedProviderDisplay);
         }

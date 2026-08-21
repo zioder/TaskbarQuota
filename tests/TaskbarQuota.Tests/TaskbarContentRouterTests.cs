@@ -63,6 +63,34 @@ public class TaskbarContentRouterTests
     }
 
     [Fact]
+    public void Adaptive_candidates_exclude_stale_unpinned_provider_during_move()
+    {
+        ProviderId[] providers = [ProviderId.OpenCode, ProviderId.Codex];
+
+        var candidates = TaskbarContentRouter.AdaptiveCandidatesForDisplay(
+            providers,
+            ProviderId.OpenCode,
+            _ => true,
+            _ => false);
+
+        Assert.Equal([ProviderId.OpenCode], candidates);
+    }
+
+    [Fact]
+    public void Adaptive_candidates_preserve_explicit_pins_beside_current_provider()
+    {
+        ProviderId[] providers = [ProviderId.OpenCode, ProviderId.Codex];
+
+        var candidates = TaskbarContentRouter.AdaptiveCandidatesForDisplay(
+            providers,
+            ProviderId.OpenCode,
+            _ => true,
+            provider => provider == ProviderId.Codex);
+
+        Assert.Equal([ProviderId.OpenCode, ProviderId.Codex], candidates);
+    }
+
+    [Fact]
     public void Adaptive_filters_agent_activity_by_provider_display()
     {
         var now = DateTimeOffset.UtcNow;
