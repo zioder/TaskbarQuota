@@ -991,26 +991,37 @@ namespace TaskbarQuota.Controls
         /// </summary>
         public void AnimateSlide(double fromOffsetX)
         {
-            _slideStoryboard?.Stop();
-
-            // The RESTING value is written before starting, and the animation supplies the offset through
-            // its From. Storyboard.Stop reverts a property to its local value, so a slide interrupted by the
-            // next layout pass — which happens constantly, the layout is recomputed on every usage publish —
-            // lands at zero instead of stranding the tile at the offset it started from.
-            RootTranslate.X = 0;
-
-            // Storyboard and animation are built once and re-aimed, not rebuilt. These run on every layout
-            // pass across every tile, and a fresh Storyboard + DoubleAnimation + CubicEase per pass was
-            // steady garbage for the life of the process.
-            if (_slideStoryboard is null)
+            // Storyboard Stop/retarget/Begin against a tile whose visual tree was just torn down (widget
+            // recreate, DPI change) raises XAML exceptions that can escalate to stowed exceptions and kill
+            // the dispatcher thread — issue #70's silent widget death. A cosmetic slide is never worth the
+            // UI thread: degrade to no animation and let the next layout pass retry.
+            try
             {
-                _slideAnimation = CreateDoubleAnimation(RootTranslate, "X", fromOffsetX, 0, SlideMilliseconds);
-                _slideStoryboard = new Storyboard();
-                _slideStoryboard.Children.Add(_slideAnimation);
-            }
+                _slideStoryboard?.Stop();
 
-            _slideAnimation!.From = fromOffsetX;
-            _slideStoryboard.Begin();
+                // The RESTING value is written before starting, and the animation supplies the offset through
+                // its From. Storyboard.Stop reverts a property to its local value, so a slide interrupted by the
+                // next layout pass — which happens constantly, the layout is recomputed on every usage publish —
+                // lands at zero instead of stranding the tile at the offset it started from.
+                RootTranslate.X = 0;
+
+                // Storyboard and animation are built once and re-aimed, not rebuilt. These run on every layout
+                // pass across every tile, and a fresh Storyboard + DoubleAnimation + CubicEase per pass was
+                // steady garbage for the life of the process.
+                if (_slideStoryboard is null)
+                {
+                    _slideAnimation = CreateDoubleAnimation(RootTranslate, "X", fromOffsetX, 0, SlideMilliseconds);
+                    _slideStoryboard = new Storyboard();
+                    _slideStoryboard.Children.Add(_slideAnimation);
+                }
+
+                _slideAnimation!.From = fromOffsetX;
+                _slideStoryboard.Begin();
+            }
+            catch (Exception ex)
+            {
+                TaskbarQuota.Diagnostics.Log.Debug($"[widget] slide animation skipped: {ex.Message}");
+            }
         }
 
         /// <summary>

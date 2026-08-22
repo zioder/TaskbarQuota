@@ -1207,22 +1207,33 @@ namespace TaskbarQuota.Taskbar
 
             // First layout of the session: the tiles have their own reveal animation, nothing to move from.
             bool hadPositions = lastTilePositions.Count > 0;
-            for (int n = 0; n < count; n++)
-            {
-                if (tileProviders[slots[n]] is not { } provider)
-                    continue;
 
-                int target = positions[provider];
-                if (lastTilePositions.TryGetValue(provider, out int previous))
+            // An animation racing a widget teardown raises XAML exceptions that can escalate into stowed
+            // exceptions and take down the whole dispatcher thread (issue #70). Tiles keep their previous
+            // positions on failure; the next health tick re-runs this pass.
+            try
+            {
+                for (int n = 0; n < count; n++)
                 {
-                    // Ignore sub-threshold drift from a value changing width; only real moves animate.
-                    if (Math.Abs(previous - target) >= TileMoveThresholdLogicalPx)
-                        tiles[slots[n]].AnimateSlide(previous - target);
+                    if (tileProviders[slots[n]] is not { } provider)
+                        continue;
+
+                    int target = positions[provider];
+                    if (lastTilePositions.TryGetValue(provider, out int previous))
+                    {
+                        // Ignore sub-threshold drift from a value changing width; only real moves animate.
+                        if (Math.Abs(previous - target) >= TileMoveThresholdLogicalPx)
+                            tiles[slots[n]].AnimateSlide(previous - target);
+                    }
+                    else if (hadPositions)
+                    {
+                        tiles[slots[n]].AnimateSlide(-TileEntryOffsetLogicalPx);
+                    }
                 }
-                else if (hadPositions)
-                {
-                    tiles[slots[n]].AnimateSlide(-TileEntryOffsetLogicalPx);
-                }
+            }
+            catch (Exception ex)
+            {
+                Log.Debug($"[widget] tile move animation failed: {ex.Message}");
             }
 
             // Swap rather than reassign: the outgoing dictionary becomes next pass's scratch buffer.

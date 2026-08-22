@@ -53,13 +53,60 @@ namespace TaskbarQuota.Taskbar
         // widget reacts on the switch itself instead of waiting for the next 500 ms detect tick.
         private static ActiveApp.ForegroundWatcher? _foregroundWatcher;
         private static SessionTopologyWatcher? _sessionTopologyWatcher;
+        // UI-thread watchdog (issue #70). A WinUI stowed exception can take down the dispatcher thread
+        // while every background thread keeps running: the process looks alive in Task Manager, the widget
+        // is gone, and nothing logs because UI-side logging died with the thread. The DispatcherTimer-based
+        // health tick cannot detect this — it dies with the thread it monitors — so a plain thread-pool
+        // timer heartbeats the queue from the outside instead.
+        private static System.Threading.Timer? _uiWatchdogTimer;
+        private static int _uiHeartbeat;
+        private static long _uiHeartbeatObserved = -1;
+        private static int _uiHeartbeatMisses;
 
         private static bool IsFloatingSurface => _activeSurface == WidgetSurfaceMode.Floating;
+
+        /// <summary>
+        /// Background heartbeat for the dispatcher thread (issue #70). Every 5 s a thread-pool timer
+        /// enqueues a counter bump; if the counter stops advancing for three consecutive checks the UI
+        /// thread is considered gone — most plausibly a WinUI stowed exception killed it while background
+        /// threads kept running — and the failure is logged at ERROR level so post-mortems can pinpoint
+        /// the moment it happened even though nothing on the UI side can log anymore.
+        /// </summary>
+        private static void StartUiWatchdog()
+        {
+            if (_uiWatchdogTimer is not null)
+                return;
+
+            _uiWatchdogTimer = new System.Threading.Timer(_ =>
+            {
+                _dispatcher?.TryEnqueue(() => Interlocked.Increment(ref _uiHeartbeat));
+
+                int current = Interlocked.CompareExchange(ref _uiHeartbeat, 0, 0);
+                long observed = Interlocked.Read(ref _uiHeartbeatObserved);
+                if (observed != current)
+                {
+                    Interlocked.Exchange(ref _uiHeartbeatObserved, current);
+                    Interlocked.Exchange(ref _uiHeartbeatMisses, 0);
+                    return;
+                }
+
+                // Same value as last check: either the queue is idle-closed (TryEnqueue returned false
+                // forever) or the thread is gone. Three strikes ≈ 15 s of silence.
+                int misses = Interlocked.Increment(ref _uiHeartbeatMisses);
+                if (misses == 3)
+                {
+                    Log.Error("UI thread stopped servicing heartbeats for ~15s; taskbar widget is dead until " +
+                              "the app is restarted (likely WinUI stowed exception, issue #70). Background " +
+                              "services are still running.");
+                }
+            }, null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(5));
+        }
 
         public static void Initialize(DispatcherQueue dispatcher, Action showMainWindow)
         {
             _dispatcher = dispatcher;
             _showMainWindow = showMainWindow;
+            StartUiWatchdog();
 
             CreateTrayIcon();
             ApplySurfaceFromSettings();
