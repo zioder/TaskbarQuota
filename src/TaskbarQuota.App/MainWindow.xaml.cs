@@ -1,6 +1,5 @@
 using System;
 using Microsoft.UI;
-using Microsoft.UI.Composition.SystemBackdrops;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -61,40 +60,17 @@ namespace TaskbarQuota
                 return;
 
             _initialWindowSizeApplied = true;
-            var scale = Root.XamlRoot.RasterizationScale;
-            var size = WindowDpi.ToPhysicalSize(LogicalWidth, LogicalHeight, scale);
-            GetAppWindow().Resize(ClampToWorkArea(size));
-        }
-
-        /// <summary>
-        /// Caps the requested outer size to the monitor work area. Without this the fixed logical
-        /// height (820) exceeds the workspace at common 125%/150% display scaling, so the window is
-        /// taller than the screen and the content is clipped at the top and bottom.
-        /// </summary>
-        private SizeInt32 ClampToWorkArea(SizeInt32 desired)
-        {
-            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
-            var monitor = User32.MonitorFromWindow(hwnd, MonitorFromFlags.MONITOR_DEFAULTTONEAREST);
-            var info = MONITORINFO.Create();
-            if (User32.GetMonitorInfo(monitor, ref info))
-            {
-                int workWidth = info.rcWork.right - info.rcWork.left;
-                int workHeight = info.rcWork.bottom - info.rcWork.top;
-                desired.Width = Math.Min(desired.Width, Math.Max(workWidth, 1));
-                desired.Height = Math.Min(desired.Height, Math.Max(workHeight, 1));
-            }
-            return desired;
+            var size = WindowDpi.ToPhysicalSize(
+                LogicalWidth,
+                LogicalHeight,
+                Root.XamlRoot.RasterizationScale);
+            GetAppWindow().Resize(size);
         }
 
         private void ApplyFluentChrome()
         {
-            // Use Mica (an opaque tint) where supported. A translucent backdrop — acrylic in
-            // particular — is not re-composited during a live drag-resize, so the uncovered region
-            // renders black until the resize finishes. Mica is opaque and never flashes black.
-            // Fall back to acrylic only on builds that don't support Mica (Windows 10).
-            SystemBackdrop = MicaController.IsSupported()
-                ? new MicaBackdrop()
-                : new DesktopAcrylicBackdrop();
+            // Desktop acrylic works on all supported targets; Mica can fail on some installs.
+            SystemBackdrop = new DesktopAcrylicBackdrop();
 
             // Custom title bar.
             ExtendsContentIntoTitleBar = true;

@@ -1020,6 +1020,12 @@ namespace TaskbarQuota.Controls
             }
             catch (Exception ex)
             {
+                // A storyboard that failed against a torn-down visual must not be reused. Otherwise every
+                // later health/layout pass hits the same invalid target and the tile can remain stranded at
+                // its in-flight offset forever.
+                _slideStoryboard = null;
+                _slideAnimation = null;
+                try { RootTranslate.X = 0; } catch { }
                 TaskbarQuota.Diagnostics.Log.Debug($"[widget] slide animation skipped: {ex.Message}");
             }
         }
@@ -1099,18 +1105,28 @@ namespace TaskbarQuota.Controls
         /// </summary>
         private void AnimatePanelOpacity(double from, double to, int milliseconds)
         {
-            _softRefreshStoryboard?.Stop();
-            if (_softRefreshStoryboard is null)
+            try
             {
-                _softRefreshAnimation = CreateDoubleAnimation(Panel, "Opacity", from, to, milliseconds);
-                _softRefreshStoryboard = new Storyboard();
-                _softRefreshStoryboard.Children.Add(_softRefreshAnimation);
-            }
+                _softRefreshStoryboard?.Stop();
+                if (_softRefreshStoryboard is null)
+                {
+                    _softRefreshAnimation = CreateDoubleAnimation(Panel, "Opacity", from, to, milliseconds);
+                    _softRefreshStoryboard = new Storyboard();
+                    _softRefreshStoryboard.Children.Add(_softRefreshAnimation);
+                }
 
-            _softRefreshAnimation!.From = from;
-            _softRefreshAnimation.To = to;
-            _softRefreshAnimation.Duration = new Duration(TimeSpan.FromMilliseconds(milliseconds));
-            _softRefreshStoryboard.Begin();
+                _softRefreshAnimation!.From = from;
+                _softRefreshAnimation.To = to;
+                _softRefreshAnimation.Duration = new Duration(TimeSpan.FromMilliseconds(milliseconds));
+                _softRefreshStoryboard.Begin();
+            }
+            catch (Exception ex)
+            {
+                _softRefreshStoryboard = null;
+                _softRefreshAnimation = null;
+                try { Panel.Opacity = to; } catch { }
+                TaskbarQuota.Diagnostics.Log.Debug($"[widget] panel animation skipped: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -1122,33 +1138,45 @@ namespace TaskbarQuota.Controls
 
         private void AnimateVisibility(double toOpacity, double toOffset, int milliseconds)
         {
-            double fromOpacity = Root.Opacity;
-            double fromOffset = RootTranslate.Y;
-
-            _visibilityStoryboard?.Stop();
-            // Same rule as AnimateSlide: park the local values at the destination and let the animation
-            // supply the start through From, so an interrupted transition can never leave a tile stuck
-            // invisible or offset.
-            Root.Opacity = toOpacity;
-            RootTranslate.Y = toOffset;
-
-            if (_visibilityStoryboard is null)
+            try
             {
-                _visibilityOpacity = CreateDoubleAnimation(Root, "Opacity", fromOpacity, toOpacity, milliseconds);
-                _visibilityOffset = CreateDoubleAnimation(RootTranslate, "Y", fromOffset, toOffset, milliseconds);
-                _visibilityStoryboard = new Storyboard();
-                _visibilityStoryboard.Children.Add(_visibilityOpacity);
-                _visibilityStoryboard.Children.Add(_visibilityOffset);
-            }
+                double fromOpacity = Root.Opacity;
+                double fromOffset = RootTranslate.Y;
 
-            var duration = new Duration(TimeSpan.FromMilliseconds(milliseconds));
-            _visibilityOpacity!.From = fromOpacity;
-            _visibilityOpacity.To = toOpacity;
-            _visibilityOpacity.Duration = duration;
-            _visibilityOffset!.From = fromOffset;
-            _visibilityOffset.To = toOffset;
-            _visibilityOffset.Duration = duration;
-            _visibilityStoryboard.Begin();
+                _visibilityStoryboard?.Stop();
+                // Same rule as AnimateSlide: park the local values at the destination and let the animation
+                // supply the start through From, so an interrupted transition can never leave a tile stuck
+                // invisible or offset.
+                Root.Opacity = toOpacity;
+                RootTranslate.Y = toOffset;
+
+                if (_visibilityStoryboard is null)
+                {
+                    _visibilityOpacity = CreateDoubleAnimation(Root, "Opacity", fromOpacity, toOpacity, milliseconds);
+                    _visibilityOffset = CreateDoubleAnimation(RootTranslate, "Y", fromOffset, toOffset, milliseconds);
+                    _visibilityStoryboard = new Storyboard();
+                    _visibilityStoryboard.Children.Add(_visibilityOpacity);
+                    _visibilityStoryboard.Children.Add(_visibilityOffset);
+                }
+
+                var duration = new Duration(TimeSpan.FromMilliseconds(milliseconds));
+                _visibilityOpacity!.From = fromOpacity;
+                _visibilityOpacity.To = toOpacity;
+                _visibilityOpacity.Duration = duration;
+                _visibilityOffset!.From = fromOffset;
+                _visibilityOffset.To = toOffset;
+                _visibilityOffset.Duration = duration;
+                _visibilityStoryboard.Begin();
+            }
+            catch (Exception ex)
+            {
+                _visibilityStoryboard = null;
+                _visibilityOpacity = null;
+                _visibilityOffset = null;
+                try { Root.Opacity = toOpacity; } catch { }
+                try { RootTranslate.Y = toOffset; } catch { }
+                TaskbarQuota.Diagnostics.Log.Debug($"[widget] visibility animation skipped: {ex.Message}");
+            }
         }
 
         private static DoubleAnimation CreateDoubleAnimation(

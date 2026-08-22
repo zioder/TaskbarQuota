@@ -8,10 +8,12 @@ using H.NotifyIcon.Core;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.Windows.AppLifecycle;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Interop;
 using TaskbarQuota.Usage;
 using TaskbarQuota.AgentActivity;
+using TaskbarQuota.Services;
 
 namespace TaskbarQuota.Taskbar
 {
@@ -62,6 +64,9 @@ namespace TaskbarQuota.Taskbar
         private static int _uiHeartbeat;
         private static long _uiHeartbeatObserved = -1;
         private static int _uiHeartbeatMisses;
+        private static int _uiWatchdogStopping;
+        private static int _uiWatchdogRestartRequested;
+        private const int UiWatchdogMissLimit = 3;
 
         private static bool IsFloatingSurface => _activeSurface == WidgetSurfaceMode.Floating;
 
@@ -77,9 +82,34 @@ namespace TaskbarQuota.Taskbar
             if (_uiWatchdogTimer is not null)
                 return;
 
-            _uiWatchdogTimer = new System.Threading.Timer(_ =>
+            Interlocked.Exchange(ref _uiWatchdogStopping, 0);
+            Interlocked.Exchange(ref _uiWatchdogRestartRequested, 0);
+            Interlocked.Exchange(ref _uiHeartbeat, 0);
+            Interlocked.Exchange(ref _uiHeartbeatObserved, -1);
+            Interlocked.Exchange(ref _uiHeartbeatMisses, 0);
+            _uiWatchdogTimer = new System.Threading.Timer(_ => UiWatchdogTick(),
+                null,
+                TimeSpan.FromSeconds(10),
+                TimeSpan.FromSeconds(5));
+        }
+
+        private static void UiWatchdogTick()
+        {
+            if (Volatile.Read(ref _uiWatchdogStopping) != 0)
+                return;
+
+            try
             {
-                _dispatcher?.TryEnqueue(() => Interlocked.Increment(ref _uiHeartbeat));
+                try
+                {
+                    _dispatcher?.TryEnqueue(() => Interlocked.Increment(ref _uiHeartbeat));
+                }
+                catch (Exception ex)
+                {
+                    // Treat a queue/COM failure as a missed heartbeat and let the normal threshold logic
+                    // decide whether the dispatcher is unrecoverable.
+                    Log.Debug($"UI watchdog could not enqueue heartbeat: {ex.Message}");
+                }
 
                 int current = Interlocked.CompareExchange(ref _uiHeartbeat, 0, 0);
                 long observed = Interlocked.Read(ref _uiHeartbeatObserved);
@@ -93,13 +123,40 @@ namespace TaskbarQuota.Taskbar
                 // Same value as last check: either the queue is idle-closed (TryEnqueue returned false
                 // forever) or the thread is gone. Three strikes ≈ 15 s of silence.
                 int misses = Interlocked.Increment(ref _uiHeartbeatMisses);
-                if (misses == 3)
+                if (ShouldRestartUiWatchdog(
+                    misses,
+                    App.IsQuitting,
+                    Volatile.Read(ref _uiWatchdogRestartRequested) != 0)
+                    && Interlocked.CompareExchange(ref _uiWatchdogRestartRequested, 1, 0) == 0)
                 {
                     Log.Error("UI thread stopped servicing heartbeats for ~15s; taskbar widget is dead until " +
-                              "the app is restarted (likely WinUI stowed exception, issue #70). Background " +
-                              "services are still running.");
+                              "the app is restarted (likely WinUI stowed exception, issue #70). Requesting " +
+                              "an automatic restart; background services are still running.");
+                    RequestUiRestart();
                 }
-            }, null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(5));
+            }
+            catch (Exception ex)
+            {
+                // A closed DispatcherQueue or a failed restart request must not let the watchdog itself
+                // become another unhandled thread-pool exception.
+                Log.Warning(ex, "UI watchdog tick failed");
+            }
+        }
+
+        internal static bool ShouldRestartUiWatchdog(int misses, bool isQuitting, bool restartRequested)
+            => misses >= UiWatchdogMissLimit && !isQuitting && !restartRequested;
+
+        private static void RequestUiRestart()
+        {
+            try
+            {
+                var reason = AppInstance.Restart(StartupSettingsService.StartupArgument);
+                Log.Error($"UI watchdog restart result: {reason}");
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "UI watchdog could not request an app restart");
+            }
         }
 
         public static void Initialize(DispatcherQueue dispatcher, Action showMainWindow)
@@ -1129,6 +1186,9 @@ namespace TaskbarQuota.Taskbar
             UsageCoordinator.Instance.IsOwnUiEngaged = null;
             WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
             _initialized = false;
+            Interlocked.Exchange(ref _uiWatchdogStopping, 1);
+            _uiWatchdogTimer?.Dispose();
+            _uiWatchdogTimer = null;
             _widgetHealthTimer?.Stop();
             _widgetHealthTimer = null;
             _topologyRecoveryTimer?.Stop();
