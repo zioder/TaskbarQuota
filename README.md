@@ -70,7 +70,7 @@ The Cost page combines locally available usage across providers. It includes:
 - reported costs when available, with estimates from bundled pricing data otherwise;
 - shareable summary cards.
 
-Cost coverage depends on the data stored by each provider. TaskbarQuota labels estimated values and does not invent a cost when it lacks enough information.
+Cost coverage depends on the data stored by each provider. Codex, Claude, Grok, OpenCode, Cline, and Z.ai are read from local logs or databases. Cursor is estimated from composer context meters in `state.vscdb` (current Cursor builds store zeros in per-bubble token counts). Antigravity is estimated from visible transcript text. TaskbarQuota labels estimated values and does not invent a cost when it lacks enough information.
 
 ### Dashboard and notifications
 
