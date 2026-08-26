@@ -139,19 +139,16 @@ namespace TaskbarQuota
         {
             IsSyncing = true;
             _providerGroup.MenuItems.Clear();
-            foreach (var provider in UsageCoordinator.Instance.Service.All)
+            foreach (var card in _viewModel.Cards)
             {
-                var card = _viewModel.Cards.Concat(_viewModel.AvailableCards)
-                    .FirstOrDefault(candidate => candidate.ProviderId == provider.Id);
-                var displayName = card?.DisplayName ?? provider.DisplayName;
                 var item = new NavigationViewItem
                 {
-                    Content = displayName,
-                    Tag = provider.Id,
-                    Icon = CreateProviderIcon(provider.Id),
+                    Content = card.DisplayName,
+                    Tag = card.ProviderId,
+                    Icon = CreateProviderIcon(card.ProviderId),
                     HorizontalAlignment = HorizontalAlignment.Stretch,
                 };
-                ApplyPinBadge(item, provider.Id, displayName);
+                ApplyPinBadge(item, card.ProviderId, card.DisplayName);
                 _providerGroup.MenuItems.Add(item);
             }
 
