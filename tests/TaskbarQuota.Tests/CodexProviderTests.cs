@@ -53,7 +53,7 @@ public class CodexProviderTests
               "plan_type": "plus",
               "rate_limit": {
                 "primary_window": {
-                  "used_percent": 0,
+                  "used_percent": 12,
                   "limit_window_seconds": 604800,
                   "reset_at": 1893542400
                 }
@@ -65,9 +65,66 @@ public class CodexProviderTests
         var result = CodexProvider.BuildResult(doc.RootElement);
 
         Assert.Equal("Weekly", result.Usage.Primary.Label);
-        Assert.Equal(0, result.Usage.Primary.UsedPercent);
+        Assert.Equal(12, result.Usage.Primary.UsedPercent);
         Assert.True(result.Usage.HasPrimaryWindow);
         Assert.Null(result.Usage.Secondary);
+        Assert.NotNull(result.Usage.Primary.ResetDescription);
+    }
+
+    [Fact]
+    public void BuildResult_FreeMonthlyOnlyWindow_RelabelsPrimaryAsMonthly()
+    {
+        // Free ChatGPT/Codex plans use a ~30-day window instead of weekly.
+        var resetAt = DateTimeOffset.UtcNow.AddDays(29).AddHours(23).ToUnixTimeSeconds();
+        var json = $$"""
+            {
+              "plan_type": "free",
+              "rate_limit": {
+                "primary_window": {
+                  "used_percent": 5,
+                  "limit_window_seconds": 2592000,
+                  "reset_at": {{resetAt}}
+                }
+              }
+            }
+            """;
+        using var doc = JsonDocument.Parse(json);
+
+        var result = CodexProvider.BuildResult(doc.RootElement);
+
+        Assert.Equal("Free", result.Usage.LoginMethod);
+        Assert.Equal("Monthly", result.Usage.Primary.Label);
+        Assert.Equal(5, result.Usage.Primary.UsedPercent);
+        Assert.True(result.Usage.HasPrimaryWindow);
+        Assert.Null(result.Usage.Secondary);
+        Assert.StartsWith("29d", result.Usage.Primary.ResetDescription);
+    }
+
+    [Fact]
+    public void BuildResult_UnusedWindow_ClearsResetCountdown()
+    {
+        // Unused Free windows still report a full-period reset_at (~29d 23h). Hide it until used.
+        var resetAt = DateTimeOffset.UtcNow.AddDays(29).AddHours(23).ToUnixTimeSeconds();
+        var json = $$"""
+            {
+              "plan_type": "free",
+              "rate_limit": {
+                "primary_window": {
+                  "used_percent": 0,
+                  "limit_window_seconds": 2592000,
+                  "reset_at": {{resetAt}}
+                }
+              }
+            }
+            """;
+        using var doc = JsonDocument.Parse(json);
+
+        var result = CodexProvider.BuildResult(doc.RootElement);
+
+        Assert.Equal("Monthly", result.Usage.Primary.Label);
+        Assert.Equal(0, result.Usage.Primary.UsedPercent);
+        Assert.Null(result.Usage.Primary.ResetDescription);
+        Assert.NotNull(result.Usage.Primary.ResetAt);
     }
 
     [Fact]
