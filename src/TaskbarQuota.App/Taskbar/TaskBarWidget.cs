@@ -660,7 +660,7 @@ namespace TaskbarQuota.Taskbar
                 hostFadeStoryboard = null;
                 try { content.Opacity = to; } catch { }
                 InvokeAnimationCompletion(completed);
-                Log.Debug($"[widget] host fade skipped: {ex.Message}");
+                Log.Warning(ex, "[widget] host fade skipped");
             }
         }
 
@@ -673,7 +673,11 @@ namespace TaskbarQuota.Taskbar
             catch (Exception ex) { Log.Debug($"[widget] animation completion skipped: {ex.Message}"); }
         }
 
-        public void Destroy() => appWindow?.Destroy();
+        public void Destroy()
+        {
+            StopHostStoryboards();
+            appWindow?.Destroy();
+        }
 
         public void UpdatePosition(bool resetManualPosition = false)
         {
@@ -1252,7 +1256,8 @@ namespace TaskbarQuota.Taskbar
             }
             catch (Exception ex)
             {
-                Log.Debug($"[widget] tile move animation failed: {ex.Message}");
+                Log.Warning(ex, "[widget] tile move animation failed");
+                return;
             }
 
             // Swap rather than reassign: the outgoing dictionary becomes next pass's scratch buffer.
@@ -1385,7 +1390,7 @@ namespace TaskbarQuota.Taskbar
                     content.Opacity = 1;
                 }
                 catch { }
-                Log.Debug($"[widget] layout animation skipped: {ex.Message}");
+                Log.Warning(ex, "[widget] layout animation skipped");
             }
         }
 
@@ -1462,7 +1467,7 @@ namespace TaskbarQuota.Taskbar
                 activityFadeStoryboard = null;
                 try { content.Opacity = to; } catch { }
                 InvokeAnimationCompletion(completed);
-                Log.Debug($"[widget] activity fade skipped: {ex.Message}");
+                Log.Warning(ex, "[widget] activity fade skipped");
             }
         }
 
@@ -2346,7 +2351,7 @@ namespace TaskbarQuota.Taskbar
                     activityTransform.TranslateX = 0;
                 }
                 catch { }
-                Log.Debug($"[widget] pair-swap animation skipped: {ex.Message}");
+                Log.Warning(ex, "[widget] pair-swap animation skipped");
             }
         }
 
@@ -3467,8 +3472,28 @@ namespace TaskbarQuota.Taskbar
             try { positionUpdateGate.Dispose(); } catch { }
         }
 
+        private void StopHostStoryboards()
+        {
+            StopStoryboard(ref hostFadeStoryboard);
+            StopStoryboard(ref activityFadeStoryboard);
+            StopStoryboard(ref quotaLayoutStoryboard);
+            StopStoryboard(ref activityLayoutStoryboard);
+            StopStoryboard(ref swapVisualStoryboard);
+            foreach (var tile in tiles)
+                tile?.StopAnimations();
+            activitySummary?.StopAnimations();
+        }
+
+        private static void StopStoryboard(ref Anim.Storyboard? storyboard)
+        {
+            try { storyboard?.Stop(); }
+            catch { }
+            storyboard = null;
+        }
+
         private void DisposeWindowResources()
         {
+            StopHostStoryboards();
             if (hwnd != IntPtr.Zero)
                 HostOwners.TryRemove(hwnd, out _);
             if (activityHwnd != IntPtr.Zero)

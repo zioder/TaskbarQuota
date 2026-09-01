@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -108,7 +109,7 @@ namespace TaskbarQuota.Taskbar
                 {
                     // Treat a queue/COM failure as a missed heartbeat and let the normal threshold logic
                     // decide whether the dispatcher is unrecoverable.
-                    Log.Debug($"UI watchdog could not enqueue heartbeat: {ex.Message}");
+                    Log.Warning(ex, "UI watchdog could not enqueue heartbeat");
                 }
 
                 int current = Interlocked.CompareExchange(ref _uiHeartbeat, 0, 0);
@@ -132,7 +133,11 @@ namespace TaskbarQuota.Taskbar
                     Log.Error("UI thread stopped servicing heartbeats for ~15s; taskbar widget is dead until " +
                               "the app is restarted (likely WinUI stowed exception, issue #70). Requesting " +
                               "an automatic restart; background services are still running.");
-                    RequestUiRestart();
+                    if (!RequestUiRestart())
+                    {
+                        // Do not leave the one-shot latch set after a failed spawn — later ticks must retry.
+                        Interlocked.Exchange(ref _uiWatchdogRestartRequested, 0);
+                    }
                 }
             }
             catch (Exception ex)
@@ -146,16 +151,73 @@ namespace TaskbarQuota.Taskbar
         internal static bool ShouldRestartUiWatchdog(int misses, bool isQuitting, bool restartRequested)
             => misses >= UiWatchdogMissLimit && !isQuitting && !restartRequested;
 
-        private static void RequestUiRestart()
+        /// <summary>
+        /// Best-effort recovery for a dead dispatcher. <see cref="AppInstance.Restart"/> needs a foreground
+        /// window and will not return on success, so a tray-only widget with a wedged UI thread has to
+        /// unregister the single-instance key and start a replacement process itself.
+        /// Returns true when a new process was started (this process should then exit).
+        /// </summary>
+        private static bool RequestUiRestart()
         {
             try
             {
                 var reason = AppInstance.Restart(StartupSettingsService.StartupArgument);
-                Log.Error($"UI watchdog restart result: {reason}");
+                Log.Error($"UI watchdog AppInstance.Restart returned {reason}; falling back to a new process");
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "UI watchdog could not request an app restart");
+                Log.Error(ex, "UI watchdog AppInstance.Restart threw; falling back to a new process");
+            }
+
+            if (!TrySpawnReplacementProcess())
+            {
+                Log.Error("UI watchdog could not start a replacement process; will retry on the next miss streak");
+                return false;
+            }
+
+            Environment.Exit(1);
+            return true;
+        }
+
+        private static bool TrySpawnReplacementProcess()
+        {
+            var path = Environment.ProcessPath;
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                Log.Error("UI watchdog replacement path is missing");
+                return false;
+            }
+
+            try
+            {
+                AppInstance.GetCurrent().UnregisterKey();
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "UI watchdog could not unregister the single-instance key");
+            }
+
+            try
+            {
+                var started = Process.Start(new ProcessStartInfo
+                {
+                    FileName = path,
+                    Arguments = StartupSettingsService.StartupArgument,
+                    UseShellExecute = false,
+                });
+                if (started is null)
+                {
+                    Log.Error("UI watchdog Process.Start returned null");
+                    return false;
+                }
+
+                Log.Error($"UI watchdog started replacement pid {started.Id}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "UI watchdog Process.Start failed");
+                return false;
             }
         }
 

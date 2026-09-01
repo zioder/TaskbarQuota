@@ -59,6 +59,15 @@ public sealed partial class AgentActivitySummary : UserControl
         Loaded += (_, _) => ApplyForeground();
         ActualThemeChanged += (_, _) => ApplyForeground();
         PointerWheelChanged += AgentActivitySummary_PointerWheelChanged;
+        Unloaded += (_, _) => StopAnimations();
+    }
+
+    internal void StopAnimations()
+    {
+        try { _selectionStoryboard?.Stop(); } catch { }
+        try { _appearanceStoryboard?.Stop(); } catch { }
+        _selectionStoryboard = null;
+        _appearanceStoryboard = null;
     }
 
     private void OpenActivityButton_Click(object sender, RoutedEventArgs e)

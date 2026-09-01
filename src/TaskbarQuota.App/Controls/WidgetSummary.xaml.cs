@@ -181,6 +181,7 @@ namespace TaskbarQuota.Controls
             Unloaded += (_, _) =>
             {
                 WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
+                StopAnimations();
             };
         }
 
@@ -1026,7 +1027,7 @@ namespace TaskbarQuota.Controls
                 _slideStoryboard = null;
                 _slideAnimation = null;
                 try { RootTranslate.X = 0; } catch { }
-                TaskbarQuota.Diagnostics.Log.Debug($"[widget] slide animation skipped: {ex.Message}");
+                TaskbarQuota.Diagnostics.Log.Warning(ex, "[widget] slide animation skipped");
             }
         }
 
@@ -1125,7 +1126,7 @@ namespace TaskbarQuota.Controls
                 _softRefreshStoryboard = null;
                 _softRefreshAnimation = null;
                 try { Panel.Opacity = to; } catch { }
-                TaskbarQuota.Diagnostics.Log.Debug($"[widget] panel animation skipped: {ex.Message}");
+                TaskbarQuota.Diagnostics.Log.Warning(ex, "[widget] panel animation skipped");
             }
         }
 
@@ -1175,8 +1176,30 @@ namespace TaskbarQuota.Controls
                 _visibilityOffset = null;
                 try { Root.Opacity = toOpacity; } catch { }
                 try { RootTranslate.Y = toOffset; } catch { }
-                TaskbarQuota.Diagnostics.Log.Debug($"[widget] visibility animation skipped: {ex.Message}");
+                TaskbarQuota.Diagnostics.Log.Warning(ex, "[widget] visibility animation skipped");
             }
+        }
+
+        /// <summary>
+        /// Stops in-flight storyboards before the visual tree is destroyed. A storyboard whose target is
+        /// already gone is a common source of stowed exception 0xc000027b (issue #70).
+        /// </summary>
+        internal void StopAnimations()
+        {
+            StopStoryboard(ref _slideStoryboard);
+            _slideAnimation = null;
+            StopStoryboard(ref _visibilityStoryboard);
+            _visibilityOpacity = null;
+            _visibilityOffset = null;
+            StopStoryboard(ref _softRefreshStoryboard);
+            _softRefreshAnimation = null;
+        }
+
+        private static void StopStoryboard(ref Storyboard? storyboard)
+        {
+            try { storyboard?.Stop(); }
+            catch { }
+            storyboard = null;
         }
 
         private static DoubleAnimation CreateDoubleAnimation(

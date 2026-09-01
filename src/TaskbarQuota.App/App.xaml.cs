@@ -90,8 +90,8 @@ namespace TaskbarQuota
             {
                 var result = Kernel32.RegisterApplicationRestart(
                     widgetStartup ? StartupSettingsService.StartupArgument : null,
-                    ApplicationRestart.None);
-                Log.Debug($"Registered Windows restart recovery: 0x{result.ToInt64():X}");
+                    ApplicationRestart.NoReboot);
+                Log.Debug($"Registered Windows restart recovery: HRESULT 0x{result:X8}");
             }
             catch (Exception ex)
             {
@@ -219,6 +219,8 @@ namespace TaskbarQuota
         public static void Quit()
         {
             IsQuitting = true;
+            try { Kernel32.UnregisterApplicationRestart(); }
+            catch (Exception ex) { Log.Warning(ex, "Could not unregister Windows restart recovery"); }
             Quitting?.Invoke();
             Current.Exit();
         }
