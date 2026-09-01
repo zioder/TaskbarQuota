@@ -92,8 +92,10 @@ namespace TaskbarQuota.Usage.Providers
                     primary = WithLabel(primary, "Weekly");
             }
 
-            // Unused windows still carry a far-future reset_at (often ~full period remaining, e.g. "29d 23h"
-            // on Free). That countdown is meaningless until quota is actually consumed — clear it for UI.
+            // Codex leaves used_percent at 0 until the agent is actually used, while still advertising a
+            // far-future reset_at (often ~full period remaining, e.g. "29d 23h" on Free). That countdown is
+            // a phantom until quota is consumed — including after a real reset, which also returns 0% until
+            // the next use. Clear the subtitle for UI; keep ResetAt for replenishment math.
             primary = ClearUnusedReset(primary);
             if (secondary != null) secondary = ClearUnusedReset(secondary);
             if (codeReview != null) codeReview = ClearUnusedReset(codeReview);
@@ -240,6 +242,8 @@ namespace TaskbarQuota.Usage.Providers
         private static RateWindow WithLabel(RateWindow window, string label)
             => new(window.UsedPercent, window.WindowMinutes, window.ResetAt, window.ResetDescription, label);
 
+        // Hide the reset subtitle at 0%. Codex does not populate used_percent until the agent is used, so
+        // 0% means "not started" (or "reset and idle"), not "N days remaining".
         private static RateWindow ClearUnusedReset(RateWindow window)
             => window.UsedPercent > 0
                 ? window

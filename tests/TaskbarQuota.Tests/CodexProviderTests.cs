@@ -128,6 +128,82 @@ public class CodexProviderTests
     }
 
     [Fact]
+    public void BuildResult_FractionalUse_KeepsResetCountdown()
+    {
+        // used_percent can be 0.1 while the widget still paints "0%". The countdown must stay once use started.
+        var resetAt = DateTimeOffset.UtcNow.AddDays(29).AddHours(23).ToUnixTimeSeconds();
+        var json = $$"""
+            {
+              "plan_type": "free",
+              "rate_limit": {
+                "primary_window": {
+                  "used_percent": 0.1,
+                  "limit_window_seconds": 2592000,
+                  "reset_at": {{resetAt}}
+                }
+              }
+            }
+            """;
+        using var doc = JsonDocument.Parse(json);
+
+        var result = CodexProvider.BuildResult(doc.RootElement);
+
+        Assert.Equal("Monthly", result.Usage.Primary.Label);
+        Assert.Equal(0.1, result.Usage.Primary.UsedPercent);
+        Assert.NotNull(result.Usage.Primary.ResetDescription);
+    }
+
+    [Fact]
+    public void BuildResult_UnusedExtraWindow_ClearsResetCountdown()
+    {
+        var resetAt = DateTimeOffset.UtcNow.AddDays(6).ToUnixTimeSeconds();
+        var json = $$"""
+            {
+              "plan_type": "pro",
+              "rate_limit": {
+                "primary_window": {
+                  "used_percent": 10,
+                  "limit_window_seconds": 18000,
+                  "reset_at": {{resetAt}}
+                },
+                "secondary_window": {
+                  "used_percent": 5,
+                  "limit_window_seconds": 604800,
+                  "reset_at": {{resetAt}}
+                }
+              },
+              "additional_rate_limits": [
+                {
+                  "limit_name": "GPT-5.3-Codex-Spark",
+                  "rate_limit": {
+                    "primary_window": {
+                      "used_percent": 0,
+                      "limit_window_seconds": 18000,
+                      "reset_at": {{resetAt}}
+                    },
+                    "secondary_window": {
+                      "used_percent": 0,
+                      "limit_window_seconds": 604800,
+                      "reset_at": {{resetAt}}
+                    }
+                  }
+                }
+              ]
+            }
+            """;
+        using var doc = JsonDocument.Parse(json);
+
+        var result = CodexProvider.BuildResult(doc.RootElement);
+
+        var session = Assert.Single(result.Usage.ExtraRateWindows, w => w.Title == "Spark Session");
+        var weekly = Assert.Single(result.Usage.ExtraRateWindows, w => w.Title == "Spark Weekly");
+        Assert.Null(session.Window.ResetDescription);
+        Assert.Null(weekly.Window.ResetDescription);
+        Assert.NotNull(session.Window.ResetAt);
+        Assert.NotNull(weekly.Window.ResetAt);
+    }
+
+    [Fact]
     public void BuildResult_SessionOnlyShortWindow_KeepsSessionLabel()
     {
         // A lone sub-day window is still a real 5h session — must not be relabeled Weekly.
