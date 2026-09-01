@@ -53,7 +53,7 @@ public class CodexProviderTests
               "plan_type": "plus",
               "rate_limit": {
                 "primary_window": {
-                  "used_percent": 0,
+                  "used_percent": 12,
                   "limit_window_seconds": 604800,
                   "reset_at": 1893542400
                 }
@@ -65,9 +65,142 @@ public class CodexProviderTests
         var result = CodexProvider.BuildResult(doc.RootElement);
 
         Assert.Equal("Weekly", result.Usage.Primary.Label);
-        Assert.Equal(0, result.Usage.Primary.UsedPercent);
+        Assert.Equal(12, result.Usage.Primary.UsedPercent);
         Assert.True(result.Usage.HasPrimaryWindow);
         Assert.Null(result.Usage.Secondary);
+        Assert.NotNull(result.Usage.Primary.ResetDescription);
+    }
+
+    [Fact]
+    public void BuildResult_FreeMonthlyOnlyWindow_RelabelsPrimaryAsMonthly()
+    {
+        // Free ChatGPT/Codex plans use a ~30-day window instead of weekly.
+        var resetAt = DateTimeOffset.UtcNow.AddDays(29).AddHours(23).ToUnixTimeSeconds();
+        var json = $$"""
+            {
+              "plan_type": "free",
+              "rate_limit": {
+                "primary_window": {
+                  "used_percent": 5,
+                  "limit_window_seconds": 2592000,
+                  "reset_at": {{resetAt}}
+                }
+              }
+            }
+            """;
+        using var doc = JsonDocument.Parse(json);
+
+        var result = CodexProvider.BuildResult(doc.RootElement);
+
+        Assert.Equal("Free", result.Usage.LoginMethod);
+        Assert.Equal("Monthly", result.Usage.Primary.Label);
+        Assert.Equal(5, result.Usage.Primary.UsedPercent);
+        Assert.True(result.Usage.HasPrimaryWindow);
+        Assert.Null(result.Usage.Secondary);
+        Assert.StartsWith("29d", result.Usage.Primary.ResetDescription);
+    }
+
+    [Fact]
+    public void BuildResult_UnusedWindow_ClearsResetCountdown()
+    {
+        // Unused Free windows still report a full-period reset_at (~29d 23h). Hide it until used.
+        var resetAt = DateTimeOffset.UtcNow.AddDays(29).AddHours(23).ToUnixTimeSeconds();
+        var json = $$"""
+            {
+              "plan_type": "free",
+              "rate_limit": {
+                "primary_window": {
+                  "used_percent": 0,
+                  "limit_window_seconds": 2592000,
+                  "reset_at": {{resetAt}}
+                }
+              }
+            }
+            """;
+        using var doc = JsonDocument.Parse(json);
+
+        var result = CodexProvider.BuildResult(doc.RootElement);
+
+        Assert.Equal("Monthly", result.Usage.Primary.Label);
+        Assert.Equal(0, result.Usage.Primary.UsedPercent);
+        Assert.Null(result.Usage.Primary.ResetDescription);
+        Assert.NotNull(result.Usage.Primary.ResetAt);
+    }
+
+    [Fact]
+    public void BuildResult_FractionalUse_KeepsResetCountdown()
+    {
+        // used_percent can be 0.1 while the widget still paints "0%". The countdown must stay once use started.
+        var resetAt = DateTimeOffset.UtcNow.AddDays(29).AddHours(23).ToUnixTimeSeconds();
+        var json = $$"""
+            {
+              "plan_type": "free",
+              "rate_limit": {
+                "primary_window": {
+                  "used_percent": 0.1,
+                  "limit_window_seconds": 2592000,
+                  "reset_at": {{resetAt}}
+                }
+              }
+            }
+            """;
+        using var doc = JsonDocument.Parse(json);
+
+        var result = CodexProvider.BuildResult(doc.RootElement);
+
+        Assert.Equal("Monthly", result.Usage.Primary.Label);
+        Assert.Equal(0.1, result.Usage.Primary.UsedPercent);
+        Assert.NotNull(result.Usage.Primary.ResetDescription);
+    }
+
+    [Fact]
+    public void BuildResult_UnusedExtraWindow_ClearsResetCountdown()
+    {
+        var resetAt = DateTimeOffset.UtcNow.AddDays(6).ToUnixTimeSeconds();
+        var json = $$"""
+            {
+              "plan_type": "pro",
+              "rate_limit": {
+                "primary_window": {
+                  "used_percent": 10,
+                  "limit_window_seconds": 18000,
+                  "reset_at": {{resetAt}}
+                },
+                "secondary_window": {
+                  "used_percent": 5,
+                  "limit_window_seconds": 604800,
+                  "reset_at": {{resetAt}}
+                }
+              },
+              "additional_rate_limits": [
+                {
+                  "limit_name": "GPT-5.3-Codex-Spark",
+                  "rate_limit": {
+                    "primary_window": {
+                      "used_percent": 0,
+                      "limit_window_seconds": 18000,
+                      "reset_at": {{resetAt}}
+                    },
+                    "secondary_window": {
+                      "used_percent": 0,
+                      "limit_window_seconds": 604800,
+                      "reset_at": {{resetAt}}
+                    }
+                  }
+                }
+              ]
+            }
+            """;
+        using var doc = JsonDocument.Parse(json);
+
+        var result = CodexProvider.BuildResult(doc.RootElement);
+
+        var session = Assert.Single(result.Usage.ExtraRateWindows, w => w.Title == "Spark Session");
+        var weekly = Assert.Single(result.Usage.ExtraRateWindows, w => w.Title == "Spark Weekly");
+        Assert.Null(session.Window.ResetDescription);
+        Assert.Null(weekly.Window.ResetDescription);
+        Assert.NotNull(session.Window.ResetAt);
+        Assert.NotNull(weekly.Window.ResetAt);
     }
 
     [Fact]
