@@ -152,6 +152,12 @@ namespace TaskbarQuota
                 _providerGroup.MenuItems.Add(item);
             }
 
+            if (_requestedProviderId is ProviderId requested
+                && !_viewModel.Cards.Any(card => card.ProviderId == requested))
+            {
+                _requestedProviderId = null;
+            }
+
             SyncSelection();
             IsSyncing = false;
         }
