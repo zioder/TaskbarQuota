@@ -1,6 +1,6 @@
 {
   "$comment": "Supplemental pricing. Prices models that no public catalog carries, supplies fast-variant multipliers the catalogs omit, and maps provider log model slugs to canonical pricing keys (LiteLLM keys, models.dev ids, or entries in this file). Rates are USD per million tokens.",
-  "updated_at": "2026-07-14",
+  "updated_at": "2026-09-01",
   "pricing": {
     "auto": {
       "input_per_million": 1.25,
@@ -111,18 +111,18 @@
       "output_per_million": 6.0
     },
     "gemini-3.6-flash": {
-      "$comment": "Antigravity Gemini 3.6 Flash. Public catalogs do not list this slug yet; priced with Gemini 3.5 Flash rates.",
-      "input_per_million": 1.5,
-      "cache_write_per_million": 1.5,
-      "cache_read_per_million": 0.15,
-      "output_per_million": 9.0
+      "$comment": "Google Gemini 3.6 Flash intro pricing through 2026-12-31. Standard after that is $1.50 input / $7.50 output. Cache read is 10% of input.",
+      "input_per_million": 0.75,
+      "cache_write_per_million": 0.75,
+      "cache_read_per_million": 0.075,
+      "output_per_million": 3.75
     },
     "gemini-3.7-flash": {
-      "$comment": "Antigravity Gemini 3.7 Flash (MODEL_PLACEHOLDER_M299). Public catalogs do not list this slug yet; priced with Gemini 3.5 Flash rates.",
-      "input_per_million": 1.5,
-      "cache_write_per_million": 1.5,
-      "cache_read_per_million": 0.15,
-      "output_per_million": 9.0
+      "$comment": "Google Gemini 3.7 Flash (MODEL_PLACEHOLDER_M299) intro pricing through 2026-12-31. Standard after that is $1.50 input / $7.50 output. Cache read is 10% of input.",
+      "input_per_million": 0.75,
+      "cache_write_per_million": 0.75,
+      "cache_read_per_million": 0.075,
+      "output_per_million": 3.75
     }
   },
   "fast_multipliers": {
@@ -171,7 +171,7 @@
     { "pattern": "^claude-fable-5(?:-thinking)?(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "claude-fable-5" },
     { "pattern": "^claude-sonnet-5(?:-thinking)?(?:-(?:low|medium|high|xhigh|max))?$", "canonical": "claude-sonnet-5" },
     { "pattern": "^gemini-2\\.5-flash$", "canonical": "gemini-2.5-flash" },
-    { "pattern": "^gemini-3$", "canonical": "gemini-3-pro-preview" },
+    { "pattern": "^gemini-3$", "canonical": "gemini-3.7-flash" },
     { "pattern": "^gemini-3-flash(?:-preview)?$", "canonical": "gemini-3-flash-preview" },
     { "pattern": "^gemini-3\\.5-flash(?:-preview)?$", "canonical": "gemini-3.5-flash" },
     { "pattern": "^gemini-3\\.6-flash(?:-preview)?$", "canonical": "gemini-3.6-flash" },

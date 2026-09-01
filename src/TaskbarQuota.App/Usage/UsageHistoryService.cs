@@ -179,9 +179,6 @@ namespace TaskbarQuota.Usage
                     if (!cursorSeen.Add(path))
                         continue;
                     yield return path;
-                    foreach (var companion in SqliteCompanions(path).Where(File.Exists))
-                        if (cursorSeen.Add(companion))
-                            yield return companion;
                 }
                 yield break;
             }
@@ -437,6 +434,9 @@ namespace TaskbarQuota.Usage
         {
             var events = new List<UsageEvent>();
             var composersWithExactTokens = new HashSet<string>(StringComparer.Ordinal);
+            var cutoff = now.AddDays(-91);
+            var cutoffMs = cutoff.ToUnixTimeMilliseconds();
+            var cutoffIso = cutoff.UtcDateTime.ToString("o", CultureInfo.InvariantCulture);
             using var connection = OpenReadOnlyDatabase(path);
             if (!SqliteTableExists(connection, "cursorDiskKV"))
                 return events;
@@ -450,7 +450,15 @@ namespace TaskbarQuota.Usage
                             (instr(value, '"inputTokens":') > 0 AND instr(value, '"inputTokens":0') = 0)
                          OR (instr(value, '"outputTokens":') > 0 AND instr(value, '"outputTokens":0') = 0)
                       )
+                      AND (
+                            CAST(json_extract(value, '$.lastUpdatedAt') AS INTEGER) >= $cutoffMs
+                         OR CAST(json_extract(value, '$.createdAt') AS INTEGER) >= $cutoffMs
+                         OR json_extract(value, '$.lastUpdatedAt') >= $cutoffIso
+                         OR json_extract(value, '$.createdAt') >= $cutoffIso
+                      )
                     """;
+                bubbles.Parameters.AddWithValue("$cutoffMs", cutoffMs);
+                bubbles.Parameters.AddWithValue("$cutoffIso", cutoffIso);
                 using var reader = bubbles.ExecuteReader();
                 while (reader.Read())
                 {
@@ -463,8 +471,10 @@ namespace TaskbarQuota.Usage
                     var composerId = CursorComposerIdFromBubbleKey(key);
                     if (composerId.Length > 0)
                         composersWithExactTokens.Add(composerId);
-                    if (!TryCursorTimestamp(root, out var timestamp))
+                    if (!TryCursorActivityTimestamp(root, out var timestamp))
                         timestamp = now;
+                    if (timestamp < cutoff)
+                        continue;
                     events.Add(new UsageEvent(
                         timestamp,
                         ReadCursorBubbleModel(root),
@@ -480,7 +490,15 @@ namespace TaskbarQuota.Usage
                 composers.CommandText = """
                     SELECT key, value FROM cursorDiskKV
                     WHERE key LIKE 'composerData:%'
+                      AND (
+                            CAST(json_extract(value, '$.lastUpdatedAt') AS INTEGER) >= $cutoffMs
+                         OR CAST(json_extract(value, '$.createdAt') AS INTEGER) >= $cutoffMs
+                         OR json_extract(value, '$.lastUpdatedAt') >= $cutoffIso
+                         OR json_extract(value, '$.createdAt') >= $cutoffIso
+                      )
                     """;
+                composers.Parameters.AddWithValue("$cutoffMs", cutoffMs);
+                composers.Parameters.AddWithValue("$cutoffIso", cutoffIso);
                 using var reader = composers.ExecuteReader();
                 while (reader.Read())
                 {
@@ -496,7 +514,10 @@ namespace TaskbarQuota.Usage
                     var inputTokens = ReadCursorComposerInputTokens(root);
                     if (inputTokens == 0)
                         continue;
-                    if (!TryUnixTimestamp(ReadDirectInt64(root, "createdAt") ?? ReadDirectInt64(root, "lastUpdatedAt"), out var timestamp))
+                    // Context-window snapshot: stamp with lastUpdatedAt so Today follows activity, not create day.
+                    if (!TryCursorActivityTimestamp(root, out var timestamp))
+                        continue;
+                    if (timestamp < cutoff)
                         continue;
                     events.Add(new UsageEvent(
                         timestamp,
@@ -615,11 +636,20 @@ namespace TaskbarQuota.Usage
             return split <= 0 ? rest : rest[..split];
         }
 
-        private static bool TryCursorTimestamp(JsonElement root, out DateTimeOffset timestamp)
+        private static bool TryCursorActivityTimestamp(JsonElement root, out DateTimeOffset timestamp)
         {
-            if (TryFindTimestamp(root, out timestamp))
+            if (TryCursorFieldTimestamp(root, "lastUpdatedAt", out timestamp))
                 return true;
-            return TryUnixTimestamp(ReadDirectInt64(root, "createdAt") ?? ReadDirectInt64(root, "lastUpdatedAt"), out timestamp);
+            return TryCursorFieldTimestamp(root, "createdAt", out timestamp);
+        }
+
+        private static bool TryCursorFieldTimestamp(JsonElement root, string name, out DateTimeOffset timestamp)
+        {
+            if (TryUnixTimestamp(ReadDirectInt64(root, name), out timestamp))
+                return true;
+            var text = ReadDirectString(root, name);
+            return text is not null
+                && DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out timestamp);
         }
 
         /// <summary>
@@ -664,7 +694,8 @@ namespace TaskbarQuota.Usage
                     && !type.Equals("AGENT_RESPONSE", StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                var output = EstimateTokensFromText(ReadAntigravityText(root, "content"));
+                var output = EstimateTokensFromText(ReadAntigravityText(root, "content"))
+                    + EstimateTokensFromText(ReadAntigravityToolCalls(root));
                 if (output == 0)
                     continue;
                 events.Add(new UsageEvent(
@@ -701,13 +732,6 @@ namespace TaskbarQuota.Usage
                     return NormalizeAntigravityModel(agentName);
             }
 
-            foreach (var root in AntigravityHomes())
-            {
-                var selected = ReadAntigravityLastSelectedModel(root);
-                if (!string.IsNullOrWhiteSpace(selected))
-                    return selected;
-            }
-
             return "gemini-3.7-flash";
         }
 
@@ -724,54 +748,55 @@ namespace TaskbarQuota.Usage
                 : cliHome.Trim();
         }
 
+        private static readonly Dictionary<string, (long WriteTicks, Dictionary<string, string> Agents)> AntigravityMetadataCache = new(StringComparer.OrdinalIgnoreCase);
+
         private static string? ReadAntigravityAgentName(string root, string sessionId)
         {
-            var path = Path.Combine(root, "cache", "conversation_metadata.json");
-            if (!File.Exists(path) || string.IsNullOrWhiteSpace(sessionId))
+            if (string.IsNullOrWhiteSpace(sessionId))
                 return null;
+            var map = LoadAntigravityMetadata(root);
+            return map.TryGetValue(sessionId, out var name) ? name : null;
+        }
+
+        private static IReadOnlyDictionary<string, string> LoadAntigravityMetadata(string root)
+        {
+            var path = Path.Combine(root, "cache", "conversation_metadata.json");
+            if (!File.Exists(path))
+                return new Dictionary<string, string>(StringComparer.Ordinal);
             try
             {
+                var ticks = File.GetLastWriteTimeUtc(path).Ticks;
+                if (AntigravityMetadataCache.TryGetValue(path, out var cached) && cached.WriteTicks == ticks)
+                    return cached.Agents;
+
+                var agents = new Dictionary<string, string>(StringComparer.Ordinal);
                 using var document = JsonDocument.Parse(ReadSharedText(path));
                 var conversations = document.RootElement.TryGetProperty("conversations", out var value)
                     ? value
                     : document.RootElement;
-                if (conversations.ValueKind != JsonValueKind.Object
-                    || !conversations.TryGetProperty(sessionId, out var entry)
-                    || entry.ValueKind != JsonValueKind.Object)
-                    return null;
-                var summary = entry.TryGetProperty("summary", out var summaryNode)
-                    && summaryNode.ValueKind == JsonValueKind.Object
-                    ? summaryNode
-                    : entry;
-                return ReadDirectString(summary, "AgentName")
-                    ?? ReadDirectString(summary, "agentName");
-            }
-            catch (IOException) { return null; }
-            catch (UnauthorizedAccessException) { return null; }
-            catch (JsonException) { return null; }
-        }
-
-        private static string? ReadAntigravityLastSelectedModel(string root)
-        {
-            var path = Path.Combine(root, "antigravity_state.pbtxt");
-            if (!File.Exists(path))
-                return null;
-            try
-            {
-                foreach (var line in ReadSharedLines(path))
+                if (conversations.ValueKind == JsonValueKind.Object)
                 {
-                    const string prefix = "last_selected_agent_model:";
-                    var trimmed = line.Trim();
-                    if (!trimmed.StartsWith(prefix, StringComparison.Ordinal))
-                        continue;
-                    var raw = trimmed[prefix.Length..].Trim().Trim('"');
-                    if (raw.Length > 0)
-                        return NormalizeAntigravityModel(raw);
+                    foreach (var entry in conversations.EnumerateObject())
+                    {
+                        if (entry.Value.ValueKind != JsonValueKind.Object)
+                            continue;
+                        var summary = entry.Value.TryGetProperty("summary", out var summaryNode)
+                            && summaryNode.ValueKind == JsonValueKind.Object
+                            ? summaryNode
+                            : entry.Value;
+                        var name = ReadDirectString(summary, "AgentName")
+                            ?? ReadDirectString(summary, "agentName");
+                        if (!string.IsNullOrWhiteSpace(name))
+                            agents[entry.Name] = name;
+                    }
                 }
+
+                AntigravityMetadataCache[path] = (ticks, agents);
+                return agents;
             }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
-            return null;
+            catch (IOException) { return new Dictionary<string, string>(StringComparer.Ordinal); }
+            catch (UnauthorizedAccessException) { return new Dictionary<string, string>(StringComparer.Ordinal); }
+            catch (JsonException) { return new Dictionary<string, string>(StringComparer.Ordinal); }
         }
 
         private static string NormalizeAntigravityModel(string? model)
@@ -779,7 +804,7 @@ namespace TaskbarQuota.Usage
             if (string.IsNullOrWhiteSpace(model))
                 return "gemini-3.7-flash";
             var trimmed = model.Trim();
-            if (trimmed.Equals("MODEL_PLACEHOLDER_M299", StringComparison.OrdinalIgnoreCase)
+            if (trimmed.StartsWith("MODEL_PLACEHOLDER", StringComparison.OrdinalIgnoreCase)
                 || trimmed.Contains("3.7", StringComparison.OrdinalIgnoreCase)
                     && trimmed.Contains("flash", StringComparison.OrdinalIgnoreCase))
                 return "gemini-3.7-flash";
@@ -790,6 +815,16 @@ namespace TaskbarQuota.Usage
                 && trimmed.Contains("flash", StringComparison.OrdinalIgnoreCase))
                 return "gemini-3.5-flash";
             return trimmed;
+        }
+
+        private static string ReadAntigravityToolCalls(JsonElement root)
+        {
+            if (!root.TryGetProperty("tool_calls", out var value)
+                && !root.TryGetProperty("toolCalls", out value))
+                return string.Empty;
+            return value.ValueKind is JsonValueKind.Array or JsonValueKind.Object
+                ? value.GetRawText()
+                : string.Empty;
         }
 
         private static bool TryAntigravityTimestamp(JsonElement root, out DateTimeOffset timestamp)
@@ -1477,11 +1512,14 @@ namespace TaskbarQuota.Usage
                     : null;
 
         private static long? ReadDirectInt64(JsonElement element, string name)
-            => element.ValueKind == JsonValueKind.Object
-                && element.TryGetProperty(name, out var value)
-                && value.TryGetInt64(out var number)
-                    ? number
-                    : null;
+        {
+            if (element.ValueKind != JsonValueKind.Object
+                || !element.TryGetProperty(name, out var value)
+                || value.ValueKind != JsonValueKind.Number
+                || !value.TryGetInt64(out var number))
+                return null;
+            return number;
+        }
 
         private static long? ReadNestedInt64(JsonElement element, string objectName, string valueName)
             => element.ValueKind == JsonValueKind.Object

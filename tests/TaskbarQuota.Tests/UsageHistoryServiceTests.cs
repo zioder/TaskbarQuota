@@ -413,6 +413,70 @@ namespace TaskbarQuota.Tests
         }
 
         [Fact]
+        public void CursorComposerCredit_UsesLastUpdatedAtNotCreatedAt()
+        {
+            var directory = CreateTemporaryDirectory();
+            try
+            {
+                var path = Path.Combine(directory, "state.vscdb");
+                var created = new DateTimeOffset(2026, 7, 20, 10, 0, 0, TimeSpan.Zero).ToUnixTimeMilliseconds();
+                var updated = new DateTimeOffset(2026, 8, 5, 11, 0, 0, TimeSpan.Zero).ToUnixTimeMilliseconds();
+                using (var connection = new SqliteConnection($"Data Source={path};Pooling=False"))
+                {
+                    connection.Open();
+                    Execute(connection, "CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);");
+                    using var insert = connection.CreateCommand();
+                    insert.CommandText = "INSERT INTO cursorDiskKV VALUES ($key, $value);";
+                    insert.Parameters.AddWithValue("$key", "composerData:composer-1");
+                    insert.Parameters.AddWithValue("$value", $$"""
+                        {
+                          "createdAt": {{created}},
+                          "lastUpdatedAt": {{updated}},
+                          "contextTokensUsed": 10000,
+                          "modelConfig": { "modelName": "composer-2" }
+                        }
+                        """);
+                    insert.ExecuteNonQuery();
+                }
+
+                var now = new DateTimeOffset(2026, 8, 5, 12, 0, 0, TimeSpan.Zero);
+                var history = UsageHistoryService.BuildFromFilesForTesting(ProviderId.Cursor, new[] { path }, now);
+
+                Assert.Equal(10000UL, history.Today!.Tokens);
+            }
+            finally
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public void CursorComposerCredit_AcceptsIsoCreatedAt()
+        {
+            var directory = CreateTemporaryDirectory();
+            try
+            {
+                var path = Path.Combine(directory, "state.vscdb");
+                using (var connection = new SqliteConnection($"Data Source={path};Pooling=False"))
+                {
+                    connection.Open();
+                    Execute(connection, "CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);");
+                    Execute(connection,
+                        """INSERT INTO cursorDiskKV VALUES ('composerData:composer-1', '{"createdAt":"2026-08-05T10:00:00Z","contextTokensUsed":8000,"modelConfig":{"modelName":"composer-2"}}');""");
+                }
+
+                var now = new DateTimeOffset(2026, 8, 5, 12, 0, 0, TimeSpan.Zero);
+                var history = UsageHistoryService.BuildFromFilesForTesting(ProviderId.Cursor, new[] { path }, now);
+
+                Assert.Equal(8000UL, history.Today!.Tokens);
+            }
+            finally
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
         public void CursorBubbleTokens_ReplaceComposerContextCredit()
         {
             var directory = CreateTemporaryDirectory();
@@ -462,9 +526,8 @@ namespace TaskbarQuota.Tests
                 var now = new DateTimeOffset(2026, 8, 5, 12, 0, 0, TimeSpan.Zero);
                 var history = UsageHistoryService.BuildFromFilesForTesting(ProviderId.Antigravity, new[] { path }, now);
 
-                Assert.Equal(30UL, history.Today!.Tokens);
-                Assert.Equal(10UL, history.Today.UncachedInputTokens);
-                Assert.Equal(20UL, history.Today.OutputTokens);
+                Assert.Equal(10UL, history.Today!.UncachedInputTokens);
+                Assert.True(history.Today.OutputTokens > 20);
                 Assert.True(history.Today.CostEstimated);
                 Assert.True(history.Today.EstimatedCostUsd > 0);
                 Assert.Equal("gemini-3.7-flash", history.Today.ModelBreakdown!.Models[0].Model);
@@ -477,20 +540,15 @@ namespace TaskbarQuota.Tests
         }
 
         [Fact]
-        public void AntigravityTranscript_MapsSelectedPlaceholderToGemini37Flash()
+        public void AntigravityTranscript_MapsLineModelPlaceholderToGemini37Flash()
         {
             var directory = CreateTemporaryDirectory();
-            var previousGuiHome = Environment.GetEnvironmentVariable("ANTIGRAVITY_GUI_HOME");
-            var previousCliHome = Environment.GetEnvironmentVariable("ANTIGRAVITY_CLI_HOME");
             try
             {
-                Environment.SetEnvironmentVariable("ANTIGRAVITY_GUI_HOME", directory);
-                Environment.SetEnvironmentVariable("ANTIGRAVITY_CLI_HOME", directory);
-                File.WriteAllText(Path.Combine(directory, "antigravity_state.pbtxt"), "last_selected_agent_model: MODEL_PLACEHOLDER_M299\n");
-                var transcriptDirectory = Path.Combine(directory, "brain", "conv-2", ".system_generated", "logs");
+                var transcriptDirectory = Path.Combine(directory, "conv-2", ".system_generated", "logs");
                 Directory.CreateDirectory(transcriptDirectory);
                 var path = Path.Combine(transcriptDirectory, "transcript.jsonl");
-                File.WriteAllText(path, """{"type":"USER_INPUT","created_at":"2026-08-05T10:00:00Z","content":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}""");
+                File.WriteAllText(path, """{"type":"USER_INPUT","created_at":"2026-08-05T10:00:00Z","model":"MODEL_PLACEHOLDER_M299","content":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}""");
 
                 var now = new DateTimeOffset(2026, 8, 5, 12, 0, 0, TimeSpan.Zero);
                 var history = UsageHistoryService.BuildFromFilesForTesting(ProviderId.Antigravity, new[] { path }, now);
@@ -499,8 +557,6 @@ namespace TaskbarQuota.Tests
             }
             finally
             {
-                Environment.SetEnvironmentVariable("ANTIGRAVITY_GUI_HOME", previousGuiHome);
-                Environment.SetEnvironmentVariable("ANTIGRAVITY_CLI_HOME", previousCliHome);
                 Directory.Delete(directory, recursive: true);
             }
         }
