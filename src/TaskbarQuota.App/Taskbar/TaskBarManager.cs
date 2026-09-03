@@ -799,7 +799,9 @@ namespace TaskbarQuota.Taskbar
 
             foreach (var provider in providers)
             {
-                if (provider != coordinator.ActiveProvider)
+                // Disabled providers must not leak fetches through adaptive history either.
+                if (provider != coordinator.ActiveProvider
+                    && !ProviderDiscoveryService.IsExplicitlyDisabled(provider))
                     _ = coordinator.RefreshWidgetProviderAsync(provider);
             }
         }

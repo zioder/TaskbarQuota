@@ -90,7 +90,10 @@ namespace TaskbarQuota.ViewModels
                 if (card.ProviderId != id)
                     continue;
 
-                EnableAvailableProvider(id);
+                // An explicitly-disabled provider must never be re-enabled by selection —
+                // only the Settings toggle opts back in.
+                if (!ProviderDiscoveryService.IsExplicitlyDisabled(id))
+                    EnableAvailableProvider(id);
                 return;
             }
         }

@@ -605,6 +605,11 @@ namespace TaskbarQuota
 
         private async Task RefreshSynaraUsageAsync(ProviderId targetProvider)
         {
+            // A disabled provider must not leak fetches through Synara switch refreshes either
+            // (issue #83): detection still tracks it, but nothing may fetch it.
+            if (ProviderDiscoveryService.IsExplicitlyDisabled(targetProvider))
+                return;
+
             try
             {
                 var fresh = (await _service.FetchAsync(targetProvider, force: true).ConfigureAwait(false))
@@ -659,7 +664,11 @@ namespace TaskbarQuota
                 if (modelProvider is ProviderId backgroundProvider
                     && ShouldRefreshOpenCodeProvider(backgroundProvider))
                 {
-                    if (!await RefreshProviderCacheSilentlyAsync(backgroundProvider).ConfigureAwait(false))
+                    // Disabled providers must not leak fetches through OpenCode's background cache
+                    // refresh either (issue #83). Skipping keeps the debounce observation recorded,
+                    // so the same state-file event does not re-trigger.
+                    if (!ProviderDiscoveryService.IsExplicitlyDisabled(backgroundProvider)
+                        && !await RefreshProviderCacheSilentlyAsync(backgroundProvider).ConfigureAwait(false))
                         ForgetOpenCodeProviderObservation(backgroundProvider);
                 }
                 return;
@@ -717,6 +726,12 @@ namespace TaskbarQuota
 
             try
             {
+                // Disabled providers must not leak fetches through OpenCode model-switch
+                // refreshes either (issue #83). Detection bookkeeping above still runs; only
+                // the network refresh and state publish are skipped.
+                if (ProviderDiscoveryService.IsExplicitlyDisabled(target))
+                    return;
+
                 var fresh = (await _service.FetchAsync(target, force: true).ConfigureAwait(false))
                     .WithSource(SourceFor(target));
                 if (!fresh.Ok)
@@ -851,6 +866,11 @@ namespace TaskbarQuota
 
             try
             {
+                // Disabled providers must not leak fetches through Cline switch refreshes
+                // either (issue #83).
+                if (ProviderDiscoveryService.IsExplicitlyDisabled(target))
+                    return;
+
                 var fresh = (await _service.FetchAsync(target, force: true).ConfigureAwait(false))
                     .WithSource(SourceFor(target));
                 await _gate.WaitAsync().ConfigureAwait(false);
@@ -908,10 +928,14 @@ namespace TaskbarQuota
         /// widget routes it to that tile. The tick only ever fetches the ACTIVE provider, so without this a
         /// pinned tile would freeze on its boot snapshot. Cheap: <see cref="UsageService.FetchAsync"/> is
         /// cache-TTL gated, so most calls return the cached snapshot without touching the network. Leaves
-        /// <see cref="LastState"/> and the active provider alone.
+        /// <see cref="LastState"/> and the active provider alone. Disabled providers never hold tiles, so
+        /// refreshing one would be a fetch leak and is refused (issue #83).
         /// </summary>
         public async Task RefreshWidgetProviderAsync(ProviderId id)
         {
+            if (ProviderDiscoveryService.IsExplicitlyDisabled(id))
+                return;
+
             lock (_widgetRefreshInFlight)
             {
                 if (!_widgetRefreshInFlight.Add(id))
@@ -953,7 +977,7 @@ namespace TaskbarQuota
         {
             var active = ActiveProvider;
             var tasks = _service.All
-                .Where(p => force || ProviderDiscoveryService.ShouldFetch(p.Id, active))
+                .Where(p => ShouldFetchForDashboard(p.Id, force, active))
                 .Select(p => Task.Run(() => _service.FetchAsync(p.Id, force, ct), ct))
                 .ToList();
 
@@ -965,6 +989,15 @@ namespace TaskbarQuota
                 onResult(result.WithSource(SourceFor(result.Id)));
             }
         }
+
+        /// <summary>
+        /// Provider filter for dashboard fetch passes. A manual refresh widens the cache policy
+        /// (force), never the provider set: explicitly-disabled providers are never fetched —
+        /// not when forced, and not when they are the active provider (issue #83).
+        /// </summary>
+        internal static bool ShouldFetchForDashboard(ProviderId id, bool force, ProviderId? active)
+            => !ProviderDiscoveryService.IsExplicitlyDisabled(id)
+                && (force || ProviderDiscoveryService.ShouldFetch(id, active));
 
         /// <summary>Fetch every registered provider once so the cache is warm and each is verified.</summary>
         public async Task WarmUpAsync()
@@ -1123,24 +1156,29 @@ namespace TaskbarQuota
             if (!await _gate.WaitAsync(0).ConfigureAwait(false)) return;
             try
             {
-                var result = await _service.FetchAsync(target, force).ConfigureAwait(false);
-                result = result.WithSource(SourceFor(target));
-
-                // The active provider may have changed while we awaited the network; if so, drop this
-                // stale result and let the next tick fetch the current target.
-                if (target != (_lastActive ?? WidgetDisplayProvider ?? ProviderId.Codex))
-                    return;
-
-                if (target != _lastLogged)
+                // A disabled provider must not leak network fetches either: nothing is allowed
+                // to display it, so only the widget fallback below stays fresh.
+                if (!ProviderDiscoveryService.IsExplicitlyDisabled(target))
                 {
-                    _lastLogged = target;
-                    if (result.Ok && result.Fetch is { } f)
-                        Diagnostics.Log.Information($"Switched to {target} (detected={detected}) session={f.Usage.Primary.UsedPercent:0}% weekly={f.Usage.Secondary?.UsedPercent ?? -1:0}% plan={f.Usage.LoginMethod}");
-                    else
-                        Diagnostics.Log.Warning($"Switched to {target} (detected={detected}) FAILED: {result.Error}");
+                    var result = await _service.FetchAsync(target, force).ConfigureAwait(false);
+                    result = result.WithSource(SourceFor(target));
+
+                    // The active provider may have changed while we awaited the network; if so, drop this
+                    // stale result and let the next tick fetch the current target.
+                    if (target != (_lastActive ?? WidgetDisplayProvider ?? ProviderId.Codex))
+                        return;
+
+                    if (target != _lastLogged)
+                    {
+                        _lastLogged = target;
+                        if (result.Ok && result.Fetch is { } f)
+                            Diagnostics.Log.Information($"Switched to {target} (detected={detected}) session={f.Usage.Primary.UsedPercent:0}% weekly={f.Usage.Secondary?.UsedPercent ?? -1:0}% plan={f.Usage.LoginMethod}");
+                        else
+                            Diagnostics.Log.Warning($"Switched to {target} (detected={detected}) FAILED: {result.Error}");
+                    }
+                    LastState = result;
+                    StateChanged?.Invoke(result);
                 }
-                LastState = result;
-                StateChanged?.Invoke(result);
 
                 await PublishWidgetProviderStateAsync(target, force).ConfigureAwait(false);
             }
