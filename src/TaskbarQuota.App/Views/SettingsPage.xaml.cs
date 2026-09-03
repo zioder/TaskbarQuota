@@ -297,7 +297,9 @@ namespace TaskbarQuota.Views
 
             PinBlockedBar.IsOpen = false;
             ViewModel.ApplyPinned(item, option.IsPinned);
-            if (option.IsPinned)
+            // The normal-mode "Pinned" option has no destination semantics and must preserve the saved
+            // adaptive destination. In adaptive mode, an empty destination deliberately means follow app.
+            if (option.IsPinned && !option.MatchesAnyDestination)
                 WidgetSettingsService.SetPinnedProviderDisplay(item.Id, option.DisplayKey);
             RefreshProviderRow(item);
         }
@@ -481,7 +483,9 @@ namespace TaskbarQuota.Views
             foreach (ProviderId provider in System.Enum.GetValues<ProviderId>())
             {
                 string? saved = WidgetSettingsService.GetPinnedProviderDisplay(provider);
-                if (saved is not null && known.Add(saved))
+                if (saved is not null
+                    && saved != WidgetSettingsService.AllDisplaysPinDestination
+                    && known.Add(saved))
                     _pinOptions.Add(new($"Pinned — {saved} (disconnected)", true, saved));
             }
         }

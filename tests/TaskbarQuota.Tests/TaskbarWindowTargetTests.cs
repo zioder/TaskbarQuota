@@ -50,4 +50,11 @@ public class TaskbarWindowTargetTests
     [InlineData("", 0)]
     public void TryGetDisplayNumber_reads_gdi_display_key(string displayKey, int expected)
         => Assert.Equal(expected, TaskbarWindowTarget.TryGetDisplayNumber(displayKey));
+
+    [Theory]
+    [InlineData("DISPLAY2", "Screen 2")]
+    [InlineData("legacy-monitor-key", "this screen")]
+    [InlineData(WidgetSettingsService.AllDisplaysPinDestination, "all screens")]
+    public void GetDisplayLabel_never_exposes_internal_display_keys(string displayKey, string expected)
+        => Assert.Equal(expected, TaskbarWindowTarget.GetDisplayLabel(displayKey));
 }

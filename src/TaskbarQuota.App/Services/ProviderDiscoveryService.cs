@@ -32,6 +32,7 @@ public static class ProviderDiscoveryService
     private static readonly HashSet<ProviderId> Configured = new();
     private static readonly HashSet<ProviderId> ExplicitlyEnabled = new();
     private static readonly HashSet<ProviderId> ExplicitlyDisabled = new();
+    private static readonly HashSet<ProviderId> ExplicitlyWidgetDisabled = new();
 
     /// <summary>Test hook for open/use evidence without running foreground detection.</summary>
     internal static Func<ProviderId, bool>? IsRecentlyActiveOverrideForTesting;
@@ -84,7 +85,9 @@ public static class ProviderDiscoveryService
 
             // Never auto-show: visibility flips only via explicit user action
             // (Settings toggle, pin, OAuth login). A successful fetch of an idle
-            // provider must not resurrect it on the dashboard or widget.
+            // provider must not resurrect it on the dashboard or widget, and an
+            // explicit widget hide (SetWidgetVisibilityPreference) is never overridden.
+
             if (result.ErrorKind == ProviderErrorKind.NotInstalled
                 && !ProviderInstallDetector.IsInstalled(result.Id)
                 && WidgetSettingsService.AutoHideUnavailable
@@ -128,12 +131,35 @@ public static class ProviderDiscoveryService
         {
             ExplicitlyEnabled.Add(id);
             ExplicitlyDisabled.Remove(id);
-            bool widgetChanged = WidgetSettingsService.SetProviderVisibleSilent(id, true);
+            // A widget-level hide (SetWidgetVisibilityPreference) is a separate user choice:
+            // enabling the provider in Settings must not re-show a tile the user hid, while
+            // the dashboard card follows the enable.
+            bool widgetChanged = false;
+            if (!ExplicitlyWidgetDisabled.Contains(id))
+                widgetChanged = WidgetSettingsService.SetProviderVisibleSilent(id, true);
             bool dashboardChanged = WidgetSettingsService.SetProviderDashboardVisibleSilent(id, true);
             if (widgetChanged)
                 WidgetSettingsService.SaveProviderVisibilityAndNotify();
             if (dashboardChanged)
                 WidgetSettingsService.SaveDashboardProviderVisibilityAndNotify();
+            Save();
+        }
+    }
+
+    /// <summary>
+    /// Records a user widget-visibility choice separately from automatic provider discovery, so an
+    /// installed provider that the user hid is not silently restored on the next launch.
+    /// </summary>
+    public static void SetWidgetVisibilityPreference(ProviderId id, bool visible)
+    {
+        lock (SyncRoot)
+        {
+            if (visible)
+                ExplicitlyWidgetDisabled.Remove(id);
+            else
+                ExplicitlyWidgetDisabled.Add(id);
+
+            WidgetSettingsService.SetProviderVisible(id, visible);
             Save();
         }
     }
@@ -214,6 +240,7 @@ public static class ProviderDiscoveryService
             Configured.Clear();
             ExplicitlyEnabled.Clear();
             ExplicitlyDisabled.Clear();
+            ExplicitlyWidgetDisabled.Clear();
             IsRecentlyActiveOverrideForTesting = null;
         }
     }
@@ -236,37 +263,70 @@ public static class ProviderDiscoveryService
             ExplicitlyDisabled.Add(id);
     }
 
+    internal static void MarkExplicitlyWidgetDisabledForTesting(ProviderId id)
+    {
+        lock (SyncRoot)
+            ExplicitlyWidgetDisabled.Add(id);
+    }
+
     private static void Load()
     {
+        bool hasExplicitWidgetState = false;
         try
         {
-            if (!File.Exists(StatePath))
-                return;
+            if (File.Exists(StatePath))
+            {
+                var state = JsonSerializer.Deserialize<DiscoveryState>(File.ReadAllText(StatePath));
+                if (state is not null)
+                {
+                    foreach (var id in state.Probed ?? [])
+                        if (Enum.TryParse<ProviderId>(id, out var parsed))
+                            Probed.Add(parsed);
 
-            var state = JsonSerializer.Deserialize<DiscoveryState>(File.ReadAllText(StatePath));
-            if (state is null)
-                return;
+                    foreach (var id in state.Configured ?? [])
+                        if (Enum.TryParse<ProviderId>(id, out var parsed))
+                            Configured.Add(parsed);
 
-            foreach (var id in state.Probed ?? [])
-                if (Enum.TryParse<ProviderId>(id, out var parsed))
-                    Probed.Add(parsed);
+                    foreach (var id in state.ExplicitlyEnabled ?? [])
+                        if (Enum.TryParse<ProviderId>(id, out var parsed))
+                            ExplicitlyEnabled.Add(parsed);
 
-            foreach (var id in state.Configured ?? [])
-                if (Enum.TryParse<ProviderId>(id, out var parsed))
-                    Configured.Add(parsed);
+                    foreach (var id in state.ExplicitlyDisabled ?? [])
+                        if (Enum.TryParse<ProviderId>(id, out var parsed))
+                            ExplicitlyDisabled.Add(parsed);
 
-            foreach (var id in state.ExplicitlyEnabled ?? [])
-                if (Enum.TryParse<ProviderId>(id, out var parsed))
-                    ExplicitlyEnabled.Add(parsed);
+                    foreach (var id in state.ExplicitlyWidgetDisabled ?? [])
+                        if (Enum.TryParse<ProviderId>(id, out var parsed))
+                            ExplicitlyWidgetDisabled.Add(parsed);
 
-            foreach (var id in state.ExplicitlyDisabled ?? [])
-                if (Enum.TryParse<ProviderId>(id, out var parsed))
-                    ExplicitlyDisabled.Add(parsed);
+                    hasExplicitWidgetState = state.ExplicitlyWidgetDisabled is not null;
+                }
+            }
         }
         catch
         {
             // Best effort — rediscover on next fetch.
         }
+
+        if (hasExplicitWidgetState)
+            return;
+
+        // v1.2/v1.3 stored widget visibility but did not record that a false value came from the
+        // user. Migrate only widget-only hides. Automatic discovery hides both dashboard and
+        // widget, so those remain eligible to reappear if the provider is installed later.
+        bool migrated = false;
+        foreach (ProviderId id in Enum.GetValues<ProviderId>())
+        {
+            bool widgetHidden = WidgetSettingsService.TryGetProviderVisibilityOverride(id, out bool widgetVisible)
+                && !widgetVisible;
+            bool dashboardHidden = WidgetSettingsService.TryGetDashboardProviderVisibilityOverride(id, out bool dashboardVisible)
+                && !dashboardVisible;
+            if (widgetHidden && !dashboardHidden)
+                migrated |= ExplicitlyWidgetDisabled.Add(id);
+        }
+
+        if (migrated)
+            Save();
     }
 
     private static void Save()
@@ -280,6 +340,7 @@ public static class ProviderDiscoveryService
                 Configured = Configured.Select(id => id.ToString()).OrderBy(s => s).ToArray(),
                 ExplicitlyEnabled = ExplicitlyEnabled.Select(id => id.ToString()).OrderBy(s => s).ToArray(),
                 ExplicitlyDisabled = ExplicitlyDisabled.Select(id => id.ToString()).OrderBy(s => s).ToArray(),
+                ExplicitlyWidgetDisabled = ExplicitlyWidgetDisabled.Select(id => id.ToString()).OrderBy(s => s).ToArray(),
             };
             File.WriteAllText(StatePath, JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true }));
         }
@@ -295,5 +356,6 @@ public static class ProviderDiscoveryService
         public string[]? Configured { get; set; }
         public string[]? ExplicitlyEnabled { get; set; }
         public string[]? ExplicitlyDisabled { get; set; }
+        public string[]? ExplicitlyWidgetDisabled { get; set; }
     }
 }

@@ -839,16 +839,8 @@ namespace TaskbarQuota
             string? fixedDisplay = WidgetSettingsService.GetPinnedProviderDisplay(id);
             string pinDescription = fixedDisplay is null
                 ? "pinned — follows app screen"
-                : $"pinned to {DisplayLabel(fixedDisplay)}";
+                : $"pinned to {TaskbarWindowTarget.GetDisplayLabel(fixedDisplay)}";
             ToolTipService.SetToolTip(button, pinned ? $"{displayName} — {pinDescription}" : displayName);
-        }
-
-        private static string DisplayLabel(string displayKey)
-        {
-            if (displayKey == WidgetSettingsService.AllDisplaysPinDestination)
-                return "all screens";
-            int number = TaskbarWindowTarget.TryGetDisplayNumber(displayKey);
-            return number > 0 ? $"Screen {number}" : displayKey;
         }
 
         /// <summary>

@@ -247,6 +247,50 @@ public class ProviderDiscoveryServiceTests
     }
 
     [Fact]
+    public void SyncInstalledProviderVisibility_PreservesExplicitWidgetHide()
+    {
+        // An explicit widget hide is user intent: sync must never flip it back on, and the
+        // new no-auto-show rules mean the dashboard card is not resurrected either.
+        ProviderInstallDetector.IsInstalledOverrideForTesting = id => id == ProviderId.Grok;
+        WidgetSettingsService.SetProviderVisibleForTesting(ProviderId.Grok, false);
+        WidgetSettingsService.SetProviderDashboardVisibleForTesting(ProviderId.Grok, false);
+        ProviderDiscoveryService.MarkExplicitlyWidgetDisabledForTesting(ProviderId.Grok);
+
+        ProviderDiscoveryService.SyncInstalledProviderVisibility();
+
+        Assert.False(WidgetSettingsService.IsProviderVisible(ProviderId.Grok));
+        Assert.False(WidgetSettingsService.IsProviderDashboardVisible(ProviderId.Grok));
+    }
+
+    [Fact]
+    public void EnableProvider_DoesNotRestoreExplicitlyWidgetHiddenTile()
+    {
+        // Enabling in Settings opts the provider back into the dashboard, but a tile the
+        // user hid via SetWidgetVisibilityPreference stays hidden (issue #75's guarantee).
+        ProviderInstallDetector.IsInstalledOverrideForTesting = id => id == ProviderId.Grok;
+        ProviderDiscoveryService.SetWidgetVisibilityPreference(ProviderId.Grok, visible: false);
+
+        ProviderDiscoveryService.EnableProvider(ProviderId.Grok);
+
+        Assert.True(ProviderDiscoveryService.IsExplicitlyEnabled(ProviderId.Grok));
+        Assert.True(WidgetSettingsService.IsProviderDashboardVisible(ProviderId.Grok));
+        Assert.False(WidgetSettingsService.IsProviderVisible(ProviderId.Grok));
+    }
+
+    [Fact]
+    public void EnableProvider_ShowsTileAgainAfterWidgetPreferenceCleared()
+    {
+        ProviderInstallDetector.IsInstalledOverrideForTesting = id => id == ProviderId.Grok;
+        ProviderDiscoveryService.SetWidgetVisibilityPreference(ProviderId.Grok, visible: false);
+        ProviderDiscoveryService.SetWidgetVisibilityPreference(ProviderId.Grok, visible: true);
+
+        ProviderDiscoveryService.EnableProvider(ProviderId.Grok);
+
+        Assert.True(WidgetSettingsService.IsProviderVisible(ProviderId.Grok));
+        Assert.True(WidgetSettingsService.IsProviderDashboardVisible(ProviderId.Grok));
+    }
+
+    [Fact]
     public void ShouldFetch_SkipsExplicitlyDisabledInstalledProvider()
     {
         ProviderDiscoveryService.MarkExplicitlyDisabledForTesting(ProviderId.Grok);

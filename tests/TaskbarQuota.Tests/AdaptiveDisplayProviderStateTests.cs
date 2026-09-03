@@ -84,4 +84,14 @@ public class AdaptiveDisplayProviderStateTests
         Assert.Null(provider);
         Assert.Empty(state.Providers);
     }
+
+    [Fact]
+    public void WindowLookupDoesNotBorrowTheLastActiveProviderForAnUnknownWindow()
+    {
+        var state = new AdaptiveDisplayProviderState();
+        state.Observe(ProviderId.Codex, "DISPLAY1", new IntPtr(10));
+
+        Assert.Equal(ProviderId.Codex, state.GetProviderForWindow(new IntPtr(10)));
+        Assert.Null(state.GetProviderForWindow(new IntPtr(20)));
+    }
 }

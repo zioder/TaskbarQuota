@@ -464,7 +464,7 @@ namespace TaskbarQuota.Views
             if (sender is not ToggleButton toggle || toggle.Tag is not ProviderCardViewModel card)
                 return;
 
-            WidgetSettingsService.SetProviderVisible(card.ProviderId, toggle.IsChecked == true);
+            ProviderDiscoveryService.SetWidgetVisibilityPreference(card.ProviderId, toggle.IsChecked == true);
             card.IsProviderWidgetVisible = WidgetSettingsService.IsProviderVisible(card.ProviderId);
             // Hiding a provider from the widget also drops its pin, so keep the pin button in step.
             card.IsProviderPinned = WidgetSettingsService.IsProviderPinned(card.ProviderId);
@@ -495,6 +495,9 @@ namespace TaskbarQuota.Views
 
             PinBlockedTip.IsOpen = false;
 
+            if (wantPinned)
+                ProviderDiscoveryService.SetWidgetVisibilityPreference(card.ProviderId, true);
+
             if (wantPinned
                 && _pinHereDisplayKey.Length > 0
                 && WidgetSettingsService.CurrentSurface == WidgetSurfaceMode.Taskbar
@@ -524,20 +527,12 @@ namespace TaskbarQuota.Views
 
             string? fixedDisplay = WidgetSettingsService.GetPinnedProviderDisplay(card.ProviderId);
             string tooltip = card.IsProviderPinned && fixedDisplay is not null
-                ? $"Pinned to {DisplayLabel(fixedDisplay)}"
+                ? $"Pinned to {TaskbarWindowTarget.GetDisplayLabel(fixedDisplay)}"
                 : canPinHere
-                    ? $"Pin {card.DisplayName} to {DisplayLabel(_pinHereDisplayKey)}"
+                    ? $"Pin {card.DisplayName} to {TaskbarWindowTarget.GetDisplayLabel(_pinHereDisplayKey)}"
                     : DefaultPinTooltip;
             ToolTipService.SetToolTip(ProviderPinToggle, tooltip);
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ProviderPinToggle, tooltip);
-        }
-
-        private static string DisplayLabel(string displayKey)
-        {
-            if (displayKey == WidgetSettingsService.AllDisplaysPinDestination)
-                return "all screens";
-            int number = TaskbarWindowTarget.TryGetDisplayNumber(displayKey);
-            return number > 0 ? $"Screen {number}" : "this screen";
         }
 
         private void OpenSetupUrl_Click(object sender, RoutedEventArgs e)
