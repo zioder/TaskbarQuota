@@ -1123,24 +1123,29 @@ namespace TaskbarQuota
             if (!await _gate.WaitAsync(0).ConfigureAwait(false)) return;
             try
             {
-                var result = await _service.FetchAsync(target, force).ConfigureAwait(false);
-                result = result.WithSource(SourceFor(target));
-
-                // The active provider may have changed while we awaited the network; if so, drop this
-                // stale result and let the next tick fetch the current target.
-                if (target != (_lastActive ?? WidgetDisplayProvider ?? ProviderId.Codex))
-                    return;
-
-                if (target != _lastLogged)
+                // A disabled provider must not leak network fetches either: nothing is allowed
+                // to display it, so only the widget fallback below stays fresh.
+                if (!ProviderDiscoveryService.IsExplicitlyDisabled(target))
                 {
-                    _lastLogged = target;
-                    if (result.Ok && result.Fetch is { } f)
-                        Diagnostics.Log.Information($"Switched to {target} (detected={detected}) session={f.Usage.Primary.UsedPercent:0}% weekly={f.Usage.Secondary?.UsedPercent ?? -1:0}% plan={f.Usage.LoginMethod}");
-                    else
-                        Diagnostics.Log.Warning($"Switched to {target} (detected={detected}) FAILED: {result.Error}");
+                    var result = await _service.FetchAsync(target, force).ConfigureAwait(false);
+                    result = result.WithSource(SourceFor(target));
+
+                    // The active provider may have changed while we awaited the network; if so, drop this
+                    // stale result and let the next tick fetch the current target.
+                    if (target != (_lastActive ?? WidgetDisplayProvider ?? ProviderId.Codex))
+                        return;
+
+                    if (target != _lastLogged)
+                    {
+                        _lastLogged = target;
+                        if (result.Ok && result.Fetch is { } f)
+                            Diagnostics.Log.Information($"Switched to {target} (detected={detected}) session={f.Usage.Primary.UsedPercent:0}% weekly={f.Usage.Secondary?.UsedPercent ?? -1:0}% plan={f.Usage.LoginMethod}");
+                        else
+                            Diagnostics.Log.Warning($"Switched to {target} (detected={detected}) FAILED: {result.Error}");
+                    }
+                    LastState = result;
+                    StateChanged?.Invoke(result);
                 }
-                LastState = result;
-                StateChanged?.Invoke(result);
 
                 await PublishWidgetProviderStateAsync(target, force).ConfigureAwait(false);
             }

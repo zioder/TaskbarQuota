@@ -102,7 +102,9 @@ namespace TaskbarQuota
             bool providerIsKnown = _viewModel.Cards.Any(card => card.ProviderId == id)
                 || _viewModel.AvailableCards.Any(card => card.ProviderId == id);
             _viewModel.SelectProvider(id);
-            if (!providerIsKnown)
+            // Never auto-enable an explicitly-disabled provider from navigation —
+            // only the Settings toggle opts back in.
+            if (!providerIsKnown && !ProviderDiscoveryService.IsExplicitlyDisabled(id))
                 _viewModel.EnableAvailableProvider(id);
             return true;
         }
@@ -139,8 +141,15 @@ namespace TaskbarQuota
         {
             IsSyncing = true;
             _providerGroup.MenuItems.Clear();
+            // Only list providers that can actually be displayed. Disabled, not-installed,
+            // and installed-but-idle providers stay hidden so selecting them can never
+            // resurrect them (issue #83).
             foreach (var provider in UsageCoordinator.Instance.Service.All)
             {
+                if (!_viewModel.Cards.Any(card => card.ProviderId == provider.Id)
+                    && !_viewModel.AvailableCards.Any(card => card.ProviderId == provider.Id))
+                    continue;
+
                 var card = _viewModel.Cards.Concat(_viewModel.AvailableCards)
                     .FirstOrDefault(candidate => candidate.ProviderId == provider.Id);
                 var displayName = card?.DisplayName ?? provider.DisplayName;
