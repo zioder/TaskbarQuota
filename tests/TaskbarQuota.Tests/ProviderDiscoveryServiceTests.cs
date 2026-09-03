@@ -264,4 +264,42 @@ public class ProviderDiscoveryServiceTests
         Assert.False(ProviderDiscoveryService.ShouldFetch(ProviderId.Grok, active: null));
         Assert.True(ProviderDiscoveryService.ShouldFetch(ProviderId.Grok, active: ProviderId.Grok));
     }
+
+    [Fact]
+    public void SyncInstalledProviderVisibility_KeepsPinnedProviderVisible()
+    {
+        // A pin is explicit user intent: sync must not clobber its visibility flags even
+        // when nothing is currently detected as installed (issue #83).
+        WidgetSettingsService.SetProviderPinnedForTesting(ProviderId.Grok, true);
+        WidgetSettingsService.SetProviderVisibleForTesting(ProviderId.Grok, true);
+        WidgetSettingsService.SetProviderDashboardVisibleForTesting(ProviderId.Grok, true);
+
+        ProviderDiscoveryService.SyncInstalledProviderVisibility();
+
+        Assert.True(WidgetSettingsService.IsProviderVisible(ProviderId.Grok));
+        Assert.True(WidgetSettingsService.IsProviderDashboardVisible(ProviderId.Grok));
+    }
+
+    [Fact]
+    public void ShouldFetchForDashboard_NeverFetchesDisabledProviderEvenWhenForced()
+    {
+        // The manual-refresh (force) path must not bypass the disabled filter — not even
+        // when the disabled provider is the active one (issue #83).
+        ProviderDiscoveryService.MarkExplicitlyDisabledForTesting(ProviderId.Claude);
+
+        Assert.False(UsageCoordinator.ShouldFetchForDashboard(ProviderId.Claude, force: true, active: ProviderId.Claude));
+        Assert.False(UsageCoordinator.ShouldFetchForDashboard(ProviderId.Claude, force: true, active: null));
+        Assert.False(UsageCoordinator.ShouldFetchForDashboard(ProviderId.Claude, force: false, active: null));
+    }
+
+    [Fact]
+    public void ShouldFetchForDashboard_ForceWidensCachePolicyButNotTheProviderSet()
+    {
+        // Without force the eligibility rules apply: an idle installed provider is not fetched.
+        ProviderInstallDetector.IsInstalledOverrideForTesting = _ => true;
+        Assert.False(UsageCoordinator.ShouldFetchForDashboard(ProviderId.Grok, force: false, active: null));
+
+        // With force any non-disabled provider is refreshed.
+        Assert.True(UsageCoordinator.ShouldFetchForDashboard(ProviderId.Grok, force: true, active: null));
+    }
 }

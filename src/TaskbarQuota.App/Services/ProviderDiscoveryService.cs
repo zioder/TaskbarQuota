@@ -40,8 +40,10 @@ public static class ProviderDiscoveryService
 
     /// <summary>
     /// Enforces "never shown when not installed" against stale settings: hides providers
-    /// with nothing installed unless the user explicitly opted in. Never makes anything
-    /// visible — surfacing is driven by open/use evidence (see
+    /// with nothing installed unless the user explicitly opted in (enabled in Settings, or
+    /// pinned — a pin is explicit intent, so its visibility flags are preserved and the tile
+    /// returns on its own once the provider is installed or configured again). Never makes
+    /// anything visible — surfacing is driven by open/use evidence (see
     /// <see cref="ShouldShowInDashboard"/>) or explicit opt-in.
     /// </summary>
     public static void SyncInstalledProviderVisibility()
@@ -54,7 +56,9 @@ public static class ProviderDiscoveryService
             bool dashboardChanged = false;
             foreach (ProviderId id in Enum.GetValues<ProviderId>())
             {
-                if (ProviderInstallDetector.IsInstalled(id) || ExplicitlyEnabled.Contains(id))
+                if (ProviderInstallDetector.IsInstalled(id)
+                    || ExplicitlyEnabled.Contains(id)
+                    || WidgetSettingsService.IsProviderPinned(id))
                     continue;
 
                 widgetChanged |= WidgetSettingsService.SetProviderVisibleSilent(id, false);
