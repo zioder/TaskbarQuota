@@ -120,6 +120,18 @@ namespace TaskbarQuota.Tests
             }), 6);
         }
 
+        [Theory]
+        [InlineData("gemini-3.6-flash", 0.75, 3.75)]
+        [InlineData("gemini-3.7-flash", 0.75, 3.75)]
+        public void Gemini36And37Flash_UseIntroRates(string modelName, double expectedInputRate, double expectedOutputRate)
+        {
+            var rates = PricingEngine.Resolve(modelName);
+            Assert.NotNull(rates);
+            Assert.Equal(expectedInputRate, rates.InputPerMillion);
+            Assert.Equal(expectedOutputRate, rates.OutputPerMillion);
+            Assert.Equal(0.075, rates.CacheReadPerMillion);
+        }
+
         [Fact]
         public void Glm52Rates_AreDollarsPerMillionRatherThanDollarsPerToken()
         {

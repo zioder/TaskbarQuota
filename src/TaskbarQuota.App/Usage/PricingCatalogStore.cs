@@ -94,7 +94,7 @@ internal sealed class PricingCatalogStore
     {
         var baseDir = Path.Combine(AppContext.BaseDirectory, "Resources", "Pricing");
         var cacheDir = Path.Combine(AppStorage.AppDataDirectory, "pricing");
-        var supplement = ReadSupplement(File.Exists(Path.Combine(cacheDir, "supplement.json")) ? Path.Combine(cacheDir, "supplement.json") : Path.Combine(baseDir, "pricing_supplement.json"));
+        var supplement = ReadSupplement(Path.Combine(baseDir, "pricing_supplement.json"));
         var primary = ReadCatalog(File.Exists(Path.Combine(cacheDir, "litellm.json")) ? Path.Combine(cacheDir, "litellm.json") : Path.Combine(baseDir, "pricing_litellm_snapshot.json"));
         var secondary = ReadCatalog(File.Exists(Path.Combine(cacheDir, "modelsdev.json")) ? Path.Combine(cacheDir, "modelsdev.json") : Path.Combine(baseDir, "pricing_models_dev_snapshot.json"));
         return new Catalog(supplement, primary, secondary);
