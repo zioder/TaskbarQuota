@@ -610,51 +610,74 @@ namespace TaskbarQuota.Taskbar
         {
             if (hostContent is not { } content)
             {
-                completed?.Invoke();
+                InvokeAnimationCompletion(completed);
                 return;
             }
 
-            hostFadeStoryboard?.Stop();
-
-            double from = content.Opacity;
-
-            // When hiding (to == 0) we always run the storyboard, even if the content is already
-            // near-transparent: skipping it would call the completion immediately, which hides the
-            // window without any animation and is the "instant disappear" the user saw.
-            // When showing (to == 1) skip is fine — nothing to animate if we're already opaque.
-            bool skip = Math.Abs(from - to) < 0.01 && to > 0.5;
-            if (skip)
+            try
             {
+                hostFadeStoryboard?.Stop();
+
+                double from = content.Opacity;
+
+                // When hiding (to == 0) we always run the storyboard, even if the content is already
+                // near-transparent: skipping it would call the completion immediately, which hides the
+                // window without any animation and is the "instant disappear" the user saw.
+                // When showing (to == 1) skip is fine — nothing to animate if we're already opaque.
+                bool skip = Math.Abs(from - to) < 0.01 && to > 0.5;
+                if (skip)
+                {
+                    content.Opacity = to;
+                    InvokeAnimationCompletion(completed);
+                    return;
+                }
+
+                // Park the local value at the destination and let the animation supply the start through From,
+                // the same rule the tile animations follow: an interrupted fade then settles visible rather
+                // than leaving the host stuck transparent.
                 content.Opacity = to;
-                completed?.Invoke();
-                return;
+
+                var animation = new Anim.DoubleAnimation
+                {
+                    From = from < 0.01 ? 0.15 : from, // guarantee at least a short visible flash so the fade is perceptible
+                    To = to,
+                    Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(HostFadeMilliseconds)),
+                    EasingFunction = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut },
+                };
+                Anim.Storyboard.SetTarget(animation, content);
+                Anim.Storyboard.SetTargetProperty(animation, "Opacity");
+
+                var storyboard = new Anim.Storyboard();
+                storyboard.Children.Add(animation);
+                if (completed is not null)
+                    storyboard.Completed += (_, _) => InvokeAnimationCompletion(completed);
+
+                hostFadeStoryboard = storyboard;
+                storyboard.Begin();
             }
-
-            // Park the local value at the destination and let the animation supply the start through From,
-            // the same rule the tile animations follow: an interrupted fade then settles visible rather
-            // than leaving the host stuck transparent.
-            content.Opacity = to;
-
-            var animation = new Anim.DoubleAnimation
+            catch (Exception ex)
             {
-                From = from < 0.01 ? 0.15 : from, // guarantee at least a short visible flash so the fade is perceptible
-                To = to,
-                Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(HostFadeMilliseconds)),
-                EasingFunction = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut },
-            };
-            Anim.Storyboard.SetTarget(animation, content);
-            Anim.Storyboard.SetTargetProperty(animation, "Opacity");
-
-            var storyboard = new Anim.Storyboard();
-            storyboard.Children.Add(animation);
-            if (completed is not null)
-                storyboard.Completed += (_, _) => completed();
-
-            hostFadeStoryboard = storyboard;
-            storyboard.Begin();
+                hostFadeStoryboard = null;
+                try { content.Opacity = to; } catch { }
+                InvokeAnimationCompletion(completed);
+                Log.Warning(ex, "[widget] host fade skipped");
+            }
         }
 
-        public void Destroy() => appWindow?.Destroy();
+        private static void InvokeAnimationCompletion(Action? completed)
+        {
+            if (completed is null)
+                return;
+
+            try { completed(); }
+            catch (Exception ex) { Log.Debug($"[widget] animation completion skipped: {ex.Message}"); }
+        }
+
+        public void Destroy()
+        {
+            StopHostStoryboards();
+            appWindow?.Destroy();
+        }
 
         public void UpdatePosition(bool resetManualPosition = false)
         {
@@ -1207,22 +1230,34 @@ namespace TaskbarQuota.Taskbar
 
             // First layout of the session: the tiles have their own reveal animation, nothing to move from.
             bool hadPositions = lastTilePositions.Count > 0;
-            for (int n = 0; n < count; n++)
-            {
-                if (tileProviders[slots[n]] is not { } provider)
-                    continue;
 
-                int target = positions[provider];
-                if (lastTilePositions.TryGetValue(provider, out int previous))
+            // An animation racing a widget teardown raises XAML exceptions that can escalate into stowed
+            // exceptions and take down the whole dispatcher thread (issue #70). Tiles keep their previous
+            // positions on failure; the next health tick re-runs this pass.
+            try
+            {
+                for (int n = 0; n < count; n++)
                 {
-                    // Ignore sub-threshold drift from a value changing width; only real moves animate.
-                    if (Math.Abs(previous - target) >= TileMoveThresholdLogicalPx)
-                        tiles[slots[n]].AnimateSlide(previous - target);
+                    if (tileProviders[slots[n]] is not { } provider)
+                        continue;
+
+                    int target = positions[provider];
+                    if (lastTilePositions.TryGetValue(provider, out int previous))
+                    {
+                        // Ignore sub-threshold drift from a value changing width; only real moves animate.
+                        if (Math.Abs(previous - target) >= TileMoveThresholdLogicalPx)
+                            tiles[slots[n]].AnimateSlide(previous - target);
+                    }
+                    else if (hadPositions)
+                    {
+                        tiles[slots[n]].AnimateSlide(-TileEntryOffsetLogicalPx);
+                    }
                 }
-                else if (hadPositions)
-                {
-                    tiles[slots[n]].AnimateSlide(-TileEntryOffsetLogicalPx);
-                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "[widget] tile move animation failed");
+                return;
             }
 
             // Swap rather than reassign: the outgoing dictionary becomes next pass's scratch buffer.
@@ -1302,46 +1337,61 @@ namespace TaskbarQuota.Taskbar
             if (content?.RenderTransform is not Microsoft.UI.Xaml.Media.CompositeTransform transform)
                 return;
 
-            storyboard?.Stop();
-            transform.TranslateX = travel;
-            transform.ScaleX = 0.985;
-            content.Opacity = Math.Min(content.Opacity <= 0 ? 1 : content.Opacity, 0.94);
-
-            var easing = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut };
-            var slide = new Anim.DoubleAnimation
+            try
             {
-                To = 0,
-                Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(LayoutTransitionMilliseconds)),
-                EasingFunction = easing,
-                EnableDependentAnimation = true,
-            };
-            Anim.Storyboard.SetTarget(slide, transform);
-            Anim.Storyboard.SetTargetProperty(slide, "TranslateX");
+                storyboard?.Stop();
+                transform.TranslateX = travel;
+                transform.ScaleX = 0.985;
+                content.Opacity = Math.Min(content.Opacity <= 0 ? 1 : content.Opacity, 0.94);
 
-            var scale = new Anim.DoubleAnimation
+                var easing = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut };
+                var slide = new Anim.DoubleAnimation
+                {
+                    To = 0,
+                    Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(LayoutTransitionMilliseconds)),
+                    EasingFunction = easing,
+                    EnableDependentAnimation = true,
+                };
+                Anim.Storyboard.SetTarget(slide, transform);
+                Anim.Storyboard.SetTargetProperty(slide, "TranslateX");
+
+                var scale = new Anim.DoubleAnimation
+                {
+                    To = 1,
+                    Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(LayoutTransitionMilliseconds)),
+                    EasingFunction = easing,
+                };
+                Anim.Storyboard.SetTarget(scale, transform);
+                Anim.Storyboard.SetTargetProperty(scale, "ScaleX");
+
+                var fade = new Anim.DoubleAnimation
+                {
+                    To = 1,
+                    Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(LayoutTransitionMilliseconds)),
+                    EasingFunction = easing,
+                };
+                Anim.Storyboard.SetTarget(fade, content);
+                Anim.Storyboard.SetTargetProperty(fade, "Opacity");
+
+                var next = new Anim.Storyboard();
+                next.Children.Add(slide);
+                next.Children.Add(scale);
+                next.Children.Add(fade);
+                storyboard = next;
+                next.Begin();
+            }
+            catch (Exception ex)
             {
-                To = 1,
-                Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(LayoutTransitionMilliseconds)),
-                EasingFunction = easing,
-            };
-            Anim.Storyboard.SetTarget(scale, transform);
-            Anim.Storyboard.SetTargetProperty(scale, "ScaleX");
-
-            var fade = new Anim.DoubleAnimation
-            {
-                To = 1,
-                Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(LayoutTransitionMilliseconds)),
-                EasingFunction = easing,
-            };
-            Anim.Storyboard.SetTarget(fade, content);
-            Anim.Storyboard.SetTargetProperty(fade, "Opacity");
-
-            var next = new Anim.Storyboard();
-            next.Children.Add(slide);
-            next.Children.Add(scale);
-            next.Children.Add(fade);
-            storyboard = next;
-            next.Begin();
+                storyboard = null;
+                try
+                {
+                    transform.TranslateX = 0;
+                    transform.ScaleX = 1;
+                    content.Opacity = 1;
+                }
+                catch { }
+                Log.Warning(ex, "[widget] layout animation skipped");
+            }
         }
 
         private bool SetActivityHostVisible(bool visible)
@@ -1378,37 +1428,47 @@ namespace TaskbarQuota.Taskbar
         {
             if (activityHostContent is not { } content)
             {
-                completed?.Invoke();
+                InvokeAnimationCompletion(completed);
                 return;
             }
 
-            activityFadeStoryboard?.Stop();
-            double from = content.Opacity;
-            bool skip = Math.Abs(from - to) < 0.01 && to > 0.5;
-            if (skip)
+            try
             {
+                activityFadeStoryboard?.Stop();
+                double from = content.Opacity;
+                bool skip = Math.Abs(from - to) < 0.01 && to > 0.5;
+                if (skip)
+                {
+                    content.Opacity = to;
+                    InvokeAnimationCompletion(completed);
+                    return;
+                }
+
                 content.Opacity = to;
-                completed?.Invoke();
-                return;
+                var animation = new Anim.DoubleAnimation
+                {
+                    From = from < 0.01 ? 0.15 : from,
+                    To = to,
+                    Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(HostFadeMilliseconds)),
+                    EasingFunction = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut },
+                };
+                Anim.Storyboard.SetTarget(animation, content);
+                Anim.Storyboard.SetTargetProperty(animation, "Opacity");
+
+                var storyboard = new Anim.Storyboard();
+                storyboard.Children.Add(animation);
+                if (completed is not null)
+                    storyboard.Completed += (_, _) => InvokeAnimationCompletion(completed);
+                activityFadeStoryboard = storyboard;
+                storyboard.Begin();
             }
-
-            content.Opacity = to;
-            var animation = new Anim.DoubleAnimation
+            catch (Exception ex)
             {
-                From = from < 0.01 ? 0.15 : from,
-                To = to,
-                Duration = new Microsoft.UI.Xaml.Duration(TimeSpan.FromMilliseconds(HostFadeMilliseconds)),
-                EasingFunction = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut },
-            };
-            Anim.Storyboard.SetTarget(animation, content);
-            Anim.Storyboard.SetTargetProperty(animation, "Opacity");
-
-            var storyboard = new Anim.Storyboard();
-            storyboard.Children.Add(animation);
-            if (completed is not null)
-                storyboard.Completed += (_, _) => completed();
-            activityFadeStoryboard = storyboard;
-            storyboard.Begin();
+                activityFadeStoryboard = null;
+                try { content.Opacity = to; } catch { }
+                InvokeAnimationCompletion(completed);
+                Log.Warning(ex, "[widget] activity fade skipped");
+            }
         }
 
         private void SetActivityLogicalWidthOnUiThread(int logicalWidth, int physicalWidth)
@@ -2250,35 +2310,49 @@ namespace TaskbarQuota.Taskbar
             if (quotaTransform is null || activityTransform is null)
                 return;
 
-            swapVisualStoryboard?.Stop();
-            quotaTransform.TranslateX = quotaOldX - quotaNewX;
-            activityTransform.TranslateX = activityOldX - activityNewX;
-
-            var storyboard = new Anim.Storyboard();
-            var quotaSlide = new Anim.DoubleAnimation
+            try
             {
-                To = 0,
-                Duration = TimeSpan.FromMilliseconds(180),
-                EasingFunction = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut },
-                EnableDependentAnimation = true,
-            };
-            Anim.Storyboard.SetTarget(quotaSlide, quotaTransform);
-            Anim.Storyboard.SetTargetProperty(quotaSlide, "TranslateX");
+                swapVisualStoryboard?.Stop();
+                quotaTransform.TranslateX = quotaOldX - quotaNewX;
+                activityTransform.TranslateX = activityOldX - activityNewX;
 
-            var activitySlide = new Anim.DoubleAnimation
+                var storyboard = new Anim.Storyboard();
+                var quotaSlide = new Anim.DoubleAnimation
+                {
+                    To = 0,
+                    Duration = TimeSpan.FromMilliseconds(180),
+                    EasingFunction = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut },
+                    EnableDependentAnimation = true,
+                };
+                Anim.Storyboard.SetTarget(quotaSlide, quotaTransform);
+                Anim.Storyboard.SetTargetProperty(quotaSlide, "TranslateX");
+
+                var activitySlide = new Anim.DoubleAnimation
+                {
+                    To = 0,
+                    Duration = TimeSpan.FromMilliseconds(180),
+                    EasingFunction = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut },
+                    EnableDependentAnimation = true,
+                };
+                Anim.Storyboard.SetTarget(activitySlide, activityTransform);
+                Anim.Storyboard.SetTargetProperty(activitySlide, "TranslateX");
+
+                storyboard.Children.Add(quotaSlide);
+                storyboard.Children.Add(activitySlide);
+                swapVisualStoryboard = storyboard;
+                storyboard.Begin();
+            }
+            catch (Exception ex)
             {
-                To = 0,
-                Duration = TimeSpan.FromMilliseconds(180),
-                EasingFunction = new Anim.CubicEase { EasingMode = Anim.EasingMode.EaseOut },
-                EnableDependentAnimation = true,
-            };
-            Anim.Storyboard.SetTarget(activitySlide, activityTransform);
-            Anim.Storyboard.SetTargetProperty(activitySlide, "TranslateX");
-
-            storyboard.Children.Add(quotaSlide);
-            storyboard.Children.Add(activitySlide);
-            swapVisualStoryboard = storyboard;
-            storyboard.Begin();
+                swapVisualStoryboard = null;
+                try
+                {
+                    quotaTransform.TranslateX = 0;
+                    activityTransform.TranslateX = 0;
+                }
+                catch { }
+                Log.Warning(ex, "[widget] pair-swap animation skipped");
+            }
         }
 
         /// <summary>
@@ -3398,8 +3472,28 @@ namespace TaskbarQuota.Taskbar
             try { positionUpdateGate.Dispose(); } catch { }
         }
 
+        private void StopHostStoryboards()
+        {
+            StopStoryboard(ref hostFadeStoryboard);
+            StopStoryboard(ref activityFadeStoryboard);
+            StopStoryboard(ref quotaLayoutStoryboard);
+            StopStoryboard(ref activityLayoutStoryboard);
+            StopStoryboard(ref swapVisualStoryboard);
+            foreach (var tile in tiles)
+                tile?.StopAnimations();
+            activitySummary?.StopAnimations();
+        }
+
+        private static void StopStoryboard(ref Anim.Storyboard? storyboard)
+        {
+            try { storyboard?.Stop(); }
+            catch { }
+            storyboard = null;
+        }
+
         private void DisposeWindowResources()
         {
+            StopHostStoryboards();
             if (hwnd != IntPtr.Zero)
                 HostOwners.TryRemove(hwnd, out _);
             if (activityHwnd != IntPtr.Zero)

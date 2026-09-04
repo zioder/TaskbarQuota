@@ -310,8 +310,13 @@ namespace TaskbarQuota.Interop
         [DllImport("kernel32.dll")]
         public static extern IntPtr GetModuleHandle(string? module);
 
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        public static extern int RegisterApplicationRestart(
+            [MarshalAs(UnmanagedType.LPWStr)] string? pwzCommandline,
+            ApplicationRestart dwFlags = ApplicationRestart.None);
+
         [DllImport("kernel32.dll")]
-        public static extern IntPtr RegisterApplicationRestart(string? pwzCommandline, ApplicationRestart dwFlags = ApplicationRestart.None);
+        public static extern int UnregisterApplicationRestart();
     }
 
     [Flags]
@@ -420,5 +425,9 @@ namespace TaskbarQuota.Interop
     public enum ApplicationRestart
     {
         None = 0,
+        NoCrash = 1,
+        NoHang = 2,
+        NoPatch = 4,
+        NoReboot = 8,
     }
 }

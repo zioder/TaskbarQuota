@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using TaskbarQuota.Diagnostics;
+using TaskbarQuota.Interop;
 using TaskbarQuota.Services;
 using TaskbarQuota.Taskbar;
 
@@ -43,6 +44,7 @@ namespace TaskbarQuota
         protected override void OnLaunched(LaunchActivatedEventArgs args)
         {
             Dispatcher = DispatcherQueue.GetForCurrentThread();
+            RegisterForWindowsRestart(IsWidgetStartup(args.Arguments, Environment.GetCommandLineArgs()));
             AppStorage.MigrateLegacyDataIfNeeded();
             StartupSettingsService.MigrateLegacyStartupEntryIfNeeded();
 
@@ -80,6 +82,21 @@ namespace TaskbarQuota
                 }
             }
 
+        }
+
+        private static void RegisterForWindowsRestart(bool widgetStartup)
+        {
+            try
+            {
+                var result = Kernel32.RegisterApplicationRestart(
+                    widgetStartup ? StartupSettingsService.StartupArgument : null,
+                    ApplicationRestart.NoReboot);
+                Log.Debug($"Registered Windows restart recovery: HRESULT 0x{result:X8}");
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Could not register Windows restart recovery");
+            }
         }
 
         public void ShowMainWindow()
@@ -202,6 +219,8 @@ namespace TaskbarQuota
         public static void Quit()
         {
             IsQuitting = true;
+            try { Kernel32.UnregisterApplicationRestart(); }
+            catch (Exception ex) { Log.Warning(ex, "Could not unregister Windows restart recovery"); }
             Quitting?.Invoke();
             Current.Exit();
         }

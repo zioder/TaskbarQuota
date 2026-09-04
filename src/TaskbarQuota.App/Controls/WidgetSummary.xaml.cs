@@ -181,6 +181,7 @@ namespace TaskbarQuota.Controls
             Unloaded += (_, _) =>
             {
                 WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
+                StopAnimations();
             };
         }
 
@@ -991,26 +992,43 @@ namespace TaskbarQuota.Controls
         /// </summary>
         public void AnimateSlide(double fromOffsetX)
         {
-            _slideStoryboard?.Stop();
-
-            // The RESTING value is written before starting, and the animation supplies the offset through
-            // its From. Storyboard.Stop reverts a property to its local value, so a slide interrupted by the
-            // next layout pass — which happens constantly, the layout is recomputed on every usage publish —
-            // lands at zero instead of stranding the tile at the offset it started from.
-            RootTranslate.X = 0;
-
-            // Storyboard and animation are built once and re-aimed, not rebuilt. These run on every layout
-            // pass across every tile, and a fresh Storyboard + DoubleAnimation + CubicEase per pass was
-            // steady garbage for the life of the process.
-            if (_slideStoryboard is null)
+            // Storyboard Stop/retarget/Begin against a tile whose visual tree was just torn down (widget
+            // recreate, DPI change) raises XAML exceptions that can escalate to stowed exceptions and kill
+            // the dispatcher thread — issue #70's silent widget death. A cosmetic slide is never worth the
+            // UI thread: degrade to no animation and let the next layout pass retry.
+            try
             {
-                _slideAnimation = CreateDoubleAnimation(RootTranslate, "X", fromOffsetX, 0, SlideMilliseconds);
-                _slideStoryboard = new Storyboard();
-                _slideStoryboard.Children.Add(_slideAnimation);
-            }
+                _slideStoryboard?.Stop();
 
-            _slideAnimation!.From = fromOffsetX;
-            _slideStoryboard.Begin();
+                // The RESTING value is written before starting, and the animation supplies the offset through
+                // its From. Storyboard.Stop reverts a property to its local value, so a slide interrupted by the
+                // next layout pass — which happens constantly, the layout is recomputed on every usage publish —
+                // lands at zero instead of stranding the tile at the offset it started from.
+                RootTranslate.X = 0;
+
+                // Storyboard and animation are built once and re-aimed, not rebuilt. These run on every layout
+                // pass across every tile, and a fresh Storyboard + DoubleAnimation + CubicEase per pass was
+                // steady garbage for the life of the process.
+                if (_slideStoryboard is null)
+                {
+                    _slideAnimation = CreateDoubleAnimation(RootTranslate, "X", fromOffsetX, 0, SlideMilliseconds);
+                    _slideStoryboard = new Storyboard();
+                    _slideStoryboard.Children.Add(_slideAnimation);
+                }
+
+                _slideAnimation!.From = fromOffsetX;
+                _slideStoryboard.Begin();
+            }
+            catch (Exception ex)
+            {
+                // A storyboard that failed against a torn-down visual must not be reused. Otherwise every
+                // later health/layout pass hits the same invalid target and the tile can remain stranded at
+                // its in-flight offset forever.
+                _slideStoryboard = null;
+                _slideAnimation = null;
+                try { RootTranslate.X = 0; } catch { }
+                TaskbarQuota.Diagnostics.Log.Warning(ex, "[widget] slide animation skipped");
+            }
         }
 
         /// <summary>
@@ -1088,18 +1106,28 @@ namespace TaskbarQuota.Controls
         /// </summary>
         private void AnimatePanelOpacity(double from, double to, int milliseconds)
         {
-            _softRefreshStoryboard?.Stop();
-            if (_softRefreshStoryboard is null)
+            try
             {
-                _softRefreshAnimation = CreateDoubleAnimation(Panel, "Opacity", from, to, milliseconds);
-                _softRefreshStoryboard = new Storyboard();
-                _softRefreshStoryboard.Children.Add(_softRefreshAnimation);
-            }
+                _softRefreshStoryboard?.Stop();
+                if (_softRefreshStoryboard is null)
+                {
+                    _softRefreshAnimation = CreateDoubleAnimation(Panel, "Opacity", from, to, milliseconds);
+                    _softRefreshStoryboard = new Storyboard();
+                    _softRefreshStoryboard.Children.Add(_softRefreshAnimation);
+                }
 
-            _softRefreshAnimation!.From = from;
-            _softRefreshAnimation.To = to;
-            _softRefreshAnimation.Duration = new Duration(TimeSpan.FromMilliseconds(milliseconds));
-            _softRefreshStoryboard.Begin();
+                _softRefreshAnimation!.From = from;
+                _softRefreshAnimation.To = to;
+                _softRefreshAnimation.Duration = new Duration(TimeSpan.FromMilliseconds(milliseconds));
+                _softRefreshStoryboard.Begin();
+            }
+            catch (Exception ex)
+            {
+                _softRefreshStoryboard = null;
+                _softRefreshAnimation = null;
+                try { Panel.Opacity = to; } catch { }
+                TaskbarQuota.Diagnostics.Log.Warning(ex, "[widget] panel animation skipped");
+            }
         }
 
         /// <summary>
@@ -1111,33 +1139,67 @@ namespace TaskbarQuota.Controls
 
         private void AnimateVisibility(double toOpacity, double toOffset, int milliseconds)
         {
-            double fromOpacity = Root.Opacity;
-            double fromOffset = RootTranslate.Y;
-
-            _visibilityStoryboard?.Stop();
-            // Same rule as AnimateSlide: park the local values at the destination and let the animation
-            // supply the start through From, so an interrupted transition can never leave a tile stuck
-            // invisible or offset.
-            Root.Opacity = toOpacity;
-            RootTranslate.Y = toOffset;
-
-            if (_visibilityStoryboard is null)
+            try
             {
-                _visibilityOpacity = CreateDoubleAnimation(Root, "Opacity", fromOpacity, toOpacity, milliseconds);
-                _visibilityOffset = CreateDoubleAnimation(RootTranslate, "Y", fromOffset, toOffset, milliseconds);
-                _visibilityStoryboard = new Storyboard();
-                _visibilityStoryboard.Children.Add(_visibilityOpacity);
-                _visibilityStoryboard.Children.Add(_visibilityOffset);
-            }
+                double fromOpacity = Root.Opacity;
+                double fromOffset = RootTranslate.Y;
 
-            var duration = new Duration(TimeSpan.FromMilliseconds(milliseconds));
-            _visibilityOpacity!.From = fromOpacity;
-            _visibilityOpacity.To = toOpacity;
-            _visibilityOpacity.Duration = duration;
-            _visibilityOffset!.From = fromOffset;
-            _visibilityOffset.To = toOffset;
-            _visibilityOffset.Duration = duration;
-            _visibilityStoryboard.Begin();
+                _visibilityStoryboard?.Stop();
+                // Same rule as AnimateSlide: park the local values at the destination and let the animation
+                // supply the start through From, so an interrupted transition can never leave a tile stuck
+                // invisible or offset.
+                Root.Opacity = toOpacity;
+                RootTranslate.Y = toOffset;
+
+                if (_visibilityStoryboard is null)
+                {
+                    _visibilityOpacity = CreateDoubleAnimation(Root, "Opacity", fromOpacity, toOpacity, milliseconds);
+                    _visibilityOffset = CreateDoubleAnimation(RootTranslate, "Y", fromOffset, toOffset, milliseconds);
+                    _visibilityStoryboard = new Storyboard();
+                    _visibilityStoryboard.Children.Add(_visibilityOpacity);
+                    _visibilityStoryboard.Children.Add(_visibilityOffset);
+                }
+
+                var duration = new Duration(TimeSpan.FromMilliseconds(milliseconds));
+                _visibilityOpacity!.From = fromOpacity;
+                _visibilityOpacity.To = toOpacity;
+                _visibilityOpacity.Duration = duration;
+                _visibilityOffset!.From = fromOffset;
+                _visibilityOffset.To = toOffset;
+                _visibilityOffset.Duration = duration;
+                _visibilityStoryboard.Begin();
+            }
+            catch (Exception ex)
+            {
+                _visibilityStoryboard = null;
+                _visibilityOpacity = null;
+                _visibilityOffset = null;
+                try { Root.Opacity = toOpacity; } catch { }
+                try { RootTranslate.Y = toOffset; } catch { }
+                TaskbarQuota.Diagnostics.Log.Warning(ex, "[widget] visibility animation skipped");
+            }
+        }
+
+        /// <summary>
+        /// Stops in-flight storyboards before the visual tree is destroyed. A storyboard whose target is
+        /// already gone is a common source of stowed exception 0xc000027b (issue #70).
+        /// </summary>
+        internal void StopAnimations()
+        {
+            StopStoryboard(ref _slideStoryboard);
+            _slideAnimation = null;
+            StopStoryboard(ref _visibilityStoryboard);
+            _visibilityOpacity = null;
+            _visibilityOffset = null;
+            StopStoryboard(ref _softRefreshStoryboard);
+            _softRefreshAnimation = null;
+        }
+
+        private static void StopStoryboard(ref Storyboard? storyboard)
+        {
+            try { storyboard?.Stop(); }
+            catch { }
+            storyboard = null;
         }
 
         private static DoubleAnimation CreateDoubleAnimation(
