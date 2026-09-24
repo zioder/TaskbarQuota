@@ -115,4 +115,52 @@ public class CopilotProviderTests
         Assert.Null(result.Usage.Cost);
         Assert.InRange(result.Usage.Primary.UsedPercent, 11, 12);
     }
+
+    [Fact]
+    public void BuildResult_ZeroEntitlement_IsNotIncludedInsteadOfExhausted()
+    {
+        const string noQuotaJson = """
+            {
+              "quota_snapshots": {
+                "premium_interactions": {
+                  "has_quota": false,
+                  "entitlement": 0,
+                  "remaining": 0,
+                  "percent_remaining": 0,
+                  "unlimited": false
+                }
+              }
+            }
+            """;
+
+        using var doc = JsonDocument.Parse(noQuotaJson);
+        var result = CopilotProvider.BuildResult(doc.RootElement);
+
+        Assert.False(result.Usage.Primary.IsIncluded);
+        Assert.Equal(0, result.Usage.Primary.UsedPercent);
+    }
+
+    [Fact]
+    public void BuildResult_EntitledQuotaWithZeroRemaining_IsGenuinelyExhausted()
+    {
+        const string exhaustedJson = """
+            {
+              "quota_snapshots": {
+                "premium_interactions": {
+                  "has_quota": true,
+                  "entitlement": 100,
+                  "remaining": 0,
+                  "percent_remaining": 0,
+                  "unlimited": false
+                }
+              }
+            }
+            """;
+
+        using var doc = JsonDocument.Parse(exhaustedJson);
+        var result = CopilotProvider.BuildResult(doc.RootElement);
+
+        Assert.True(result.Usage.Primary.IsIncluded);
+        Assert.Equal(100, result.Usage.Primary.UsedPercent);
+    }
 }

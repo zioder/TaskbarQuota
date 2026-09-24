@@ -16,6 +16,7 @@ public sealed class QuotaAlertSettingsServiceTests : IDisposable
 
         Assert.True(store.Current.ReplenishmentEnabled);
         Assert.False(store.Current.CrossSessionReplenishmentEnabled);
+        Assert.Empty(store.Current.MutedProviders);
         Assert.Equal(QuotaAlertSettings.Default, store.Current);
     }
 
@@ -56,6 +57,7 @@ public sealed class QuotaAlertSettingsServiceTests : IDisposable
         Assert.Equal(70, store.Current.WarningThreshold);
         Assert.Equal(95, store.Current.CriticalThreshold);
         Assert.Equal(45, store.Current.CooldownMinutes);
+        Assert.Empty(store.Current.MutedProviders);
     }
 
     [Fact]
@@ -103,6 +105,24 @@ public sealed class QuotaAlertSettingsServiceTests : IDisposable
     }
 
     [Fact]
+    public void Apply_RoundTripsMutedProviders()
+    {
+        var store = new QuotaAlertSettingsStore(SettingsPath);
+        var muted = new[] { "Copilot", "codex" };
+
+        store.Apply(store.Current with { MutedProviders = muted });
+
+        var persisted = JsonSerializer.Deserialize<QuotaAlertSettings>(File.ReadAllText(SettingsPath));
+        Assert.NotNull(persisted);
+        Assert.Equal(muted, persisted!.MutedProviders);
+
+        var restored = new QuotaAlertSettingsStore(SettingsPath).Current;
+        Assert.Equal(muted, restored.MutedProviders);
+        Assert.True(restored.IsProviderMuted(TaskbarQuota.Usage.ProviderId.Copilot));
+        Assert.True(restored.IsProviderMuted(TaskbarQuota.Usage.ProviderId.Codex));
+    }
+
+    [Fact]
     public void Apply_CanDisableAndDoesNotRaiseForAnUnchangedValue()
     {
         var store = new QuotaAlertSettingsStore(SettingsPath);
@@ -135,7 +155,14 @@ public sealed class QuotaAlertSettingsServiceTests : IDisposable
         await Task.WhenAll(updates);
 
         var persisted = JsonSerializer.Deserialize<QuotaAlertSettings>(File.ReadAllText(SettingsPath));
-        Assert.Equal(store.Current, persisted);
+        Assert.NotNull(persisted);
+        Assert.Equal(store.Current.Enabled, persisted!.Enabled);
+        Assert.Equal(store.Current.ReplenishmentEnabled, persisted.ReplenishmentEnabled);
+        Assert.Equal(store.Current.CrossSessionReplenishmentEnabled, persisted.CrossSessionReplenishmentEnabled);
+        Assert.Equal(store.Current.WarningThreshold, persisted.WarningThreshold);
+        Assert.Equal(store.Current.CriticalThreshold, persisted.CriticalThreshold);
+        Assert.Equal(store.Current.CooldownMinutes, persisted.CooldownMinutes);
+        Assert.Equal(store.Current.MutedProviders, persisted.MutedProviders);
         Assert.Empty(Directory.EnumerateFiles(_directory, "*.tmp"));
     }
 

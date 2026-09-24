@@ -404,6 +404,7 @@ namespace TaskbarQuota.Usage
                 (null, null) => true,
                 ({ } l, { } r) =>
                     NearlyEqual(l.UsedPercent, r.UsedPercent)
+                    && l.IsIncluded == r.IsIncluded
                     && l.WindowMinutes == r.WindowMinutes
                     && l.ResetAt == r.ResetAt
                     && l.ResetDescription == r.ResetDescription,

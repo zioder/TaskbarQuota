@@ -98,6 +98,74 @@ public class QuotaAlertServiceTests
     }
 
     [Fact]
+    public void MutedProviderSuppressesThresholdCurrentSessionAndCrossSessionNotifications()
+    {
+        using var stateDirectory = new TemporaryDirectory();
+        var statePath = Path.Combine(stateDirectory.Path, QuotaReplenishmentStateStore.FileName);
+        var previousSession = new QuotaReplenishmentCrossSessionTracker(
+            new QuotaReplenishmentStateStore(statePath));
+        _ = previousSession.Observe(
+            Result(1, usedPercent: 88, email: "same@example.test", observedAt: Now().AddHours(-1)),
+            Now().AddHours(-1));
+
+        var notifier = new FakeNotifier();
+        var settings = Settings(
+            enabled: true,
+            replenishmentEnabled: true,
+            crossSessionEnabled: true,
+            mutedProviders: ["cOpIlOt", "CODEX"]);
+        var service = new QuotaAlertService(
+            notifier,
+            clock: Now,
+            settingsProvider: () => settings,
+            crossSessionTracker: new QuotaReplenishmentCrossSessionTracker(
+                new QuotaReplenishmentStateStore(statePath)),
+            state: new QuotaAlertState());
+
+        service.OnStateChanged(Result(2, usedPercent: 0, email: "same@example.test"));
+        service.OnStateChanged(Result(3, usedPercent: 91, email: "same@example.test"));
+
+        Assert.Empty(notifier.Notifications);
+    }
+
+    [Fact]
+    public void NonLiveObservationDoesNotTriggerThresholdNotification()
+    {
+        using var stateDirectory = new TemporaryDirectory();
+        var notifier = new FakeNotifier();
+        var settings = Settings(enabled: true, replenishmentEnabled: false);
+        var service = new QuotaAlertService(
+            notifier,
+            clock: Now,
+            settingsProvider: () => settings,
+            crossSessionTracker: CrossSessionTracker(stateDirectory),
+            state: new QuotaAlertState());
+
+        service.OnStateChanged(Result(1, usedPercent: 91).AsStale());
+
+        Assert.Empty(notifier.Notifications);
+    }
+
+    [Fact]
+    public void NotIncludedWindowsDoNotTriggerReplenishmentNotification()
+    {
+        using var stateDirectory = new TemporaryDirectory();
+        var notifier = new FakeNotifier();
+        var settings = Settings(replenishmentEnabled: true);
+        var service = new QuotaAlertService(
+            notifier,
+            clock: Now,
+            settingsProvider: () => settings,
+            crossSessionTracker: CrossSessionTracker(stateDirectory),
+            state: new QuotaAlertState());
+
+        service.OnStateChanged(Result(1, usedPercent: 88, included: false));
+        service.OnStateChanged(Result(2, usedPercent: 0, included: false));
+
+        Assert.Empty(notifier.Notifications);
+    }
+
+    [Fact]
     public void DisablingCrossSessionComparisonClearsItsPersistedState()
     {
         using var stateDirectory = new TemporaryDirectory();
@@ -126,24 +194,28 @@ public class QuotaAlertServiceTests
 
     private static QuotaAlertSettings Settings(
         bool replenishmentEnabled,
-        bool crossSessionEnabled = false) => new()
+        bool crossSessionEnabled = false,
+        IReadOnlyList<string>? mutedProviders = null,
+        bool enabled = false) => new()
     {
-        Enabled = false,
+        Enabled = enabled,
         ReplenishmentEnabled = replenishmentEnabled,
         CrossSessionReplenishmentEnabled = crossSessionEnabled,
         WarningThreshold = 75,
         CriticalThreshold = 90,
         CooldownMinutes = 30,
+        MutedProviders = mutedProviders ?? Array.Empty<string>(),
     };
 
     private static UsageResult Result(
         long sequence,
         double usedPercent,
         string? email = null,
-        DateTimeOffset? observedAt = null)
+        DateTimeOffset? observedAt = null,
+        bool included = true)
     {
         var provider = new TestProvider();
-        var usage = new UsageSnapshot(new RateWindow(usedPercent, windowMinutes: 300))
+        var usage = new UsageSnapshot(new RateWindow(usedPercent, windowMinutes: 300) { IsIncluded = included })
         {
             Email = email,
         };

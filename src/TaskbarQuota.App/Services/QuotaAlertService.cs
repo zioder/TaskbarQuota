@@ -82,6 +82,7 @@ public sealed class QuotaAlertService
         if (!settings.Enabled && !settings.ReplenishmentEnabled)
             return;
 
+        bool providerMuted = settings.IsProviderMuted(result.Id);
         IReadOnlyList<QuotaReplenishmentEvent> replenishments;
         List<QuotaAlertNotification> thresholdNotifications;
         var now = _clock();
@@ -106,16 +107,21 @@ public sealed class QuotaAlertService
                 .Select(replenishment => replenishment.Current.Key.WindowId)
                 .ToHashSet(StringComparer.Ordinal);
 
-            thresholdNotifications = QuotaAlertEvaluator.Evaluate(
-                result,
-                settings,
-                _state,
-                now,
-                replenishedWindowIds).ToList();
+            thresholdNotifications = providerMuted
+                ? new List<QuotaAlertNotification>()
+                : QuotaAlertEvaluator.Evaluate(
+                    result,
+                    settings,
+                    _state,
+                    now,
+                    replenishedWindowIds).ToList();
 
             if (_state.HasUnsavedChanges)
                 _state.Save();
         }
+
+        if (providerMuted)
+            return;
 
         if (replenishments.Count > 0)
         {
@@ -222,6 +228,11 @@ internal static class QuotaAlertEvaluator
         if (!settings.Enabled || !result.Ok || result.Fetch?.Usage is not { } usage)
             yield break;
 
+        // Only a fresh fetch can represent a threshold crossing. Restored snapshots, memory-cache
+        // replays, and failure fallbacks may be useful for rendering but must not notify.
+        if (result.ObservationOrigin != UsageObservationOrigin.Live || settings.IsProviderMuted(result.Id))
+            yield break;
+
         foreach (var window in EnumerateWindows(usage))
         {
             var thresholds = OrderedThresholds(settings).ToArray();
@@ -262,20 +273,23 @@ internal static class QuotaAlertEvaluator
 
     private static IEnumerable<QuotaAlertWindow> EnumerateWindows(UsageSnapshot usage)
     {
-        if (usage.HasPrimaryWindow)
+        if (usage.HasPrimaryWindow && usage.Primary.IsIncluded)
             yield return new QuotaAlertWindow("primary", "Session", usage.Primary);
 
-        if (usage.Secondary is { } secondary)
+        if (usage.Secondary is { IsIncluded: true } secondary)
             yield return new QuotaAlertWindow("secondary", "Weekly", secondary);
 
-        if (usage.ModelSpecific is { } model)
+        if (usage.ModelSpecific is { IsIncluded: true } model)
             yield return new QuotaAlertWindow("model", "Model", model);
 
-        if (usage.Monthly is { } monthly)
+        if (usage.Monthly is { IsIncluded: true } monthly)
             yield return new QuotaAlertWindow("monthly", "Monthly", monthly);
 
         foreach (var extra in usage.ExtraRateWindows)
-            yield return new QuotaAlertWindow($"extra:{extra.Id}", extra.Title, extra.Window);
+        {
+            if (extra.Window.IsIncluded)
+                yield return new QuotaAlertWindow($"extra:{extra.Id}", extra.Title, extra.Window);
+        }
     }
 
     private static IEnumerable<QuotaAlertThreshold> OrderedThresholds(QuotaAlertSettings settings)

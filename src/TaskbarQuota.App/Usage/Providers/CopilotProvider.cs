@@ -219,12 +219,16 @@ namespace TaskbarQuota.Usage.Providers
         private static RateWindow ParseQuotaWindow(JsonElement snapshot, DateTimeOffset? fallbackReset)
         {
             bool unlimited = snapshot.TryGetProperty("unlimited", out var un) && un.ValueKind == JsonValueKind.True;
+            bool hasQuota = !snapshot.TryGetProperty("has_quota", out var hasQuotaEl)
+                || hasQuotaEl.ValueKind != JsonValueKind.False;
             double? limit = TryF64(snapshot, "entitlement");
             double? remaining = TryF64(snapshot, "remaining") ?? TryF64(snapshot, "quota_remaining");
 
             double used;
             if (unlimited)
                 used = 0;
+            else if (!hasQuota || limit is not > 0)
+                return new RateWindow(0) { IsIncluded = false };
             else if (limit is > 0 && remaining is not null)
                 used = System.Math.Clamp((limit.Value - remaining.Value) / limit.Value * 100, 0, 100);
             else

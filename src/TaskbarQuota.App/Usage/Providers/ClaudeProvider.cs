@@ -219,7 +219,10 @@ namespace TaskbarQuota.Usage.Providers
         }
 
         private static RateWindow WithLabel(RateWindow window, string label)
-            => new(window.UsedPercent, window.WindowMinutes, window.ResetAt, window.ResetDescription, label);
+            => new(window.UsedPercent, window.WindowMinutes, window.ResetAt, window.ResetDescription, label)
+            {
+                IsIncluded = window.IsIncluded,
+            };
 
         internal static ProviderFetchResult BuildResultForTesting(JsonElement json, Credentials creds)
             => BuildResult(json, creds);

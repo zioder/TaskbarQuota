@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
+using TaskbarQuota.Usage;
 
 namespace TaskbarQuota;
 
@@ -39,6 +42,17 @@ public static class QuotaAlertSettingsService
 
     public static void SetCooldownMinutes(double value)
         => Apply(Current with { CooldownMinutes = value });
+
+    public static void SetProviderMuted(ProviderId provider, bool muted)
+    {
+        var providers = (Current.MutedProviders ?? Array.Empty<string>())
+            .Where(name => !string.Equals(name, provider.ToString(), StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (muted)
+            providers.Add(provider.ToString());
+
+        Apply(Current with { MutedProviders = providers });
+    }
 }
 
 internal sealed class QuotaAlertSettingsStore
@@ -70,7 +84,7 @@ internal sealed class QuotaAlertSettingsStore
         EventHandler? changed;
         lock (_lock)
         {
-            if (_current.Equals(normalized))
+            if (AreEquivalent(_current, normalized))
                 return;
 
             _current = normalized;
@@ -80,6 +94,16 @@ internal sealed class QuotaAlertSettingsStore
 
         changed?.Invoke(this, EventArgs.Empty);
     }
+
+    private static bool AreEquivalent(QuotaAlertSettings left, QuotaAlertSettings right)
+        => left.Enabled == right.Enabled
+        && left.ReplenishmentEnabled == right.ReplenishmentEnabled
+        && left.CrossSessionReplenishmentEnabled == right.CrossSessionReplenishmentEnabled
+        && left.WarningThreshold == right.WarningThreshold
+        && left.CriticalThreshold == right.CriticalThreshold
+        && left.CooldownMinutes == right.CooldownMinutes
+        && (left.MutedProviders ?? Array.Empty<string>())
+            .SequenceEqual(right.MutedProviders ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
 
     private QuotaAlertSettings Load()
     {
@@ -160,6 +184,11 @@ public sealed record QuotaAlertSettings
     public double WarningThreshold { get; init; }
     public double CriticalThreshold { get; init; }
     public double CooldownMinutes { get; init; }
+    public IReadOnlyList<string> MutedProviders { get; init; } = Array.Empty<string>();
+
+    public bool IsProviderMuted(ProviderId provider)
+        => (MutedProviders ?? Array.Empty<string>())
+            .Any(name => string.Equals(name?.Trim(), provider.ToString(), StringComparison.OrdinalIgnoreCase));
 
     public QuotaAlertSettings Normalized()
     {
@@ -168,11 +197,21 @@ public sealed record QuotaAlertSettings
         if (critical <= warning)
             critical = Math.Min(100, warning + 1);
 
+        var mutedProviders = MutedProviders ?? Array.Empty<string>();
+        IReadOnlyList<string> normalizedMutedProviders = mutedProviders
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => name.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (mutedProviders.SequenceEqual(normalizedMutedProviders, StringComparer.Ordinal))
+            normalizedMutedProviders = mutedProviders;
+
         return this with
         {
             WarningThreshold = Math.Round(warning),
             CriticalThreshold = Math.Round(critical),
             CooldownMinutes = Math.Clamp(Math.Round(CooldownMinutes), 1, 1440),
+            MutedProviders = normalizedMutedProviders,
         };
     }
 }

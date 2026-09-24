@@ -17,6 +17,31 @@ public class QuotaAlertEvaluatorTests
     }
 
     [Fact]
+    public void Evaluate_NonLiveObservation_DoesNotAlert()
+    {
+        var state = new QuotaAlertState();
+        var result = Result(91).AsStale();
+
+        var alerts = QuotaAlertEvaluator.Evaluate(result, Settings(), state, Now()).ToArray();
+
+        Assert.Empty(alerts);
+    }
+
+    [Fact]
+    public void Evaluate_NotIncludedWindow_DoesNotAlert()
+    {
+        var state = new QuotaAlertState();
+        var provider = new AlertTestProvider();
+        var usage = new UsageSnapshot(new RateWindow(100) { IsIncluded = false });
+        var result = UsageResult.Success(provider.Id, provider, new ProviderFetchResult(usage, "test"))
+            .AsLiveObservation(1, Now());
+
+        var alerts = QuotaAlertEvaluator.Evaluate(result, Settings(), state, Now()).ToArray();
+
+        Assert.Empty(alerts);
+    }
+
+    [Fact]
     public void Evaluate_AboveCritical_AlertsForCriticalOnly()
     {
         var state = new QuotaAlertState();
@@ -260,7 +285,8 @@ public class QuotaAlertEvaluatorTests
     {
         var provider = new AlertTestProvider();
         var usage = new UsageSnapshot(new RateWindow(primaryPercent, resetAt: Now().AddHours(1)));
-        return UsageResult.Success(provider.Id, provider, new ProviderFetchResult(usage, "test"));
+        return UsageResult.Success(provider.Id, provider, new ProviderFetchResult(usage, "test"))
+            .AsLiveObservation(1, Now());
     }
 
     private static UsageResult CodexResetCreditResult(DateTimeOffset expiresAt)
@@ -274,7 +300,8 @@ public class QuotaAlertEvaluatorTests
             ]),
         };
 
-        return UsageResult.Success(provider.Id, provider, new ProviderFetchResult(usage, "test"));
+        return UsageResult.Success(provider.Id, provider, new ProviderFetchResult(usage, "test"))
+            .AsLiveObservation(1, Now());
     }
 
     private static QuotaReplenishmentEvent Replenishment(

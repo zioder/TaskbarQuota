@@ -194,6 +194,7 @@ namespace TaskbarQuota.Usage
                 ? null
                 : new RateWindow(stored.UsedPercent, stored.WindowMinutes, stored.ResetAt, stored.ResetDescription, stored.Label)
                 {
+                    IsIncluded = stored.IsIncluded,
                     ShowCostValue = stored.ShowCostValue,
                 };
 
@@ -203,6 +204,7 @@ namespace TaskbarQuota.Usage
                 : new StoredWindow
                 {
                     UsedPercent = window.UsedPercent,
+                    IsIncluded = window.IsIncluded,
                     WindowMinutes = window.WindowMinutes,
                     ResetAt = window.ResetAt,
                     ResetDescription = window.ResetDescription,
@@ -263,6 +265,7 @@ namespace TaskbarQuota.Usage
         private sealed class StoredWindow
         {
             public double UsedPercent { get; set; }
+            public bool IsIncluded { get; set; } = true;
             public int? WindowMinutes { get; set; }
             public DateTimeOffset? ResetAt { get; set; }
             public string? ResetDescription { get; set; }

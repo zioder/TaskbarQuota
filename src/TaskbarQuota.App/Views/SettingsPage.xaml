@@ -179,6 +179,14 @@
                               Toggled="OnCrossSessionReplenishmentToggled"/>
             </tk:SettingsCard>
 
+            <tk:SettingsCard Header="Muted providers"
+                             Description="Do not show threshold or replenishment notifications for selected providers.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE8D4;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <StackPanel x:Name="MutedProvidersPanel" Spacing="4"/>
+            </tk:SettingsCard>
+
             <tk:SettingsCard Header="Warning threshold" Description="Notify when a usage window reaches this consumed percentage.">
                 <tk:SettingsCard.HeaderIcon>
                     <FontIcon Glyph="&#xE7BA;"/>

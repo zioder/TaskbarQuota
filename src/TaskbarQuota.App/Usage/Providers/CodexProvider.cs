@@ -240,14 +240,20 @@ namespace TaskbarQuota.Usage.Providers
             => new(usedPercent, window.WindowMinutes, window.ResetAt, window.ResetDescription, window.Label);
 
         private static RateWindow WithLabel(RateWindow window, string label)
-            => new(window.UsedPercent, window.WindowMinutes, window.ResetAt, window.ResetDescription, label);
+            => new(window.UsedPercent, window.WindowMinutes, window.ResetAt, window.ResetDescription, label)
+            {
+                IsIncluded = window.IsIncluded,
+            };
 
         // Hide the reset subtitle at 0%. Codex does not populate used_percent until the agent is used, so
         // 0% means "not started" (or "reset and idle"), not "N days remaining".
         private static RateWindow ClearUnusedReset(RateWindow window)
             => window.UsedPercent > 0
                 ? window
-                : new RateWindow(window.UsedPercent, window.WindowMinutes, window.ResetAt, resetDescription: null, window.Label);
+                : new RateWindow(window.UsedPercent, window.WindowMinutes, window.ResetAt, resetDescription: null, window.Label)
+                {
+                    IsIncluded = window.IsIncluded,
+                };
 
         // Free ChatGPT/Codex plans expose a ~30-day primary window (limit_window_seconds ≈ 2592000).
         // Threshold below true calendar-month length so a 20+ day lone window is still labeled Monthly.

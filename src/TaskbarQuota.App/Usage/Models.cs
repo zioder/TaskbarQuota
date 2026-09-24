@@ -25,6 +25,7 @@ namespace TaskbarQuota.Usage
     public sealed class RateWindow
     {
         public double UsedPercent { get; init; }
+        public bool IsIncluded { get; init; } = true;
         public int? WindowMinutes { get; init; }
         public DateTimeOffset? ResetAt { get; init; }
         public string? ResetDescription { get; init; }

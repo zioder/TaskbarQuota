@@ -20,10 +20,12 @@ namespace TaskbarQuota.Views
         private bool _isInitializing;
         // Suppresses the Toggled handlers while a row's toggles are synced programmatically.
         private bool _suppressProviderToggleEvents;
+        private bool _suppressProviderMuteEvents;
         private bool _suppressTaskbarPlacementEvents;
         private Slider? _floatingOpacitySlider;
         // Per-provider controls, so changing one updates only its own row instead of rebuilding the list.
         private readonly Dictionary<ProviderId, ProviderToggleRow> _providerRows = new();
+        private readonly Dictionary<ProviderId, CheckBox> _providerMuteControls = new();
         private readonly List<PinOption> _pinOptions = new();
         private IReadOnlyList<DisplayIdentity> _pinDisplayIdentities = [];
 
@@ -78,6 +80,7 @@ namespace TaskbarQuota.Views
             HideWhenUnfocusedToggle.IsOn = WidgetSettingsService.HideWhenProviderUnfocused;
             ViewModel.ReloadProviders();
             RebuildProviderSettings();
+            RebuildMutedProviderSettings();
             VersionLabel.Text = $"Version {AppVersion.GetDisplayLabel()}";
             Loaded += (_, _) =>
             {
@@ -87,6 +90,7 @@ namespace TaskbarQuota.Views
                 BuildTaskbarPlacementOptions();
                 BuildPinOptions();
                 RebuildProviderSettings();
+                RebuildMutedProviderSettings();
             };
             _isInitializing = false;
         }
@@ -126,6 +130,27 @@ namespace TaskbarQuota.Views
                 card.Content = content;
 
                 ProviderSettingsPanel.Children.Add(card);
+            }
+        }
+
+        private void RebuildMutedProviderSettings()
+        {
+            MutedProvidersPanel.Children.Clear();
+            _providerMuteControls.Clear();
+            var settings = QuotaAlertSettingsService.Current;
+            foreach (var item in ViewModel.Providers)
+            {
+                var checkBox = new CheckBox
+                {
+                    Content = item.DisplayName,
+                    IsChecked = settings.IsProviderMuted(item.Id),
+                    Tag = item,
+                };
+                AutomationProperties.SetName(checkBox, $"Mute notifications for {item.DisplayName}");
+                checkBox.Checked += OnProviderMuteChanged;
+                checkBox.Unchecked += OnProviderMuteChanged;
+                _providerMuteControls[item.Id] = checkBox;
+                MutedProvidersPanel.Children.Add(checkBox);
             }
         }
 
@@ -614,6 +639,15 @@ namespace TaskbarQuota.Views
             ApplyQuotaAlertSettingsToControls();
         }
 
+        private void OnProviderMuteChanged(object sender, RoutedEventArgs e)
+        {
+            if (_isInitializing || _suppressProviderMuteEvents
+                || sender is not CheckBox { Tag: ProviderSettingItemViewModel item } checkBox)
+                return;
+
+            QuotaAlertSettingsService.SetProviderMuted(item.Id, checkBox.IsChecked == true);
+        }
+
         private void OnCrossSessionReplenishmentToggled(object sender, RoutedEventArgs e)
         {
             if (_isInitializing)
@@ -663,6 +697,17 @@ namespace TaskbarQuota.Views
                 WarningThresholdBox.Value = settings.WarningThreshold;
                 CriticalThresholdBox.Value = settings.CriticalThreshold;
                 AlertCooldownBox.Value = settings.CooldownMinutes;
+
+                _suppressProviderMuteEvents = true;
+                try
+                {
+                    foreach (var item in _providerMuteControls)
+                        item.Value.IsChecked = settings.IsProviderMuted(item.Key);
+                }
+                finally
+                {
+                    _suppressProviderMuteEvents = false;
+                }
             }
             finally
             {

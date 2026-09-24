@@ -51,6 +51,7 @@
                 </Grid>
 
                 <ProgressBar Grid.Column="1" Grid.Row="1"
+                             Visibility="{x:Bind BarVisibility}"
                              Value="{x:Bind Percent}"
                              Maximum="100"
                              Height="4"

@@ -560,6 +560,7 @@ namespace TaskbarQuota.ViewModels
             }
 
             sb.Append('|').Append(window.UsedPercent)
+              .Append('|').Append(window.IsIncluded)
               .Append('|').Append(window.ResetDescription)
               .Append('|').Append(window.WindowMinutes)
               .Append('|').Append(window.ResetAt);

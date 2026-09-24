@@ -529,11 +529,7 @@ namespace TaskbarQuota.Controls
 
                 if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
                 {
-                    rows.AddRange(usage.ExtraRateWindows.Select(w => new WidgetUsageRow(
-                        CompactLabel(w.Title),
-                        WidgetSettingsService.DisplayPercent(w.Window.UsedPercent),
-                        WidgetSettingsService.FormatDisplayPercent(w.Window.UsedPercent),
-                        w.Window.ResetDescription)));
+                    rows.AddRange(usage.ExtraRateWindows.Select(w => WindowRow(w.Title, w.Window)));
                 }
                 return rows;
             }
@@ -545,11 +541,7 @@ namespace TaskbarQuota.Controls
                     rows.Insert(0, new WidgetUsageRow(pricing.Period, 0, pricing.MultiplierText, HasBar: false, ForegroundBrush: PricingBrush(pricing)));
                 if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
                 {
-                    rows.AddRange(usage.ExtraRateWindows.Select(w => new WidgetUsageRow(
-                        CompactLabel(w.Title),
-                        WidgetSettingsService.DisplayPercent(w.Window.UsedPercent),
-                        WidgetSettingsService.FormatDisplayPercent(w.Window.UsedPercent),
-                        w.Window.ResetDescription)));
+                    rows.AddRange(usage.ExtraRateWindows.Select(w => WindowRow(w.Title, w.Window)));
                 }
                 return rows;
             }
@@ -559,11 +551,7 @@ namespace TaskbarQuota.Controls
                 if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
                 {
                     return usage.ExtraRateWindows
-                        .Select(w => new WidgetUsageRow(
-                            CompactLabel(w.Title),
-                            WidgetSettingsService.DisplayPercent(w.Window.UsedPercent),
-                            WidgetSettingsService.FormatDisplayPercent(w.Window.UsedPercent),
-                            w.Window.ResetDescription))
+                        .Select(w => WindowRow(w.Title, w.Window))
                         .ToList();
                 }
                 return new List<WidgetUsageRow>();
@@ -577,6 +565,23 @@ namespace TaskbarQuota.Controls
 
         internal static IReadOnlyList<string> BuildRowLabelsForTesting(UsageResult result, UsageSnapshot usage)
             => BuildRows(result, usage).Select(row => row.Label).ToList();
+
+        private static WidgetUsageRow WindowRow(string label, RateWindow window, string? glyphData = null)
+        {
+            bool included = window.IsIncluded;
+            return new WidgetUsageRow(
+                CompactLabel(label),
+                included ? WidgetSettingsService.DisplayPercent(window.UsedPercent) : 0,
+                included ? WidgetSettingsService.FormatDisplayPercent(window.UsedPercent) : "Not included",
+                included ? window.ResetDescription : null,
+                HasBar: included,
+                GlyphData: glyphData);
+        }
+
+        private static string WindowDisplayValue(RateWindow window)
+            => window.IsIncluded
+                ? WidgetSettingsService.FormatDisplayPercent(window.UsedPercent)
+                : "Not included";
 
         /// <summary>Rows assumed for a provider whose usage has not been fetched yet.</summary>
         public const int AssumedRowCount = 2;
@@ -645,41 +650,36 @@ namespace TaskbarQuota.Controls
             if (usage.HasPrimaryWindow && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowPrimary))
             {
                 var primaryLabel = usage.Primary.Label ?? result.Provider?.SessionLabel ?? "Usage";
-                // Spend-limit meter (Claude Enterprise): show the money value "$9.27/$100.00" instead of a
-                // bare percent so it matches Codex's "used/limit credits". The bar still tracks used %.
-                string primaryValue = usage.Primary.ShowCostValue && usage.Cost is { } spend
-                    ? FormatSpendValue(spend)
-                    : WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent);
-                rows.Add(new WidgetUsageRow(
-                    CompactLabel(primaryLabel),
-                    WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
-                    primaryValue,
-                    usage.Primary.ResetDescription));
+                if (!usage.Primary.IsIncluded)
+                {
+                    rows.Add(WindowRow(primaryLabel, usage.Primary));
+                }
+                else
+                {
+                    // Spend-limit meter (Claude Enterprise): show the money value "$9.27/$100.00" instead of a
+                    // bare percent so it matches Codex's "used/limit credits". The bar still tracks used %.
+                    string primaryValue = usage.Primary.ShowCostValue && usage.Cost is { } spend
+                        ? FormatSpendValue(spend)
+                        : WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent);
+                    rows.Add(new WidgetUsageRow(
+                        CompactLabel(primaryLabel),
+                        WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
+                        primaryValue,
+                        usage.Primary.ResetDescription));
+                }
             }
             if (usage.Secondary != null && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowSecondary))
             {
                 var secondaryLabel = result.Provider?.WeeklyLabel ?? "Usage";
-                rows.Add(new WidgetUsageRow(
-                    CompactLabel(secondaryLabel),
-                    WidgetSettingsService.DisplayPercent(usage.Secondary.UsedPercent),
-                    WidgetSettingsService.FormatDisplayPercent(usage.Secondary.UsedPercent),
-                    usage.Secondary.ResetDescription));
+                rows.Add(WindowRow(secondaryLabel, usage.Secondary));
             }
             if (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowModelSpecific))
             {
-                rows.Add(new WidgetUsageRow(
-                    CompactLabel(usage.ModelSpecific.Label ?? ModelSpecificLabel(result.Id)),
-                    WidgetSettingsService.DisplayPercent(usage.ModelSpecific.UsedPercent),
-                    WidgetSettingsService.FormatDisplayPercent(usage.ModelSpecific.UsedPercent),
-                    usage.ModelSpecific.ResetDescription));
+                rows.Add(WindowRow(usage.ModelSpecific.Label ?? ModelSpecificLabel(result.Id), usage.ModelSpecific));
             }
             if (usage.Monthly != null && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowMonthly))
             {
-                rows.Add(new WidgetUsageRow(
-                    "Monthly",
-                    WidgetSettingsService.DisplayPercent(usage.Monthly.UsedPercent),
-                    WidgetSettingsService.FormatDisplayPercent(usage.Monthly.UsedPercent),
-                    usage.Monthly.ResetDescription));
+                rows.Add(WindowRow("Monthly", usage.Monthly));
             }
 
             return rows;
@@ -690,25 +690,13 @@ namespace TaskbarQuota.Controls
             var rows = new List<WidgetUsageRow>();
 
             if (usage.Secondary != null && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowSecondary))
-                rows.Add(new WidgetUsageRow(
-                    CompactLabel(result.Provider?.WeeklyLabel ?? "Auto + Composer Usage"),
-                    WidgetSettingsService.DisplayPercent(usage.Secondary.UsedPercent),
-                    WidgetSettingsService.FormatDisplayPercent(usage.Secondary.UsedPercent),
-                    usage.Secondary.ResetDescription));
+                rows.Add(WindowRow(result.Provider?.WeeklyLabel ?? "Auto + Composer Usage", usage.Secondary));
 
             if (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowModelSpecific))
-                rows.Add(new WidgetUsageRow(
-                    CompactLabel(ModelSpecificLabel(result.Id)),
-                    WidgetSettingsService.DisplayPercent(usage.ModelSpecific.UsedPercent),
-                    WidgetSettingsService.FormatDisplayPercent(usage.ModelSpecific.UsedPercent),
-                    usage.ModelSpecific.ResetDescription));
+                rows.Add(WindowRow(ModelSpecificLabel(result.Id), usage.ModelSpecific));
 
             if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowPrimary))
-                rows.Add(new WidgetUsageRow(
-                    CompactLabel(result.Provider?.SessionLabel ?? "Total usage"),
-                    WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
-                    WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent),
-                    usage.Primary.ResetDescription));
+                rows.Add(WindowRow(result.Provider?.SessionLabel ?? "Total usage", usage.Primary));
 
             return rows;
         }
@@ -928,27 +916,19 @@ namespace TaskbarQuota.Controls
             // Icon already conveys the model family (Gemini vs Non-Gemini), so the widget row only needs the window.
             if (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowPrimary))
             {
-                rows.Add(new WidgetUsageRow("Weekly", WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
-                    WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent), usage.Primary.ResetDescription,
-                    GlyphData: ProviderGlyphs.Gemini));
+                rows.Add(WindowRow("Weekly", usage.Primary, ProviderGlyphs.Gemini));
             }
             if (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowModelSpecific))
             {
-                rows.Add(new WidgetUsageRow("5h", WidgetSettingsService.DisplayPercent(usage.ModelSpecific.UsedPercent),
-                    WidgetSettingsService.FormatDisplayPercent(usage.ModelSpecific.UsedPercent), usage.ModelSpecific.ResetDescription,
-                    GlyphData: ProviderGlyphs.Gemini));
+                rows.Add(WindowRow("5h", usage.ModelSpecific, ProviderGlyphs.Gemini));
             }
             if (usage.Secondary != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowSecondary))
             {
-                rows.Add(new WidgetUsageRow("Weekly", WidgetSettingsService.DisplayPercent(usage.Secondary.UsedPercent),
-                    WidgetSettingsService.FormatDisplayPercent(usage.Secondary.UsedPercent), usage.Secondary.ResetDescription,
-                    GlyphData: ProviderGlyphs.GeminiBarred));
+                rows.Add(WindowRow("Weekly", usage.Secondary, ProviderGlyphs.GeminiBarred));
             }
             if (usage.Monthly != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowMonthly))
             {
-                rows.Add(new WidgetUsageRow("5h", WidgetSettingsService.DisplayPercent(usage.Monthly.UsedPercent),
-                    WidgetSettingsService.FormatDisplayPercent(usage.Monthly.UsedPercent), usage.Monthly.ResetDescription,
-                    GlyphData: ProviderGlyphs.GeminiBarred));
+                rows.Add(WindowRow("5h", usage.Monthly, ProviderGlyphs.GeminiBarred));
             }
             _rows = rows;
             if (_rows.Count == 0)
@@ -965,10 +945,10 @@ namespace TaskbarQuota.Controls
             // the false branch only — inlining these dropped the whole body whenever plan was empty.
             var header = string.IsNullOrEmpty(plan) ? $"{title}\n" : $"{title} · {plan}\n";
             var body =
-                $"Gemini: {WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent)}" +
-                (usage.Primary.ResetDescription is { } r1 ? $" (resets {r1})" : "") + "\n" +
-                $"Non-Gemini: {WidgetSettingsService.FormatDisplayPercent(usage.Secondary?.UsedPercent ?? 0)}" +
-                (usage.Secondary?.ResetDescription is { } r2 ? $" (resets {r2})" : "");
+                $"Gemini: {WindowDisplayValue(usage.Primary)}" +
+                (usage.Primary.IsIncluded && usage.Primary.ResetDescription is { } r1 ? $" (resets {r1})" : "") + "\n" +
+                $"Non-Gemini: {(usage.Secondary is { } secondary ? WindowDisplayValue(secondary) : "Not included")}" +
+                (usage.Secondary is { IsIncluded: true, ResetDescription: { } r2 } ? $" (resets {r2})" : "");
             ToolTipService.SetToolTip(
                 this,
                 header + body + WidgetUsageHistoryTooltipLine(usage.UsageHistory) + StaleTooltipLine(result));
@@ -1713,6 +1693,7 @@ namespace TaskbarQuota.Controls
             }
 
             parts.Add(window.UsedPercent.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture));
+            parts.Add(window.IsIncluded ? "included" : "not-included");
             parts.Add(window.ResetDescription ?? string.Empty);
         }
 

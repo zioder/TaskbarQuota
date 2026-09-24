@@ -26,6 +26,7 @@ namespace TaskbarQuota.ViewModels
         public string Label { get; }
         public double Percent { get; }
         public string PercentText { get; }
+        public Visibility BarVisibility { get; }
         public string ResetText { get; }
         public Visibility ResetVisibility { get; }
         public Brush BarBrush { get; }
@@ -36,14 +37,16 @@ namespace TaskbarQuota.ViewModels
 
         public BarViewModel(ProviderId providerId, string widgetRowId, string label, RateWindow w)
         {
-            double displayPercent = WidgetSettingsService.DisplayPercent(w.UsedPercent);
+            bool included = w.IsIncluded;
+            double displayPercent = included ? WidgetSettingsService.DisplayPercent(w.UsedPercent) : 0;
             ProviderId = providerId;
             WidgetRowId = widgetRowId;
             Label = label;
-            Percent = displayPercent;
-            PercentText = WidgetSettingsService.FormatDisplayPercent(w.UsedPercent);
-            ResetText = w.ResetDescription is { } r ? $"resets in {r}" : string.Empty;
-            ResetVisibility = w.ResetDescription is null ? Visibility.Collapsed : Visibility.Visible;
+            Percent = included ? displayPercent : 0;
+            PercentText = included ? WidgetSettingsService.FormatDisplayPercent(w.UsedPercent) : "Not included";
+            BarVisibility = included ? Visibility.Visible : Visibility.Collapsed;
+            ResetText = included && w.ResetDescription is { } r ? $"resets in {r}" : string.Empty;
+            ResetVisibility = included && w.ResetDescription is not null ? Visibility.Visible : Visibility.Collapsed;
             BarBrush = Ui.UsageBrush(displayPercent);
             PercentForeground = BarBrush;
             IsWidgetVisible = WidgetSettingsService.IsRowVisible(providerId, widgetRowId);

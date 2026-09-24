@@ -304,16 +304,16 @@ internal static class QuotaAlertWindowCatalog
         if (result.Fetch?.Usage is not { } usage)
             yield break;
 
-        if (usage.HasPrimaryWindow)
+        if (usage.HasPrimaryWindow && usage.Primary.IsIncluded)
             yield return new QuotaAlertWindow("primary", PrimaryTitle(result, usage.Primary), usage.Primary);
 
-        if (usage.Secondary is { } secondary)
+        if (usage.Secondary is { IsIncluded: true } secondary)
             yield return new QuotaAlertWindow("secondary", SecondaryTitle(result, secondary), secondary);
 
-        if (usage.ModelSpecific is { } model)
+        if (usage.ModelSpecific is { IsIncluded: true } model)
             yield return new QuotaAlertWindow("model", ModelTitle(result.Id, model), model);
 
-        if (usage.Monthly is { } monthly)
+        if (usage.Monthly is { IsIncluded: true } monthly)
             yield return new QuotaAlertWindow("monthly", MonthlyTitle(result.Id, monthly), monthly);
 
         var duplicateExtraIds = usage.ExtraRateWindows
@@ -325,7 +325,9 @@ internal static class QuotaAlertWindowCatalog
 
         foreach (var extra in usage.ExtraRateWindows)
         {
-            if (string.IsNullOrWhiteSpace(extra.Id) || duplicateExtraIds.Contains(extra.Id))
+            if (string.IsNullOrWhiteSpace(extra.Id)
+                || duplicateExtraIds.Contains(extra.Id)
+                || !extra.Window.IsIncluded)
                 continue;
 
             yield return new QuotaAlertWindow($"extra:{extra.Id}", extra.Title, extra.Window);
