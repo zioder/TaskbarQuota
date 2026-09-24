@@ -211,8 +211,8 @@ namespace TaskbarQuota.Usage.Providers
 
             var usage = new UsageSnapshot(new RateWindow(total, null, billingEnd, resetDescription))
             {
-                Secondary = auto is double autoPercent ? new RateWindow(NormalizePercent(autoPercent), null, billingEnd, resetDescription) : null,
-                ModelSpecific = api is double apiPercent ? new RateWindow(NormalizePercent(apiPercent), null, billingEnd, resetDescription) : null,
+                Secondary = auto is double autoPercent ? new RateWindow(DisplayPercent(autoPercent), null, billingEnd, resetDescription) : null,
+                ModelSpecific = api is double apiPercent ? new RateWindow(apiPercent, null, billingEnd, resetDescription) : null,
                 LoginMethod = PlanDisplay(auth.PlanType),
                 Email = auth.Email,
             };
@@ -253,12 +253,12 @@ namespace TaskbarQuota.Usage.Providers
                 double usedCents = GetNum(plan, "used") ?? 0;
                 double limitCents = (TryGetObject(plan, "breakdown", out var bd) ? GetNum(bd, "total") : null)
                                     ?? GetNum(plan, "limit") ?? 0;
-                percent = limitCents > 0 ? usedCents / limitCents * 100.0 : NormalizePercent(GetNum(plan, "totalPercentUsed") ?? 0);
+                percent = limitCents > 0 ? usedCents / limitCents * 100.0 : GetNum(plan, "totalPercentUsed") ?? 0;
 
                 if (GetNum(plan, "autoPercentUsed") is double auto)
-                    secondary = new RateWindow(NormalizePercent(auto), null, billingEnd, resetDescription);
+                    secondary = new RateWindow(DisplayPercent(auto), null, billingEnd, resetDescription);
                 if (GetNum(plan, "apiPercentUsed") is double api)
-                    model = new RateWindow(NormalizePercent(api), null, billingEnd, resetDescription);
+                    model = new RateWindow(api, null, billingEnd, resetDescription);
 
                 cost = OnDemandCost(usageScope, billingEnd)
                     ?? (TryGetObject(summary, "teamUsage", out var teamUsage) ? OnDemandCost(teamUsage, billingEnd) : null);
@@ -348,17 +348,18 @@ namespace TaskbarQuota.Usage.Providers
             };
         }
 
+        // Cursor displays any positive fractional usage as at least 1%.
+        private static double DisplayPercent(double value) => value > 0 && value < 1 ? 1 : value;
+
         private static string? GetStr(JsonElement e, string name)
             => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
         private static DateTimeOffset? ParseDate(string? s)
             => s != null && DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var d) ? d : null;
 
-        private static double NormalizePercent(double value) => value is > 0 and <= 1 ? value * 100.0 : value;
-
         private static double PercentFromPlan(JsonElement plan, string percentName, string usedName, string limitName)
         {
             if (GetNum(plan, percentName) is double percent)
-                return NormalizePercent(percent);
+                return percent;
             var used = GetNum(plan, usedName) ?? 0;
             var limit = GetNum(plan, limitName) ?? 0;
             return limit > 0 ? used / limit * 100.0 : 0;
