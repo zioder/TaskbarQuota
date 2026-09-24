@@ -181,6 +181,37 @@ public class ClaudeProviderCredentialTests
     }
 
     [Fact]
+    public void WidgetRows_ForClaude_ResetCreditsFollowRowVisibilityAndRequireAvailableResets()
+    {
+        WidgetSettingsService.ResetRowVisibilityForTesting();
+        try
+        {
+            var usage = new UsageSnapshot(new RateWindow(10))
+            {
+                Secondary = new RateWindow(20),
+                ResetCredits = new ResetCreditsSnapshot(1, new[]
+                {
+                    new ResetCreditGrant("available", DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1)),
+                }),
+            };
+            var result = UsageResult.Success(ProviderId.Claude, new TestProvider(), new ProviderFetchResult(usage, "oauth"));
+
+            Assert.Equal(new[] { "Session", "Weekly", "Resets" }, WidgetSummary.BuildRowLabelsForTesting(result, usage));
+
+            WidgetSettingsService.SetRowVisibleForTesting(ProviderId.Claude, WidgetSettingsService.RowResetCredits, false);
+            Assert.Equal(new[] { "Session", "Weekly" }, WidgetSummary.BuildRowLabelsForTesting(result, usage));
+
+            WidgetSettingsService.SetRowVisibleForTesting(ProviderId.Claude, WidgetSettingsService.RowResetCredits, true);
+            usage.ResetCredits = new ResetCreditsSnapshot(0, Array.Empty<ResetCreditGrant>());
+            Assert.Equal(new[] { "Session", "Weekly" }, WidgetSummary.BuildRowLabelsForTesting(result, usage));
+        }
+        finally
+        {
+            WidgetSettingsService.ResetRowVisibilityForTesting();
+        }
+    }
+
+    [Fact]
     public void BuildResult_UncappedExtraUsage_DoesNotCreateFakePrimaryWindow()
     {
         using var doc = JsonDocument.Parse("""

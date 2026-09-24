@@ -537,6 +537,19 @@ namespace TaskbarQuota.Controls
             if (result.Id is ProviderId.Claude or ProviderId.Zai)
             {
                 var rows = BuildBaseRows(result, usage);
+                if (result.Id == ProviderId.Claude &&
+                    usage.ResetCredits is { AvailableCount: > 0 } resetCredits &&
+                    WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowResetCredits))
+                {
+                    string? expiresIn = FormatResetGrantCountdown(resetCredits.EarliestExpiresAt);
+                    rows.Add(new WidgetUsageRow(
+                        "Resets",
+                        0,
+                        resetCredits.AvailableCount.ToString("N0", CultureInfo.InvariantCulture),
+                        expiresIn,
+                        HasBar: false));
+                }
+
                 if (result.Id == ProviderId.Zai && usage.Pricing is { } pricing)
                     rows.Insert(0, new WidgetUsageRow(pricing.Period, 0, pricing.MultiplierText, HasBar: false, ForegroundBrush: PricingBrush(pricing)));
                 if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
@@ -565,6 +578,23 @@ namespace TaskbarQuota.Controls
 
         internal static IReadOnlyList<string> BuildRowLabelsForTesting(UsageResult result, UsageSnapshot usage)
             => BuildRows(result, usage).Select(row => row.Label).ToList();
+
+        private static string? FormatResetGrantCountdown(DateTimeOffset? resetAt)
+        {
+            if (resetAt is not DateTimeOffset date) return null;
+            var remaining = date - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero) return "now";
+            int hours = (int)remaining.TotalHours;
+            int minutes = remaining.Minutes;
+            if (hours >= 24)
+            {
+                int days = hours / 24;
+                int remainingHours = hours % 24;
+                return remainingHours == 0 ? $"{days}d" : $"{days}d {remainingHours}h";
+            }
+            if (hours > 0) return minutes == 0 ? $"{hours}h" : $"{hours}h {minutes}m";
+            return $"{minutes}m";
+        }
 
         private static WidgetUsageRow WindowRow(string label, RateWindow window, string? glyphData = null)
         {
