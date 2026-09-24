@@ -891,7 +891,7 @@ namespace TaskbarQuota.Controls
 
             var lines = new List<string>
             {
-                $"Reset credits: {resetCredits.AvailableCount.ToString("N0", CultureInfo.InvariantCulture)} available",
+                $"Reset Credits: {resetCredits.AvailableCount.ToString("N0", CultureInfo.InvariantCulture)} available",
             };
 
             int shown = 0;
