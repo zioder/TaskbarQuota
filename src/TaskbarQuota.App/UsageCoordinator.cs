@@ -129,16 +129,16 @@ namespace TaskbarQuota
         /// </summary>
         public const int MaxWidgetTiles = 3;
 
-        /// <summary>Effective quota-tile cap: active + two pinned tiles normally, active + one pinned with activity.</summary>
+        /// <summary>Effective quota-tile cap: three tiles normally, or two while the activity island is shown.</summary>
         public static int MaxDisplayedWidgetTiles =>
             WidgetSettingsService.ShowAgentActivityInWidget ? 2 : MaxWidgetTiles;
 
         /// <summary>
-        /// Every provider the taskbar widget should render as its own tile, left to right: the ACTIVE
-        /// provider always first, then the pinned providers (most recently active first, then enum order).
-        /// So with Claude pinned + Z.AI pinned and Codex active you get "Codex | Claude | Z.AI", and
-        /// focusing Claude re-orders to "Claude | Z.AI" + whatever else is pinned — the active provider
-        /// keeps the leading slot while the pinned tiles stay put behind it (issue #25).
+        /// Every provider the taskbar should consider rendering, left to right: visible and available PINNED
+        /// providers first (most recently active first, then enum order), followed by the active provider
+        /// when visible and not already present. This is an ordering-only candidate list; each routed display
+        /// applies its own effective tile cap. So with Claude pinned + Z.AI pinned and Codex active you get
+        /// "Claude | Z.AI | Codex"; pins keep their slots even when the active provider changes (issue #88).
         /// With no active provider this returns only pinned providers; with neither an active nor pinned
         /// provider it is empty, so the taskbar stays clear until detection selects a provider.
         /// </summary>
@@ -150,10 +150,9 @@ namespace TaskbarQuota
                 Enum.GetValues<ProviderId>(),
                 WidgetSettingsService.IsProviderPinned,
                 WidgetSettingsService.IsProviderVisible,
-                IsProviderAvailable,
-                WidgetSettingsService.ShowAgentActivityInWidget);
+                IsProviderAvailable);
 
-        /// <summary>Pure, testable core of <see cref="WidgetDisplayProviders"/>.</summary>
+        /// <summary>Pure, testable ordering core of <see cref="WidgetDisplayProviders"/>.</summary>
         internal static IReadOnlyList<ProviderId> ComputeWidgetDisplayProviders(
             ProviderId? active,
             bool present,
@@ -161,29 +160,30 @@ namespace TaskbarQuota
             IReadOnlyList<ProviderId> ordered,
             Func<ProviderId, bool> isPinned,
             Func<ProviderId, bool> isVisible,
-            Func<ProviderId, bool> isAvailable,
-            bool activityWidgetEnabled = false)
+            Func<ProviderId, bool> isAvailable)
         {
-            var result = new List<ProviderId>();
-
-            // The active provider leads even when it is itself pinned — it is the one the user is looking
-            // at right now, so it gets the stable leftmost slot and the pinned tiles trail it.
-            if (present && active is { } a && isVisible(a))
-                result.Add(a);
-
             var recentIndex = new Dictionary<ProviderId, int>();
             for (int i = 0; i < recent.Count; i++)
                 recentIndex.TryAdd(recent[i], i);
 
             var pinned = ordered
-                .Where(p => isPinned(p) && isVisible(p) && isAvailable(p) && !result.Contains(p))
+                .Where(p => isPinned(p) && isVisible(p) && isAvailable(p))
                 .OrderBy(p => recentIndex.TryGetValue(p, out int index) ? index : int.MaxValue)
                 .ToList();
+
+            var result = new List<ProviderId>(pinned.Count + 1);
             result.AddRange(pinned);
 
-            int maxTiles = activityWidgetEnabled ? 2 : MaxWidgetTiles;
-            if (result.Count > maxTiles)
-                result.RemoveRange(maxTiles, result.Count - maxTiles);
+            // Pins are an explicit request to keep a provider visible. The active tile is useful context and
+            // follows the pins; the routed display cap decides whether it has room to render it.
+            if (present
+                && active is { } a
+                && isVisible(a)
+                && !result.Contains(a))
+            {
+                result.Add(a);
+            }
+
             return result;
         }
 

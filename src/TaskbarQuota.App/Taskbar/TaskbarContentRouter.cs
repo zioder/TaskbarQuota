@@ -16,18 +16,21 @@ internal static class TaskbarContentRouter
         Func<ProviderId, bool> isPinned)
     {
         var result = new List<ProviderId>();
-        if (currentProvider is { } current && isVisible(current))
-            result.Add(current);
-
+        // A fixed pin is the user's explicit request and must occupy a slot before the per-display active
+        // provider. The widget can then hold the active courtesy tile back if the measured gap is full.
         foreach (var provider in providers)
         {
             if (isPinned(provider) && !result.Contains(provider))
                 result.Add(provider);
         }
 
+        if (currentProvider is { } current && isVisible(current) && !result.Contains(current))
+            result.Add(current);
+
         return result;
     }
 
+    /// <summary>Returns routed providers in input order, capped for this display after routing.</summary>
     public static IReadOnlyList<ProviderId> ProvidersForDisplay(
         IReadOnlyList<ProviderId> providers,
         TaskbarPlacementMode mode,
@@ -37,7 +40,8 @@ internal static class TaskbarContentRouter
         IReadOnlySet<string> availableDisplayKeys,
         Func<ProviderId, string?> adaptiveDisplayForProvider,
         Func<ProviderId, bool> isPinned,
-        Func<ProviderId, string?> pinnedDisplayForProvider)
+        Func<ProviderId, string?> pinnedDisplayForProvider,
+        int maxCount)
         => providers
             .Where(provider => IsRoutedToDisplay(
                 provider,
@@ -49,6 +53,7 @@ internal static class TaskbarContentRouter
                 adaptiveDisplayForProvider,
                 isPinned,
                 pinnedDisplayForProvider))
+            .Take(maxCount)
             .ToArray();
 
     public static AgentActivitySnapshot ActivityForDisplay(

@@ -87,7 +87,7 @@ public class TaskbarContentRouterTests
             _ => true,
             provider => provider == ProviderId.Codex);
 
-        Assert.Equal([ProviderId.OpenCode, ProviderId.Codex], candidates);
+        Assert.Equal([ProviderId.Codex, ProviderId.OpenCode], candidates);
     }
 
     [Fact]
@@ -222,6 +222,48 @@ public class TaskbarContentRouterTests
         Assert.Equal(providers, secondary);
     }
 
+    [Fact]
+    public void ProvidersForDisplayCapsTheRoutedSetPerDisplay()
+    {
+        ProviderId[] providers = [ProviderId.Claude, ProviderId.Codex, ProviderId.Cursor];
+
+        Assert.Equal(
+            [ProviderId.Claude, ProviderId.Cursor],
+            Route(
+                providers,
+                TaskbarPlacementMode.Adaptive,
+                string.Empty,
+                "DISPLAY1",
+                provider => provider == ProviderId.Codex ? "DISPLAY2" : "DISPLAY1",
+                maxCount: 2));
+        Assert.Equal(
+            [ProviderId.Codex],
+            Route(
+                providers,
+                TaskbarPlacementMode.Adaptive,
+                string.Empty,
+                "DISPLAY2",
+                provider => provider == ProviderId.Codex ? "DISPLAY2" : "DISPLAY1",
+                maxCount: 2));
+    }
+
+    [Fact]
+    public void ProvidersForDisplayDropsActiveAfterPinsFillTheRoutedCap()
+    {
+        ProviderId[] pinsThenActive = [ProviderId.Claude, ProviderId.Codex, ProviderId.Cursor];
+
+        Assert.Equal(
+            [ProviderId.Claude, ProviderId.Codex],
+            Route(
+                pinsThenActive,
+                TaskbarPlacementMode.Adaptive,
+                string.Empty,
+                "DISPLAY1",
+                _ => "DISPLAY1",
+                isPinned: provider => provider is ProviderId.Claude or ProviderId.Codex,
+                maxCount: 2));
+    }
+
     private static IReadOnlyList<ProviderId> Route(
         IReadOnlyList<ProviderId> providers,
         TaskbarPlacementMode mode,
@@ -229,7 +271,8 @@ public class TaskbarContentRouterTests
         string target,
         Func<ProviderId, string?> assignment,
         Func<ProviderId, bool>? isPinned = null,
-        Func<ProviderId, string?>? pinAssignment = null)
+        Func<ProviderId, string?>? pinAssignment = null,
+        int maxCount = UsageCoordinator.MaxWidgetTiles)
         => TaskbarContentRouter.ProvidersForDisplay(
             providers,
             mode,
@@ -239,5 +282,6 @@ public class TaskbarContentRouterTests
             Displays,
             assignment,
             isPinned ?? (_ => false),
-            pinAssignment ?? (_ => null));
+            pinAssignment ?? (_ => null),
+            maxCount);
 }

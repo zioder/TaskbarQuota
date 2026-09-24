@@ -117,8 +117,8 @@ namespace TaskbarQuota.Taskbar
         private readonly Microsoft.UI.Xaml.Controls.TextBlock[] separators =
             new Microsoft.UI.Xaml.Controls.TextBlock[UsageCoordinator.MaxWidgetTiles - 1];
         private readonly ProviderId?[] tileProviders = new ProviderId?[UsageCoordinator.MaxWidgetTiles];
-        // Slot has a provider AND fits inside the measured taskbar gap. Trimming only ever drops from the
-        // right, so the leading (active) tile is the last one to go.
+        // Slot has a provider AND fits inside the measured taskbar gap. A pinned tile is never suppressed;
+        // the active tile is the courtesy tile that gives way when the pins fill the gap.
         private readonly bool[] tileFits = new bool[UsageCoordinator.MaxWidgetTiles];
         // Has a provider, but is being held back this pass because the row would otherwise overflow. Only
         // ever the active tool's tile when that provider is not pinned.
@@ -273,6 +273,10 @@ namespace TaskbarQuota.Taskbar
             if (hwndShell == IntPtr.Zero || !User32.IsWindow(hwndShell)
                 || (isPrimaryTaskbar && (hwndTrayNotify == IntPtr.Zero || hwndReBar == IntPtr.Zero)))
                 throw new InvalidOperationException("Windows taskbar is not ready.");
+
+            // Register the identity before the first layout pass. A widget whose geometry is temporarily
+            // unavailable is still a relevant display, but its zero width must remain permissive.
+            TaskbarSpace.ReportAvailableWidth(displayKey, TaskbarSpace.UnknownWidth, isPrimaryTaskbar);
 
             uint detectedDpi = User32.GetDpiForWindow(hwndShell);
             taskbarDpi = detectedDpi == 0 ? 96u : detectedDpi;
@@ -526,6 +530,7 @@ namespace TaskbarQuota.Taskbar
             lastWidgetsButtonClientRect = null;
             lastTaskButtonClientRects.Clear();
             availableLogicalWidth = DefaultAvailableLogicalWidth;
+            TaskbarSpace.ReportAvailableWidth(displayKey, TaskbarSpace.UnknownWidth, isPrimaryTaskbar);
             Log.Information(
                 $"Taskbar widget DPI updated in place: taskbar=0x{hwndShell.ToInt64():X}, {previousDpi}->{newDpi}, source={source}");
             RecomputeLayout(forceReposition: true);
@@ -878,8 +883,8 @@ namespace TaskbarQuota.Taskbar
 
         /// <summary>
         /// Binds the tile slots to <paramref name="providers"/> in order (leftmost first) and re-lays out.
-        /// Providers beyond the slot pool are ignored — <see cref="UsageCoordinator.WidgetDisplayProviders"/>
-        /// already caps the list at <see cref="UsageCoordinator.MaxWidgetTiles"/>.
+        /// The coordinator supplies an ordering-only candidate list; the manager applies the effective cap
+        /// after routing each display. The slot-pool <c>Take</c> remains a final safety boundary here.
         /// </summary>
         public void SetDisplayProviders(IReadOnlyList<ProviderId> providers, ProviderId? activeProvider)
         {
@@ -951,8 +956,8 @@ namespace TaskbarQuota.Taskbar
         /// countdowns. There is deliberately no reduced form: trimming a pinned provider is worse than
         /// refusing the pin (issue #25), so keeping the row inside the bar is
         /// <see cref="Services.PinBudgetService"/>'s job. The only concession made here is holding back the
-        /// least recently used non-active tile when the row still overflows the measured gap, which covers
-        /// the transient case of an unpinned active tool arriving beside a full pinned set.
+        /// unpinned active tile when it arrives beside a full pinned set and the row still overflows the
+        /// measured gap.
         ///
         /// Widths are measured, never rendered: <see cref="WidgetSummary.MeasureDesiredWidth"/> is a pure
         /// calculation over the columns, whereas rendering to read a width restarted the tile's refresh
@@ -1097,8 +1102,8 @@ namespace TaskbarQuota.Taskbar
             UpdatePosition();
         }
 
-        private bool IsActiveTile(int slot)
-            => tileProviders[slot] is { } provider && activeTileProvider == provider;
+        private bool IsPinnedTile(int slot)
+            => tileProviders[slot] is { } provider && WidgetSettingsService.IsProviderPinned(provider);
 
         private int LayoutHash(int count, int total)
         {
@@ -1129,10 +1134,10 @@ namespace TaskbarQuota.Taskbar
         /// Holds tiles back until the row fits the free taskbar span, so the widget never grows over the
         /// shell's own buttons.
         ///
-        /// The ACTIVE tool's tile is the one thing never given up — showing the quota of whatever you are
-        /// working in is the widget's original job, and a pinned provider you are not currently touching is
-        /// the cheaper thing to lose for a moment. Pinned tiles yield least-recently-used first and come
-        /// straight back when you switch away, so a pin still guarantees presence the rest of the time.
+        /// A PINNED tile is the one thing never given up — it is the user's explicit "always show this"
+        /// request. The ACTIVE tool's tile is the cheaper courtesy tile to lose for a moment when pins fill
+        /// the measured gap. Pins are kept by the provider list and come straight back when the active tile
+        /// no longer needs the space.
         /// </summary>
         /// <param name="slots">Occupied slot indices; compacted in place. Returns how many survive.</param>
         private int HoldBackTilesThatDoNotFit(int[] slots, int count, int reservedWidth)
@@ -1142,7 +1147,7 @@ namespace TaskbarQuota.Taskbar
 
             var recent = UsageCoordinator.Instance.RecentProviders;
 
-            // Drop the least recently used non-active tile, one at a time, until the row fits. Selection is
+            // Drop the least recently used non-pinned tile, one at a time, until the row fits. Selection is
             // a linear scan rather than an ordered projection: at most three tiles, and this runs on every
             // usage publish, so the LINQ pipeline it replaces was allocating a dictionary, a lambda closure
             // and two lists per pass to sort three items.
@@ -1152,7 +1157,7 @@ namespace TaskbarQuota.Taskbar
                 int worstRecency = int.MinValue;
                 for (int n = 0; n < count; n++)
                 {
-                    if (IsActiveTile(slots[n]))
+                    if (IsPinnedTile(slots[n]))
                         continue;
 
                     int recency = RecencyOf(tileProviders[slots[n]], recent);
@@ -1290,12 +1295,13 @@ namespace TaskbarQuota.Taskbar
             int widest = 0;
             foreach (var (start, end) in gaps)
                 widest = Math.Max(widest, end - start);
-            if (widest <= 0)
-                return;
 
-            availableLogicalWidth = (int)Math.Floor(widest / dpiScale);
-            // Published so the pin budget can refuse a pin that would not fit this taskbar.
-            TaskbarSpace.AvailableLogicalWidth = availableLogicalWidth;
+            availableLogicalWidth = widest <= 0
+                ? TaskbarSpace.UnknownWidth
+                : (int)Math.Floor(widest / dpiScale);
+            // Published with the widget's display identity so another monitor cannot overwrite this
+            // taskbar's measurement. Zero is retained as an unknown marker during transient shell rebuilds.
+            TaskbarSpace.ReportAvailableWidth(displayKey, availableLogicalWidth, isPrimaryTaskbar);
         }
 
         private bool ResizeWidgetHost(int logicalWidth)
@@ -3385,6 +3391,7 @@ namespace TaskbarQuota.Taskbar
                 return;
 
             disposedValue = true;
+            TaskbarSpace.ForgetDisplay(displayKey);
             StopDragPolling();
             EndUserRepositioning();
             initialized = false;

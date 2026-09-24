@@ -364,7 +364,9 @@ namespace TaskbarQuota.Taskbar
                 return false;
 
             var coordinator = UsageCoordinator.Instance;
-            var providers = coordinator.WidgetDisplayProviders;
+            var providers = coordinator.WidgetDisplayProviders
+                .Take(UsageCoordinator.MaxDisplayedWidgetTiles)
+                .ToArray();
             var activity = AgentActivityService.Instance.Snapshot;
 
             _floatingWindow.SetActivitySnapshot(activity);
@@ -389,7 +391,9 @@ namespace TaskbarQuota.Taskbar
                 return;
 
             var coordinator = UsageCoordinator.Instance;
-            var providers = coordinator.WidgetDisplayProviders;
+            var providers = coordinator.WidgetDisplayProviders
+                .Take(UsageCoordinator.MaxDisplayedWidgetTiles)
+                .ToArray();
 
             bool needsFetch = false;
             foreach (var provider in providers)
@@ -564,8 +568,8 @@ namespace TaskbarQuota.Taskbar
                 RefreshPinnedTiles();
                 // The free span is only known once a widget has measured it, so a set pinned before that
                 // (or pinned when the bar was emptier) is reconciled here rather than rendering badly.
-                // EnforceBudget early-outs when neither the span nor the pinned set has moved, which is
-                // every tick but the few that follow a real change.
+                // EnforceBudget observes every tick so its hysteresis can distinguish a stable overflow from
+                // a transient geometry report.
                 Services.PinBudgetService.EnforceBudget();
                 // Re-run the tile-fit math against the gap the last position pass measured, so tiles that
                 // were trimmed off a crowded taskbar come back once there is room for them again.
@@ -733,7 +737,8 @@ namespace TaskbarQuota.Taskbar
                     ? widget.DisplayKey
                     : ResolveDisplayKey(WidgetSettingsService.GetAdaptiveProviderDisplay(provider)),
                 WidgetSettingsService.IsProviderPinned,
-                provider => ResolveDisplayKey(WidgetSettingsService.GetPinnedProviderDisplay(provider)));
+                provider => ResolveDisplayKey(WidgetSettingsService.GetPinnedProviderDisplay(provider)),
+                UsageCoordinator.MaxDisplayedWidgetTiles);
         }
 
         private static ProviderId? ActiveProviderForWidget(

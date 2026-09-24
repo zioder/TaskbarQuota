@@ -288,7 +288,10 @@ namespace TaskbarQuota.Views
                 return;
             }
 
-            if (option.IsPinned && !item.IsPinned && !PinBudgetService.CanPin(item.Id, out var reason))
+            string? prospectiveDisplay = option.MatchesAnyDestination
+                ? WidgetSettingsService.GetPinnedProviderDisplay(item.Id)
+                : string.IsNullOrWhiteSpace(option.DisplayKey) ? null : option.DisplayKey;
+            if (option.IsPinned && !PinBudgetService.CanPin(item.Id, prospectiveDisplay, out var reason))
             {
                 PinBlockedBar.Message = reason;
                 PinBlockedBar.IsOpen = true;
