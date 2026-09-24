@@ -352,7 +352,7 @@ namespace TaskbarQuota.ViewModels
                         AdditionalUsageOpacity = muted ? 0.55 : 1.0;
                     }
 
-                    if (r.Id == ProviderId.Codex && u.ResetCredits is { } resetCredits)
+                    if (u.ResetCredits is { } resetCredits)
                     {
                         ResetCreditsCountText = FormatAvailableResetCredits(resetCredits.AvailableCount);
                         ResetCreditsGrantedText = FormatResetCreditTimes(resetCredits.Credits, static c => c.GrantedAt);

@@ -52,6 +52,43 @@ public class ClaudeProviderCredentialTests
     }
 
     [Fact]
+    public void BuildResult_ClaudeResetGrants_ExpandsRemainingResetsAndSkipsSpentOrExpired()
+    {
+        using var doc = JsonDocument.Parse("""
+        {
+          "cedar_ember": {
+            "eligible": true,
+            "grants": [
+              { "id": "launch", "resets_left": 1, "starts_at": "2099-01-01T00:00:00Z", "ends_at": "2099-02-01T00:00:00Z" },
+              { "id": "multi", "resets_left": 2, "ends_at": "2099-03-01T00:00:00Z" },
+              { "id": "spent", "resets_left": 0, "ends_at": "2099-04-01T00:00:00Z" },
+              { "id": "expired", "resets_left": 1, "ends_at": "2000-01-01T00:00:00Z" }
+            ]
+          }
+        }
+        """);
+
+        var result = ClaudeProvider.BuildResultForTesting(
+            doc.RootElement,
+            new ClaudeProvider.Credentials("token", "pro", "default_claude_ai"));
+
+        Assert.Equal(3, result.Usage.ResetCredits?.AvailableCount);
+        Assert.Equal(3, result.Usage.ResetCredits?.Credits.Count);
+        Assert.Equal(2, result.Usage.ResetCredits!.Credits.Count(c => c.ExpiresAt == DateTimeOffset.Parse("2099-03-01T00:00:00Z")));
+    }
+
+    [Fact]
+    public void BuildResult_ClaudeResetGrants_IneligibleIsZeroAndMissingBlockIsNull()
+    {
+        using var ineligible = JsonDocument.Parse("""{"cedar_ember":{"eligible":false}}""");
+        using var missing = JsonDocument.Parse("{}");
+        var credentials = new ClaudeProvider.Credentials("token", "pro", "default_claude_ai");
+
+        Assert.Equal(0, ClaudeProvider.BuildResultForTesting(ineligible.RootElement, credentials).Usage.ResetCredits?.AvailableCount);
+        Assert.Null(ClaudeProvider.BuildResultForTesting(missing.RootElement, credentials).Usage.ResetCredits);
+    }
+
+    [Fact]
     public void BuildResult_ClaudeNewUsageFields_AreDisplayed()
     {
         using var doc = JsonDocument.Parse("""

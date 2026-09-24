@@ -318,7 +318,7 @@
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0"
-                                       Text="Reset credits"
+                                       Text="Reset Credits"
                                        Style="{StaticResource BodyStrongTextBlockStyle}"
                                        VerticalAlignment="Center"/>
                             <TextBlock Grid.Column="1"

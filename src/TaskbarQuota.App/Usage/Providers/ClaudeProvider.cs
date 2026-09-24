@@ -23,7 +23,7 @@ namespace TaskbarQuota.Usage.Providers
     /// </summary>
     public sealed class ClaudeProvider : IUsageProvider
     {
-        private const string UsageUrl = "https://api.anthropic.com/api/oauth/usage";
+        private const string UsageUrl = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1";
         private const string RefreshUrl = "https://platform.claude.com/v1/oauth/token";
         private const string ClientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
         private const string RefreshScope = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
@@ -120,7 +120,7 @@ namespace TaskbarQuota.Usage.Providers
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
             request.Headers.Accept.ParseAdd("application/json");
             request.Headers.TryAddWithoutValidation("anthropic-beta", "oauth-2025-04-20");
-            request.Headers.TryAddWithoutValidation("User-Agent", "claude-code/2.1.0");
+            request.Headers.TryAddWithoutValidation("User-Agent", "claude-cli/2.1.280 (external, cli)");
             return await Http.SendAsync(request, ct).ConfigureAwait(false);
         }
 
@@ -180,6 +180,7 @@ namespace TaskbarQuota.Usage.Providers
             };
             usage.Secondary = secondary;
             usage.ModelSpecific = modelSpecific;
+            usage.ResetCredits = ParseResetGrants(json);
 
             if (fableWeekly is { } fable)
                 usage.ExtraRateWindows.Add(new NamedRateWindow("claude-fable", "Fable", fable));
@@ -197,6 +198,41 @@ namespace TaskbarQuota.Usage.Providers
             usage.LoginMethod = plan;
             return new ProviderFetchResult(usage, "oauth");
         }
+
+        private static ResetCreditsSnapshot? ParseResetGrants(JsonElement root)
+        {
+            if (!root.TryGetProperty("cedar_ember", out var block) || block.ValueKind != JsonValueKind.Object)
+                return null;
+
+            var grants = new List<ResetCreditGrant>();
+            if (block.TryGetProperty("eligible", out var eligible) && eligible.ValueKind == JsonValueKind.True &&
+                block.TryGetProperty("grants", out var grantArray) && grantArray.ValueKind == JsonValueKind.Array)
+            {
+                var now = DateTimeOffset.UtcNow;
+                foreach (var grant in grantArray.EnumerateArray())
+                {
+                    if (grant.ValueKind != JsonValueKind.Object || Num(grant, "resets_left") is not double resetsLeft
+                        || resetsLeft < 1 || resetsLeft > 100)
+                        continue;
+                    int count = (int)resetsLeft;
+
+                    DateTimeOffset? expiresAt = ParseDateTimeOffset(grant, "ends_at");
+                    if (expiresAt is { } expiry && expiry <= now) continue;
+                    DateTimeOffset? grantedAt = ParseDateTimeOffset(grant, "starts_at");
+                    // A grant can contain multiple resets. Keep one item per remaining reset for detail views.
+                    for (int i = 0; i < count; i++)
+                        grants.Add(new ResetCreditGrant("available", grantedAt, expiresAt));
+                }
+            }
+
+            return new ResetCreditsSnapshot(grants.Count, grants);
+        }
+
+        private static DateTimeOffset? ParseDateTimeOffset(JsonElement parent, string name)
+            => parent.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String &&
+                DateTimeOffset.TryParse(value.GetString(), CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed)
+                ? parsed : null;
 
         private static CostSnapshot RelabelCostPeriod(CostSnapshot cost, string period)
         {

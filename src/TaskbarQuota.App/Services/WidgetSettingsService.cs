@@ -603,6 +603,7 @@ public static class WidgetSettingsService
                 new(RowPrimary, "Session"),
                 new(RowSecondary, "Weekly"),
                 new(RowModelSpecific, "Model weekly"),
+                new(RowResetCredits, "Reset credits"),
                 new(RowExtra, "Extra weekly rows"),
             ],
             ProviderId.Cursor =>
