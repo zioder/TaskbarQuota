@@ -21,7 +21,7 @@ https://github.com/user-attachments/assets/c339b79f-f3c6-4344-a6e6-bd6d60f75da2
 
 TaskbarQuota is a native Windows app for people who use several AI coding tools. It detects the provider in your focused app or terminal, then keeps the relevant quota visible beside the system tray. Open the dashboard for usage history, model-level costs, and a live view of local coding agents.
 
-Everything runs on your PC. TaskbarQuota has no account system, cloud backend, or telemetry.
+Everything runs on your PC. TaskbarQuota has no account system. An anonymous daily ping (on by default, off in Settings) is the only data sent to a TaskbarQuota server, and it cannot identify you or follow you across days.
 
 ## Install
 
@@ -108,7 +108,7 @@ TaskbarQuota reuses credentials already stored by supported tools when possible.
 
 - Usage requests go directly from your PC to the provider.
 - Agent activity and prompt-derived session titles stay on your PC.
-- TaskbarQuota does not collect telemetry or send data to a TaskbarQuota server.
+- TaskbarQuota can send one anonymous usage ping per UTC day so we can estimate daily, weekly, and monthly active users. The ping contains only rotating one-way IDs for the current day, ISO week, and month, plus the app version and whether you installed from the Microsoft Store or GitHub. It does not include your name, accounts, providers, quota, or agent activity. A local salt never leaves your PC, so the collector cannot follow the same install across days. Turn this off in **Settings → Anonymous usage ping**. Debug builds never send. Pings stay local until a maintainer deploys the collector and sets its URL; see [`telemetry/README.md`](telemetry/README.md).
 - Diagnostics are written only to `%TEMP%\taskbarquota.log`.
 - Automatic browser cookies are read in memory. Credentials entered manually are stored in plain JSON at `%LOCALAPPDATA%\TaskbarQuota\credentials.json`, so keep that file private.
 - Optional cross-session replenishment state is stored locally in `quota-replenishment-state.json`. It contains percentage-window metadata, timestamps, and a one-way identity hash, never the plaintext account identifier. Disabling either replenishment notifications or the cross-session option clears it.

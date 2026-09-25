@@ -232,6 +232,17 @@
                            Width="120"/>
             </tk:SettingsCard>
 
+            <TextBlock Text="Privacy" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,2"/>
+            <tk:SettingsCard Header="Anonymous usage ping"
+                             Description="Once per UTC day, send rotating one-way IDs for today, this week, and this month, plus the app version and Store vs GitHub install channel. No name, account, providers, or usage data. The collector cannot follow you across days. Debug builds never send.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE8F1;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <ToggleSwitch x:Name="AnonymousTelemetryToggle"
+                              AutomationProperties.Name="Anonymous usage ping"
+                              Toggled="OnAnonymousTelemetryToggled"/>
+            </tk:SettingsCard>
+
             <TextBlock Text="Credentials" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,16,0,2"/>
             <TextBlock Text="All providers detect credentials automatically. If auto-detection fails for a provider, use the &quot;Fix&quot; button on its dashboard card."
                        Opacity="0.7" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap" Margin="0,0,0,4"/>

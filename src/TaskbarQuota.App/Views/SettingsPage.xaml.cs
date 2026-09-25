@@ -76,6 +76,7 @@ namespace TaskbarQuota.Views
             PercentageModeCombo.SelectedIndex = WidgetSettingsService.CurrentPercentageMode == PercentageDisplayMode.Remaining ? 1 : 0;
             StartupToggle.IsOn = StartupSettingsService.IsEnabled;
             ApplyQuotaAlertSettingsToControls();
+            AnonymousTelemetryToggle.IsOn = AnonymousTelemetrySettingsService.IsEnabled;
             AutoHideUnavailableToggle.IsOn = WidgetSettingsService.AutoHideUnavailable;
             HideWhenUnfocusedToggle.IsOn = WidgetSettingsService.HideWhenProviderUnfocused;
             ViewModel.ReloadProviders();
@@ -620,6 +621,16 @@ namespace TaskbarQuota.Views
                     : PercentageDisplayMode.Consumed;
                 WidgetSettingsService.Apply(mode);
             }
+        }
+
+        private void OnAnonymousTelemetryToggled(object sender, RoutedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            AnonymousTelemetrySettingsService.SetEnabled(AnonymousTelemetryToggle.IsOn);
+            if (AnonymousTelemetryToggle.IsOn)
+                AnonymousTelemetryService.Instance.SendSoonAfterOptIn();
         }
 
         private void OnQuotaAlertsToggled(object sender, RoutedEventArgs e)
