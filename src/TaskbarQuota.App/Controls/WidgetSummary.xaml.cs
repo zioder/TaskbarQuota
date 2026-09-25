@@ -1606,23 +1606,19 @@ namespace TaskbarQuota.Controls
 
         private Brush UsageBarBrush(double displayPercent)
         {
-            if (UseApplicationChromeColors)
-            {
-                bool light = ThemeService.IsLightChrome(this);
-                // Thresholds match WidgetSettingsService usage colors (critical / caution / normal).
-                displayPercent = Math.Clamp(displayPercent, 0, 100);
-                bool remaining = WidgetSettingsService.CurrentPercentageMode == PercentageDisplayMode.Remaining;
-                bool critical = remaining ? displayPercent <= 10 : displayPercent >= 90;
-                bool caution = remaining ? displayPercent <= 25 : displayPercent >= 75;
-                if (critical)
-                    return new SolidColorBrush(light ? Color.FromArgb(255, 196, 43, 28) : Color.FromArgb(255, 255, 99, 71));
-                if (caution)
-                    return new SolidColorBrush(light ? Color.FromArgb(255, 157, 93, 0) : Color.FromArgb(255, 255, 185, 0));
-                return new SolidColorBrush(light ? Color.FromArgb(255, 0, 103, 192) : Color.FromArgb(255, 96, 205, 255));
-            }
-
-            string key = WidgetSettingsService.GetUsageBrushResourceKeyForDisplayPercent(displayPercent);
-            return (Brush)Application.Current.Resources[key];
+            bool light = UseApplicationChromeColors
+                ? ThemeService.IsLightChrome(this)
+                : Interop.SystemInfos.IsSystemLightThemeUsed() == true;
+            // Thresholds match WidgetSettingsService usage colors (critical / caution / normal).
+            displayPercent = Math.Clamp(displayPercent, 0, 100);
+            bool remaining = WidgetSettingsService.CurrentPercentageMode == PercentageDisplayMode.Remaining;
+            bool critical = remaining ? displayPercent <= 10 : displayPercent >= 90;
+            bool caution = remaining ? displayPercent <= 25 : displayPercent >= 75;
+            if (critical)
+                return new SolidColorBrush(light ? Color.FromArgb(255, 196, 43, 28) : Color.FromArgb(255, 255, 99, 71));
+            if (caution)
+                return new SolidColorBrush(light ? Color.FromArgb(255, 157, 93, 0) : Color.FromArgb(255, 255, 185, 0));
+            return new SolidColorBrush(light ? Color.FromArgb(255, 0, 103, 192) : Color.FromArgb(255, 96, 205, 255));
         }
 
         private static string Abbrev(string name)
