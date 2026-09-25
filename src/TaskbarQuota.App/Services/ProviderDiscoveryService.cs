@@ -10,17 +10,14 @@ namespace TaskbarQuota;
 /// <summary>
 /// Tracks which providers are probed, configured, and visible in the dashboard vs taskbar widget.
 ///
-/// Display rules (strict — a provider must never leak onto the UI on its own):
+/// Display rules:
 /// <list type="bullet">
 ///   <item>Explicitly disabled → never shown or fetched anywhere. Only the Settings
 ///   toggle opts back in.</item>
-///   <item>Not installed → never shown or fetched. Install state comes from
+///   <item>Not installed → not shown or fetched. Install state comes from
 ///   <see cref="ProviderInstallDetector"/> (CLI, credentials, or desktop app).</item>
-///   <item>Installed → shown only with open/use evidence: the detected active provider
-///   (CLI terminal, desktop app, or a browser tab linking the app), recently-active
-///   this session, or explicit user intent (enabled in Settings, pinned).</item>
+///   <item>Installed → shown and fetched even while its app is closed.</item>
 /// </list>
-/// Installed-but-idle providers stay hidden and unfetched.
 /// </summary>
 public static class ProviderDiscoveryService
 {
@@ -34,18 +31,11 @@ public static class ProviderDiscoveryService
     private static readonly HashSet<ProviderId> ExplicitlyDisabled = new();
     private static readonly HashSet<ProviderId> ExplicitlyWidgetDisabled = new();
 
-    /// <summary>Test hook for open/use evidence without running foreground detection.</summary>
-    internal static Func<ProviderId, bool>? IsRecentlyActiveOverrideForTesting;
-
     static ProviderDiscoveryService() => Load();
 
     /// <summary>
-    /// Enforces "never shown when not installed" against stale settings: hides providers
-    /// with nothing installed unless the user explicitly opted in (enabled in Settings, or
-    /// pinned — a pin is explicit intent, so its visibility flags are preserved and the tile
-    /// returns on its own once the provider is installed or configured again). Never makes
-    /// anything visible — surfacing is driven by open/use evidence (see
-    /// <see cref="ShouldShowInDashboard"/>) or explicit opt-in.
+    /// Scans every provider installation at startup and restores installed providers to the
+    /// dashboard and widget. Explicit disables and widget-level hides remain user choices.
     /// </summary>
     public static void SyncInstalledProviderVisibility()
     {
@@ -57,9 +47,18 @@ public static class ProviderDiscoveryService
             bool dashboardChanged = false;
             foreach (ProviderId id in Enum.GetValues<ProviderId>())
             {
-                if (ProviderInstallDetector.IsInstalled(id)
-                    || ExplicitlyEnabled.Contains(id)
-                    || WidgetSettingsService.IsProviderPinned(id))
+                if (ExplicitlyDisabled.Contains(id))
+                    continue;
+
+                if (ProviderInstallDetector.IsInstalled(id))
+                {
+                    dashboardChanged |= WidgetSettingsService.SetProviderDashboardVisibleSilent(id, true);
+                    if (!ExplicitlyWidgetDisabled.Contains(id))
+                        widgetChanged |= WidgetSettingsService.SetProviderVisibleSilent(id, true);
+                    continue;
+                }
+
+                if (ExplicitlyEnabled.Contains(id) || WidgetSettingsService.IsProviderPinned(id))
                     continue;
 
                 widgetChanged |= WidgetSettingsService.SetProviderVisibleSilent(id, false);
@@ -83,10 +82,8 @@ public static class ProviderDiscoveryService
             if (result.Ok || result.ErrorKind == ProviderErrorKind.AuthRequired)
                 Configured.Add(result.Id);
 
-            // Never auto-show: visibility flips only via explicit user action
-            // (Settings toggle, pin, OAuth login). A successful fetch of an idle
-            // provider must not resurrect it on the dashboard or widget, and an
-            // explicit widget hide (SetWidgetVisibilityPreference) is never overridden.
+            // Fetches update discovery state only. Startup sync restores installed
+            // dashboard and widget entries; an explicit widget hide is never overridden.
 
             if (result.ErrorKind == ProviderErrorKind.NotInstalled
                 && !ProviderInstallDetector.IsInstalled(result.Id)
@@ -195,38 +192,14 @@ public static class ProviderDiscoveryService
     }
 
     /// <summary>
-    /// Eligibility beyond the active provider: installed, and either explicitly kept
-    /// (enabled in Settings, pinned) or recently used this session. Installed-but-idle
-    /// providers stay hidden and unfetched so they can't leak back on their own.
+    /// Every installed provider can be checked while its app is closed.
     /// </summary>
-    private static bool IsEligible(ProviderId id)
-    {
-        if (!ProviderInstallDetector.IsInstalled(id))
-            return false;
-        if (IsExplicitlyEnabled(id))
-            return true;
-        if (WidgetSettingsService.IsProviderPinned(id))
-            return true;
-        return IsRecentlyActive(id);
-    }
-
-    /// <summary>
-    /// Open/use evidence: the provider was detected in the foreground this session via
-    /// a CLI terminal, desktop app, host app, or a browser tab linking the app.
-    /// </summary>
-    private static bool IsRecentlyActive(ProviderId id)
-    {
-        if (IsRecentlyActiveOverrideForTesting is { } fn)
-            return fn(id);
-        return UsageCoordinator.Instance.RecentProviders.Contains(id);
-    }
+    private static bool IsEligible(ProviderId id) => ProviderInstallDetector.IsInstalled(id);
 
     public static bool ShouldShowInAvailable(UsageResult result, ProviderId? active)
     {
-        // Discovery surfacing is disabled on purpose: providers appear only with
-        // open/use evidence or explicit opt-in (see ShouldShowInDashboard). Anything
-        // else — including not-installed providers — stays hidden; Settings is the
-        // opt-in surface. Kept (always false) so the Available pipeline stays inert.
+        // Installed providers appear directly in the dashboard. The Available
+        // pipeline stays inert; not-installed providers remain in Settings.
         _ = result;
         _ = active;
         return false;
@@ -241,7 +214,6 @@ public static class ProviderDiscoveryService
             ExplicitlyEnabled.Clear();
             ExplicitlyDisabled.Clear();
             ExplicitlyWidgetDisabled.Clear();
-            IsRecentlyActiveOverrideForTesting = null;
         }
     }
 
