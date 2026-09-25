@@ -195,6 +195,8 @@ namespace TaskbarQuota.Controls
                 : Interop.SystemInfos.IsSystemLightThemeUsed() == true;
 
             Foreground = new SolidColorBrush(light ? Color.FromArgb(255, 28, 28, 28) : Colors.White);
+            HostBadgeBox.Background = new SolidColorBrush(light ? Colors.White : Color.FromArgb(255, 32, 32, 32));
+            HostBadgeGlyph.Fill = Foreground;
             var track = new SolidColorBrush(light ? Color.FromArgb(90, 28, 28, 28) : Color.FromArgb(110, 255, 255, 255));
 
             foreach (var row in _renderedRows)
@@ -1749,35 +1751,25 @@ namespace TaskbarQuota.Controls
 
         private Brush ResetBrush(string resetDescription)
         {
-            // Floating HUD uses solid colors from the window chrome theme. Application.Current
-            // theme resources resolve against system/app dark mode and paint light-on-light
-            // secondary text (e.g. "(6h 25m)") when the floating window is in light mode.
-            if (UseApplicationChromeColors)
+            // The taskbar and floating HUD can have different themes. Follow the same
+            // palette decision as the rest of this tile instead of app theme resources.
+            bool light = UseApplicationChromeColors
+                ? ThemeService.IsLightChrome(this)
+                : Interop.SystemInfos.IsSystemLightThemeUsed() == true;
+            return TryParseResetMinutes(resetDescription) switch
             {
-                bool light = ThemeService.IsLightChrome(this);
-                return TryParseResetMinutes(resetDescription) switch
-                {
-                    // Urgent / soon: accent blue, darker on light chrome for contrast.
-                    <= 30 => new SolidColorBrush(light
-                        ? Color.FromArgb(255, 0, 90, 158)
-                        : Color.FromArgb(255, 96, 205, 255)),
-                    <= 120 => new SolidColorBrush(light
-                        ? Color.FromArgb(255, 0, 103, 192)
-                        : Color.FromArgb(255, 80, 180, 255)),
-                    // Normal reset countdown: muted primary, never pure theme secondary.
-                    _ => new SolidColorBrush(light
-                        ? Color.FromArgb(210, 28, 28, 28)
-                        : Color.FromArgb(210, 255, 255, 255)),
-                };
-            }
-
-            string key = TryParseResetMinutes(resetDescription) switch
-            {
-                <= 30 => "AccentFillColorDefaultBrush",
-                <= 120 => "AccentFillColorSecondaryBrush",
-                _ => "TextFillColorSecondaryBrush",
+                // Urgent / soon: accent blue, darker on light chrome for contrast.
+                <= 30 => new SolidColorBrush(light
+                    ? Color.FromArgb(255, 0, 90, 158)
+                    : Color.FromArgb(255, 96, 205, 255)),
+                <= 120 => new SolidColorBrush(light
+                    ? Color.FromArgb(255, 0, 103, 192)
+                    : Color.FromArgb(255, 80, 180, 255)),
+                // Normal reset countdown: muted primary, never pure theme secondary.
+                _ => new SolidColorBrush(light
+                    ? Color.FromArgb(210, 28, 28, 28)
+                    : Color.FromArgb(210, 255, 255, 255)),
             };
-            return (Brush)Application.Current.Resources[key];
         }
 
         private static Brush? PricingBrush(UsagePricingSnapshot pricing)
