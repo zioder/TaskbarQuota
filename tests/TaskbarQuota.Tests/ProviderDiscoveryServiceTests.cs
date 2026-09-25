@@ -133,7 +133,7 @@ public class ProviderDiscoveryServiceTests
     }
 
     [Fact]
-    public void SyncInstalledProviderVisibility_DoesNotAutoShowInstalledProvider()
+    public void SyncInstalledProviderVisibility_ShowsInstalledProviderOnDashboardAndWidget()
     {
         ProviderInstallDetector.IsInstalledOverrideForTesting = id => id == ProviderId.Grok;
         WidgetSettingsService.SetProviderVisibleForTesting(ProviderId.Grok, false);
@@ -141,8 +141,38 @@ public class ProviderDiscoveryServiceTests
 
         ProviderDiscoveryService.SyncInstalledProviderVisibility();
 
+        Assert.True(WidgetSettingsService.IsProviderDashboardVisible(ProviderId.Grok));
+        Assert.True(WidgetSettingsService.IsProviderVisible(ProviderId.Grok));
+    }
+
+    [Fact]
+    public void SyncInstalledProviderVisibility_ShowsProviderAfterInstallation()
+    {
+        bool installed = false;
+        ProviderInstallDetector.IsInstalledOverrideForTesting = id => id == ProviderId.Grok && installed;
+
+        ProviderDiscoveryService.SyncInstalledProviderVisibility();
+        Assert.False(WidgetSettingsService.IsProviderDashboardVisible(ProviderId.Grok));
+        Assert.False(ProviderDiscoveryService.ShouldFetch(ProviderId.Grok, active: null));
+
+        installed = true;
+        ProviderDiscoveryService.SyncInstalledProviderVisibility();
+        Assert.True(WidgetSettingsService.IsProviderDashboardVisible(ProviderId.Grok));
+        Assert.True(WidgetSettingsService.IsProviderVisible(ProviderId.Grok));
+        Assert.True(ProviderDiscoveryService.ShouldFetch(ProviderId.Grok, active: null));
+    }
+
+    [Fact]
+    public void SyncInstalledProviderVisibility_KeepsExplicitlyDisabledProviderHidden()
+    {
+        ProviderInstallDetector.IsInstalledOverrideForTesting = id => id == ProviderId.Grok;
+        ProviderDiscoveryService.DisableProvider(ProviderId.Grok);
+
+        ProviderDiscoveryService.SyncInstalledProviderVisibility();
+
         Assert.False(WidgetSettingsService.IsProviderDashboardVisible(ProviderId.Grok));
         Assert.False(WidgetSettingsService.IsProviderVisible(ProviderId.Grok));
+        Assert.False(ProviderDiscoveryService.ShouldFetch(ProviderId.Grok, active: null));
     }
 
     [Fact]
@@ -181,7 +211,7 @@ public class ProviderDiscoveryServiceTests
     }
 
     [Fact]
-    public void ShouldShowInDashboard_HidesIdleInstalledProvider()
+    public void ShouldShowInDashboard_ShowsIdleInstalledProvider()
     {
         ProviderInstallDetector.IsInstalledOverrideForTesting = _ => true;
         var provider = new UsageService().Get(ProviderId.Grok)!;
@@ -190,9 +220,9 @@ public class ProviderDiscoveryServiceTests
             provider,
             new ProviderFetchResult(new UsageSnapshot(new RateWindow(10)), "test"));
 
-        Assert.False(ProviderDiscoveryService.ShouldShowInDashboard(result, active: null));
+        Assert.True(ProviderDiscoveryService.ShouldShowInDashboard(result, active: null));
         Assert.False(ProviderDiscoveryService.ShouldShowInAvailable(result, active: null));
-        Assert.False(ProviderDiscoveryService.ShouldFetch(ProviderId.Grok, active: null));
+        Assert.True(ProviderDiscoveryService.ShouldFetch(ProviderId.Grok, active: null));
     }
 
     [Fact]
@@ -208,21 +238,6 @@ public class ProviderDiscoveryServiceTests
 
         Assert.True(ProviderDiscoveryService.ShouldShowInDashboard(result, active: null));
         Assert.True(ProviderDiscoveryService.ShouldFetch(ProviderId.Codex, active: null));
-    }
-
-    [Fact]
-    public void ShouldShowInDashboard_ShowsRecentlyActiveInstalledProvider()
-    {
-        ProviderInstallDetector.IsInstalledOverrideForTesting = _ => true;
-        ProviderDiscoveryService.IsRecentlyActiveOverrideForTesting = id => id == ProviderId.Grok;
-        var provider = new UsageService().Get(ProviderId.Grok)!;
-        var result = UsageResult.Success(
-            ProviderId.Grok,
-            provider,
-            new ProviderFetchResult(new UsageSnapshot(new RateWindow(10)), "test"));
-
-        Assert.True(ProviderDiscoveryService.ShouldShowInDashboard(result, active: null));
-        Assert.True(ProviderDiscoveryService.ShouldFetch(ProviderId.Grok, active: null));
     }
 
     [Fact]
@@ -249,8 +264,8 @@ public class ProviderDiscoveryServiceTests
     [Fact]
     public void SyncInstalledProviderVisibility_PreservesExplicitWidgetHide()
     {
-        // An explicit widget hide is user intent: sync must never flip it back on, and the
-        // new no-auto-show rules mean the dashboard card is not resurrected either.
+        // An explicit widget hide is user intent; an installed provider still appears
+        // on the dashboard so its usage can be checked there.
         ProviderInstallDetector.IsInstalledOverrideForTesting = id => id == ProviderId.Grok;
         WidgetSettingsService.SetProviderVisibleForTesting(ProviderId.Grok, false);
         WidgetSettingsService.SetProviderDashboardVisibleForTesting(ProviderId.Grok, false);
@@ -259,7 +274,7 @@ public class ProviderDiscoveryServiceTests
         ProviderDiscoveryService.SyncInstalledProviderVisibility();
 
         Assert.False(WidgetSettingsService.IsProviderVisible(ProviderId.Grok));
-        Assert.False(WidgetSettingsService.IsProviderDashboardVisible(ProviderId.Grok));
+        Assert.True(WidgetSettingsService.IsProviderDashboardVisible(ProviderId.Grok));
     }
 
     [Fact]
@@ -339,11 +354,11 @@ public class ProviderDiscoveryServiceTests
     [Fact]
     public void ShouldFetchForDashboard_ForceWidensCachePolicyButNotTheProviderSet()
     {
-        // Without force the eligibility rules apply: an idle installed provider is not fetched.
+        // Installed providers are fetched even when idle.
         ProviderInstallDetector.IsInstalledOverrideForTesting = _ => true;
-        Assert.False(UsageCoordinator.ShouldFetchForDashboard(ProviderId.Grok, force: false, active: null));
+        Assert.True(UsageCoordinator.ShouldFetchForDashboard(ProviderId.Grok, force: false, active: null));
 
-        // With force any non-disabled provider is refreshed.
+        // With force the same provider remains eligible for refresh.
         Assert.True(UsageCoordinator.ShouldFetchForDashboard(ProviderId.Grok, force: true, active: null));
     }
 }
