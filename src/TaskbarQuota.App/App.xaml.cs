@@ -56,6 +56,7 @@ namespace TaskbarQuota
 
             UsageCoordinator.Instance.Start();
             QuotaAlertService.Instance.Start();
+            AnonymousTelemetryService.Instance.Start();
 
             _ = Task.Run(() =>
             {
