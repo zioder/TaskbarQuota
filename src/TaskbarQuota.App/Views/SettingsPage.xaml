@@ -73,6 +73,25 @@
                               Toggled="OnHideWhenUnfocusedToggled"/>
             </tk:SettingsCard>
 
+            <tk:SettingsCard Header="Colored provider icons"
+                             Description="Tint each provider's icon in the usage widget so similar logos are easy to tell apart. Agent activity shows as a status dot on the icon. Turn off to use the plain theme color for every icon.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE790;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <ToggleSwitch x:Name="ColoredIconsToggle"
+                              AutomationProperties.Name="Colored provider icons"
+                              AutomationProperties.AutomationId="ColoredIconsToggle"
+                              Toggled="OnColoredIconsToggled"/>
+            </tk:SettingsCard>
+
+            <tk:SettingsExpander x:Name="IconColorsExpander"
+                                 Header="Provider icon colors"
+                                 Description="Choose the widget icon color for each provider.">
+                <tk:SettingsExpander.HeaderIcon>
+                    <FontIcon Glyph="&#xE771;"/>
+                </tk:SettingsExpander.HeaderIcon>
+            </tk:SettingsExpander>
+
             <tk:SettingsCard Header="Where to show usage"
                              Description="Taskbar places the compact widget next to the tray. Floating uses a native Acrylic always-on-top window with the same layout. Scroll wheel adjusts its strength; right-click returns to the taskbar.">
                 <tk:SettingsCard.HeaderIcon>
