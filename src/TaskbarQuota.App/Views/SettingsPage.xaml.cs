@@ -334,7 +334,16 @@ namespace TaskbarQuota.Views
                 IsMoreButtonVisible = true,
                 Color = ParseIconColor(WidgetSettingsService.GetConfiguredProviderIconColorHex(item.Id)),
             };
-            picker.ColorChanged += (_, args) => swatch.Background = new SolidColorBrush(args.NewColor);
+            // Only a color the user actually picked is saved. Providers without a color start the picker
+            // at white as a placeholder, and saving that would turn "theme foreground" into a fixed white.
+            bool userChanged = false;
+            bool settingColor = false;
+            picker.ColorChanged += (_, args) =>
+            {
+                swatch.Background = new SolidColorBrush(args.NewColor);
+                if (!settingColor)
+                    userChanged = true;
+            };
 
             var resetButton = new Button { Content = "Reset to default", HorizontalAlignment = HorizontalAlignment.Left };
             AutomationProperties.SetName(resetButton, $"Reset {item.DisplayName} icon color");
@@ -348,15 +357,29 @@ namespace TaskbarQuota.Views
             // and re-render every widget continuously.
             flyout.Closed += (_, _) =>
             {
-                string hex = ToHex(picker.Color);
-                if (WidgetSettingsService.GetConfiguredProviderIconColorHex(item.Id) != hex)
-                    WidgetSettingsService.SetProviderIconColor(item.Id, hex);
+                if (userChanged)
+                {
+                    string hex = ToHex(picker.Color);
+                    if (WidgetSettingsService.GetConfiguredProviderIconColorHex(item.Id) != hex)
+                        WidgetSettingsService.SetProviderIconColor(item.Id, hex);
+                }
+                userChanged = false;
                 swatch.Background = SwatchBrush();
             };
             resetButton.Click += (_, _) =>
             {
                 WidgetSettingsService.ResetProviderIconColor(item.Id);
-                picker.Color = ParseIconColor(WidgetSettingsService.GetConfiguredProviderIconColorHex(item.Id));
+                settingColor = true;
+                try
+                {
+                    picker.Color = ParseIconColor(WidgetSettingsService.GetConfiguredProviderIconColorHex(item.Id));
+                }
+                finally
+                {
+                    settingColor = false;
+                }
+                // Hide() raises Closed; the reset must not be overwritten by a save there.
+                userChanged = false;
                 swatch.Background = SwatchBrush();
                 flyout.Hide();
             };
