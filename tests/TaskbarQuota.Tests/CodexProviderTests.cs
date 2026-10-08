@@ -101,6 +101,115 @@ public class CodexProviderTests
     }
 
     [Fact]
+    public void BuildResult_BusinessSpendControl_MapsIndividualLimitToMonthlyPrimary()
+    {
+        // Issue #102: Business accounts return rate_limit: null and report the per-user cap here.
+        var resetAt = DateTimeOffset.UtcNow.AddHours(3).ToUnixTimeSeconds();
+        var json = $$"""
+            {
+              "plan_type": "business",
+              "rate_limit": null,
+              "credits": { "has_credits": true, "unlimited": false, "balance": null },
+              "spend_control": {
+                "reached": false,
+                "individual_limit": {
+                  "source": "account_user_spend_controls",
+                  "unit": "credit",
+                  "limit": "2400",
+                  "used": "1434.58",
+                  "remaining": "965.42",
+                  "used_percent": 60,
+                  "remaining_percent": 40,
+                  "reset_after_seconds": 11831,
+                  "reset_at": {{resetAt}}
+                }
+              }
+            }
+            """;
+        using var doc = JsonDocument.Parse(json);
+
+        var result = CodexProvider.BuildResult(doc.RootElement);
+
+        Assert.Equal("Business", result.Usage.LoginMethod);
+        Assert.True(result.Usage.HasPrimaryWindow);
+        Assert.Equal(60, result.Usage.Primary.UsedPercent);
+        Assert.Equal("Monthly", result.Usage.Primary.Label);
+        Assert.Equal(resetAt, result.Usage.Primary.ResetAt?.ToUnixTimeSeconds());
+        Assert.NotNull(result.Usage.Primary.ResetDescription);
+        Assert.Null(result.Usage.Secondary);
+        Assert.Null(result.Usage.Cost);
+    }
+
+    [Fact]
+    public void BuildResult_BusinessSpendControl_ComputesPercentFromAmountsWhenMissing()
+    {
+        var json = """
+            {
+              "plan_type": "business",
+              "rate_limit": null,
+              "spend_control": {
+                "individual_limit": { "limit": "2400", "used": "600", "reset_after_seconds": 3600 }
+              }
+            }
+            """;
+        using var doc = JsonDocument.Parse(json);
+
+        var result = CodexProvider.BuildResult(doc.RootElement);
+
+        Assert.True(result.Usage.HasPrimaryWindow);
+        Assert.Equal(25, result.Usage.Primary.UsedPercent, 3);
+        Assert.NotNull(result.Usage.Primary.ResetAt);
+    }
+
+    [Fact]
+    public void BuildResult_BusinessSpendControl_NullResetAt_FallsBackToResetAfterSeconds()
+    {
+        // When reset_at is explicitly null, ensure it doesn't throw and falls back to reset_after_seconds.
+        var json = """
+            {
+              "plan_type": "business",
+              "rate_limit": null,
+              "spend_control": {
+                "individual_limit": {
+                  "limit": "2400",
+                  "used": "600",
+                  "reset_at": null,
+                  "reset_after_seconds": 3600
+                }
+              }
+            }
+            """;
+        using var doc = JsonDocument.Parse(json);
+
+        var before = DateTimeOffset.UtcNow;
+        var result = CodexProvider.BuildResult(doc.RootElement);
+        var after = DateTimeOffset.UtcNow;
+
+        Assert.True(result.Usage.HasPrimaryWindow);
+        Assert.Equal(25, result.Usage.Primary.UsedPercent, 3);
+        Assert.NotNull(result.Usage.Primary.ResetAt);
+        Assert.InRange(result.Usage.Primary.ResetAt.Value, before.AddSeconds(3600), after.AddSeconds(3600));
+        Assert.NotNull(result.Usage.Primary.ResetDescription);
+    }
+
+    [Fact]
+    public void BuildResult_RateLimitPresent_IgnoresSpendControl()
+    {
+        var json = """
+            {
+              "plan_type": "plus",
+              "rate_limit": { "primary_window": { "used_percent": 10, "limit_window_seconds": 18000 } },
+              "spend_control": { "individual_limit": { "used_percent": 90 } }
+            }
+            """;
+        using var doc = JsonDocument.Parse(json);
+
+        var result = CodexProvider.BuildResult(doc.RootElement);
+
+        Assert.Equal(10, result.Usage.Primary.UsedPercent);
+    }
+
+    [Fact]
     public void BuildResult_UnusedWindow_ClearsResetCountdown()
     {
         // Unused Free windows still report a full-period reset_at (~29d 23h). Hide it until used.

@@ -116,6 +116,10 @@ namespace TaskbarQuota.Usage.Providers
                 usage.Email = emailEl.GetString();
 
             usage.Cost = ExtractCredits(json, headerCredits);
+            // Business accounts with only a spend cap report has_credits=true but balance=null, which
+            // would render a misleading "0 credits" line next to the real monthly cap (issue #102).
+            if (primaryOpt != null && IsSpendControlOnly(json) && headerCredits is null && !HasNumericCreditBalance(json))
+                usage.Cost = null;
             usage.ResetCredits = ExtractResetCredits(resetCreditsJson);
 
             return new ProviderFetchResult(usage, "oauth");
@@ -180,7 +184,48 @@ namespace TaskbarQuota.Usage.Providers
                 return (p, s, cr);
             }
 
-            return (null, null, null);
+            // Business plans report rate_limit: null and expose the admin-set monthly per-user cap under
+            // spend_control.individual_limit instead. See github issue #102.
+            return (ParseSpendControlWindow(json), null, null);
+        }
+
+        private static bool IsSpendControlOnly(JsonElement json)
+            => !(json.TryGetProperty("rate_limit", out var rl) && rl.ValueKind == JsonValueKind.Object);
+
+        private static bool HasNumericCreditBalance(JsonElement json)
+            => json.TryGetProperty("credits", out var credits) &&
+               credits.ValueKind == JsonValueKind.Object &&
+               TryF64(credits, "balance") is not null;
+
+        private static RateWindow? ParseSpendControlWindow(JsonElement json)
+        {
+            if (!json.TryGetProperty("spend_control", out var spend) || spend.ValueKind != JsonValueKind.Object ||
+                !spend.TryGetProperty("individual_limit", out var limit) || limit.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            double? used = TryF64(limit, "used_percent");
+            if (used is null)
+            {
+                double? amountUsed = TryF64(limit, "used");
+                double? amountLimit = TryF64(limit, "limit");
+                if (amountUsed is double u && amountLimit is double l && l > 0)
+                    used = u / l * 100;
+            }
+            if (used is null)
+                return null;
+
+            DateTimeOffset? resetAt = null;
+            if (limit.TryGetProperty("reset_at", out var ra) && ra.ValueKind == JsonValueKind.Number && ra.TryGetInt64(out var ts))
+                resetAt = DateTimeOffset.FromUnixTimeSeconds(ts);
+            else if (limit.TryGetProperty("reset_at", out var raStr) && raStr.ValueKind == JsonValueKind.String && long.TryParse(raStr.GetString(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var tsStr))
+                resetAt = DateTimeOffset.FromUnixTimeSeconds(tsStr);
+            else if (TryF64(limit, "reset_after_seconds") is double after)
+                resetAt = DateTimeOffset.UtcNow.AddSeconds(after);
+
+            // The cap is a monthly allowance; a ~30-day window makes BuildResult label it "Monthly".
+            return new RateWindow(Math.Clamp(used.Value, 0, 100), 30 * 1440, resetAt, FormatResetCountdown(resetAt));
         }
 
         private static void AddAdditionalRateLimits(JsonElement json, UsageSnapshot usage, string? planType)
@@ -226,12 +271,14 @@ namespace TaskbarQuota.Usage.Providers
         {
             double used = TryF64(window, "used_percent") ?? TryF64(window, "usage_percent") ?? 0;
             int? minutes = null;
-            if (window.TryGetProperty("limit_window_seconds", out var lw) && lw.TryGetInt64(out var secs))
+            if (window.TryGetProperty("limit_window_seconds", out var lw) && lw.ValueKind == JsonValueKind.Number && lw.TryGetInt64(out var secs))
                 minutes = (int)(secs / 60);
 
             DateTimeOffset? resetAt = null;
-            if (window.TryGetProperty("reset_at", out var ra) && ra.TryGetInt64(out var ts))
+            if (window.TryGetProperty("reset_at", out var ra) && ra.ValueKind == JsonValueKind.Number && ra.TryGetInt64(out var ts))
                 resetAt = DateTimeOffset.FromUnixTimeSeconds(ts);
+            else if (window.TryGetProperty("reset_at", out var raStr) && raStr.ValueKind == JsonValueKind.String && long.TryParse(raStr.GetString(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var tsStr))
+                resetAt = DateTimeOffset.FromUnixTimeSeconds(tsStr);
 
             return new RateWindow(used, minutes, resetAt, FormatResetCountdown(resetAt));
         }
