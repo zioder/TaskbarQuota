@@ -85,9 +85,9 @@ namespace TaskbarQuota.Services
         }
 
         /// <summary>
-        /// The cache is keyed by "&lt;clientId&gt;:&lt;accountId&gt;:&lt;audience&gt;:&lt;scopes&gt;". Prefer the
-        /// Claude Code client with the claude_code session scope; fall back to any entry from that
-        /// client.
+        /// Legacy cache keys are "&lt;clientId&gt;:&lt;accountId&gt;:&lt;audience&gt;:&lt;scopes&gt;"; V2 keys are
+        /// "acct:&lt;accountId&gt;:…:&lt;scopes&gt;". Prefer the entry with the claude_code session scope;
+        /// fall back to any other token entry.
         /// </summary>
         private static ClaudeDesktopTokens? SelectClaudeCodeEntry(JsonElement root)
         {
@@ -98,7 +98,9 @@ namespace TaskbarQuota.Services
             foreach (var entry in root.EnumerateObject())
             {
                 var entryKey = entry.Name;
-                if (!entryKey.StartsWith(ClaudeCodeClientId, StringComparison.Ordinal))
+                // Legacy keys start with the client id; V2 keys start with "acct:<accountId>:".
+                if (!entryKey.StartsWith(ClaudeCodeClientId, StringComparison.Ordinal)
+                    && !entryKey.StartsWith("acct:", StringComparison.Ordinal))
                     continue;
                 if (Parse(entry.Value) is not { } tokens)
                     continue;
