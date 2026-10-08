@@ -18,7 +18,7 @@ namespace TaskbarQuota.Services
 
     /// <summary>
     /// Reads the live Claude Code OAuth token from the Claude **desktop** app, which on Windows
-    /// stores it in %AppData%\Claude\config.json under the "oauth:tokenCache" key — a Chromium
+    /// stores it in %AppData%\Claude\config.json under "oauth:tokenCacheV2" (legacy: "oauth:tokenCache") — a Chromium
     /// OSCrypt (v10, AES-256-GCM) blob whose key lives in the sibling "Local State" file, DPAPI
     /// wrapped (same App-Bound scheme as browser cookies).
     ///
@@ -31,6 +31,10 @@ namespace TaskbarQuota.Services
         // The Claude Code public OAuth client — same id the app uses for "Login with Claude".
         private const string ClaudeCodeClientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
         private const string ClaudeCodeScope = "user:sessions:claude_code";
+
+        // Current desktop builds keep the live grant in "oauth:tokenCacheV2"; the legacy
+        // "oauth:tokenCache" survives with a dead grant from an older client, so it's only a fallback.
+        private static readonly string[] TokenCacheKeys = { "oauth:tokenCacheV2", "oauth:tokenCache" };
 
         private static string ConfigDir => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Claude");
@@ -47,21 +51,31 @@ namespace TaskbarQuota.Services
                 if (!File.Exists(configPath) || !File.Exists(localStatePath))
                     return null;
 
-                string? cacheB64;
+                var blobs = new List<string>();
                 using (var cfg = JsonDocument.Parse(File.ReadAllText(configPath)))
                 {
-                    cacheB64 = cfg.RootElement.TryGetProperty("oauth:tokenCache", out var tc) ? tc.GetString() : null;
+                    foreach (var cacheKey in TokenCacheKeys)
+                    {
+                        if (cfg.RootElement.TryGetProperty(cacheKey, out var tc) && tc.ValueKind == JsonValueKind.String
+                            && tc.GetString() is { Length: > 0 } b64)
+                            blobs.Add(b64);
+                    }
                 }
-                if (string.IsNullOrEmpty(cacheB64))
+                if (blobs.Count == 0)
                     return null;
 
                 var key = GetEncryptionKey(localStatePath);
-                var json = DecryptV10(Convert.FromBase64String(cacheB64), key);
-                if (json is null)
-                    return null;
-
-                using var doc = JsonDocument.Parse(json);
-                return SelectClaudeCodeEntry(doc.RootElement);
+                foreach (var b64 in blobs)
+                {
+                    // Signed-out caches are rewritten as an encrypted "{}" — skip and try the next.
+                    var json = DecryptV10(Convert.FromBase64String(b64), key);
+                    if (json is null)
+                        continue;
+                    using var doc = JsonDocument.Parse(json);
+                    if (SelectClaudeCodeEntry(doc.RootElement) is { } tokens)
+                        return tokens;
+                }
+                return null;
             }
             catch (Exception ex)
             {
@@ -71,9 +85,9 @@ namespace TaskbarQuota.Services
         }
 
         /// <summary>
-        /// The cache is keyed by "&lt;clientId&gt;:&lt;accountId&gt;:&lt;audience&gt;:&lt;scopes&gt;". Prefer the
-        /// Claude Code client with the claude_code session scope; fall back to any entry from that
-        /// client.
+        /// Legacy cache keys are "&lt;clientId&gt;:&lt;accountId&gt;:&lt;audience&gt;:&lt;scopes&gt;"; V2 keys are
+        /// "acct:&lt;accountId&gt;:…:&lt;scopes&gt;". Prefer the entry with the claude_code session scope;
+        /// fall back to any other token entry.
         /// </summary>
         private static ClaudeDesktopTokens? SelectClaudeCodeEntry(JsonElement root)
         {
@@ -84,7 +98,9 @@ namespace TaskbarQuota.Services
             foreach (var entry in root.EnumerateObject())
             {
                 var entryKey = entry.Name;
-                if (!entryKey.StartsWith(ClaudeCodeClientId, StringComparison.Ordinal))
+                // Legacy keys start with the client id; V2 keys start with "acct:<accountId>:".
+                if (!entryKey.StartsWith(ClaudeCodeClientId, StringComparison.Ordinal)
+                    && !entryKey.StartsWith("acct:", StringComparison.Ordinal))
                     continue;
                 if (Parse(entry.Value) is not { } tokens)
                     continue;
