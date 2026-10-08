@@ -141,6 +141,145 @@ public static class WidgetSettingsService
     public static event EventHandler? DashboardCompositionChanged;
     public static event EventHandler? PercentageModeChanged;
 
+    private static readonly string ProviderIconColorsPath =
+        Path.Combine(AppStorage.AppDataDirectory, "provider-icon-colors.json");
+
+    private static readonly string MonochromeProviderIconsPath =
+        Path.Combine(AppStorage.AppDataDirectory, "monochrome-provider-icons.txt");
+
+    private static readonly Dictionary<string, string> ProviderIconColors = LoadProviderIconColors();
+
+    /// <summary>When true the widget ignores every provider icon color and uses the plain theme foreground.</summary>
+    public static bool MonochromeProviderIcons { get; private set; } = LoadMonochromeProviderIcons();
+
+    /// <summary>
+    /// Built-in widget icon color for a provider as <c>#RRGGBB</c>, or null for the plain theme foreground
+    /// (white on a dark taskbar). Only providers whose logos would otherwise be hard to tell apart get a color.
+    /// </summary>
+    public static string? DefaultProviderIconColorHex(ProviderId provider) => provider switch
+    {
+        ProviderId.Claude => "#D97757",
+        ProviderId.Antigravity => "#5B8DEF",
+        ProviderId.Copilot => "#8957E5",
+        ProviderId.Devin => "#21C093",
+        ProviderId.Cline => "#B084F5",
+        ProviderId.ClinePass => "#B084F5",
+        ProviderId.Zai => "#2D6BFF",
+        ProviderId.Kimi => "#1783FF",
+        _ => null,
+    };
+
+    /// <summary>The user's chosen color, else the built-in default, ignoring the monochrome toggle (for the settings UI).</summary>
+    public static string? GetConfiguredProviderIconColorHex(ProviderId provider)
+        => ProviderIconColors.TryGetValue(provider.ToString(), out var hex) && TryNormalizeHexColor(hex, out var normalized)
+            ? normalized
+            : DefaultProviderIconColorHex(provider);
+
+    /// <summary>The color the widget should actually draw this provider's icon with; null means the theme foreground.</summary>
+    public static string? GetProviderIconColorHex(ProviderId provider)
+        => MonochromeProviderIcons ? null : GetConfiguredProviderIconColorHex(provider);
+
+    public static bool HasCustomProviderIconColor(ProviderId provider)
+        => ProviderIconColors.ContainsKey(provider.ToString());
+
+    public static void SetProviderIconColor(ProviderId provider, string hex)
+    {
+        if (!TryNormalizeHexColor(hex, out var normalized))
+            return;
+
+        ProviderIconColors[provider.ToString()] = normalized;
+        SaveProviderIconColors();
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ResetProviderIconColor(ProviderId provider)
+    {
+        if (!ProviderIconColors.Remove(provider.ToString()))
+            return;
+
+        SaveProviderIconColors();
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    public static void ApplyMonochromeProviderIcons(bool monochrome)
+    {
+        if (MonochromeProviderIcons == monochrome)
+            return;
+
+        MonochromeProviderIcons = monochrome;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(MonochromeProviderIconsPath)!);
+            File.WriteAllText(MonochromeProviderIconsPath, monochrome ? "1" : "0");
+        }
+        catch
+        {
+            // Best effort. The widget can still use the in-memory value for this run.
+        }
+
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    /// <summary>Accepts <c>#RRGGBB</c> (or without '#') and returns it upper-cased as <c>#RRGGBB</c>.</summary>
+    public static bool TryNormalizeHexColor(string? value, out string normalized)
+    {
+        normalized = "";
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        string digits = value.Trim().TrimStart('#');
+        if (digits.Length != 6 || !int.TryParse(digits, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out _))
+            return false;
+
+        normalized = "#" + digits.ToUpperInvariant();
+        return true;
+    }
+
+    private static Dictionary<string, string> LoadProviderIconColors()
+    {
+        try
+        {
+            if (!File.Exists(ProviderIconColorsPath))
+                return new Dictionary<string, string>();
+
+            return JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(ProviderIconColorsPath))
+                ?? new Dictionary<string, string>();
+        }
+        catch
+        {
+            return new Dictionary<string, string>();
+        }
+    }
+
+    private static void SaveProviderIconColors()
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(ProviderIconColorsPath)!);
+            File.WriteAllText(ProviderIconColorsPath, JsonSerializer.Serialize(ProviderIconColors, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch
+        {
+            // Best effort. The widget can still use the in-memory value for this run.
+        }
+    }
+
+    // Colors are on by default, so an absent file means "not monochrome".
+    private static bool LoadMonochromeProviderIcons()
+    {
+        try
+        {
+            if (!File.Exists(MonochromeProviderIconsPath))
+                return false;
+
+            return int.TryParse(File.ReadAllText(MonochromeProviderIconsPath), NumberStyles.Integer, CultureInfo.InvariantCulture, out int value) && value != 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     internal static void ReloadSurfaceSettingsForTesting()
     {
         CurrentSurface = LoadWidgetSurfaceMode();

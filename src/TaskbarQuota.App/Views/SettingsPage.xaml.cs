@@ -79,9 +79,11 @@ namespace TaskbarQuota.Views
             ApplyQuotaAlertSettingsToControls();
             AutoHideUnavailableToggle.IsOn = WidgetSettingsService.AutoHideUnavailable;
             HideWhenUnfocusedToggle.IsOn = WidgetSettingsService.HideWhenProviderUnfocused;
+            ColoredIconsToggle.IsOn = !WidgetSettingsService.MonochromeProviderIcons;
             ViewModel.ReloadProviders();
             RebuildProviderSettings();
             RebuildMutedProviderSettings();
+            RebuildIconColorSettings();
             VersionLabel.Text = $"Version {AppVersion.GetDisplayLabel()}";
             Loaded += async (_, _) =>
             {
@@ -93,6 +95,7 @@ namespace TaskbarQuota.Views
                 BuildPinOptions();
                 RebuildProviderSettings();
                 RebuildMutedProviderSettings();
+                RebuildIconColorSettings();
             };
             _isInitializing = false;
         }
@@ -276,6 +279,97 @@ namespace TaskbarQuota.Views
                 return;
 
             WidgetSettingsService.ApplyHideWhenProviderUnfocused(HideWhenUnfocusedToggle.IsOn);
+        }
+
+        private void OnColoredIconsToggled(object sender, RoutedEventArgs e)
+        {
+            IconColorsExpander.IsEnabled = ColoredIconsToggle.IsOn;
+            if (_isInitializing)
+                return;
+
+            WidgetSettingsService.ApplyMonochromeProviderIcons(!ColoredIconsToggle.IsOn);
+        }
+
+        private void RebuildIconColorSettings()
+        {
+            IconColorsExpander.IsEnabled = ColoredIconsToggle.IsOn;
+            IconColorsExpander.Items.Clear();
+            foreach (var item in ViewModel.Providers)
+                IconColorsExpander.Items.Add(BuildIconColorCard(item));
+        }
+
+        private static Windows.UI.Color ParseIconColor(string? hex)
+        {
+            if (hex is null || !WidgetSettingsService.TryNormalizeHexColor(hex, out var normalized))
+                return Microsoft.UI.Colors.White;
+
+            int rgb = int.Parse(normalized.Substring(1), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture);
+            return Windows.UI.Color.FromArgb(255, (byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb);
+        }
+
+        private static string ToHex(Windows.UI.Color color) => $"#{color.R:X2}{color.G:X2}{color.B:X2}";
+
+        private CommunityToolkit.WinUI.Controls.SettingsCard BuildIconColorCard(ProviderSettingItemViewModel item)
+        {
+            // Providers with no configured color draw with the theme foreground (white on a dark taskbar).
+            // The swatch mirrors that so it never misrepresents what the widget shows.
+            Brush SwatchBrush() => WidgetSettingsService.GetConfiguredProviderIconColorHex(item.Id) is { } hex
+                ? new SolidColorBrush(ParseIconColor(hex))
+                : (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"];
+
+            var swatch = new Border
+            {
+                Width = 20,
+                Height = 20,
+                CornerRadius = new CornerRadius(4),
+                Background = SwatchBrush(),
+                BorderBrush = (Brush)Application.Current.Resources["ControlStrokeColorDefaultBrush"],
+                BorderThickness = new Thickness(1),
+            };
+
+            var picker = new ColorPicker
+            {
+                IsAlphaEnabled = false,
+                IsHexInputVisible = true,
+                IsMoreButtonVisible = true,
+                Color = ParseIconColor(WidgetSettingsService.GetConfiguredProviderIconColorHex(item.Id)),
+            };
+            picker.ColorChanged += (_, args) => swatch.Background = new SolidColorBrush(args.NewColor);
+
+            var resetButton = new Button { Content = "Reset to default", HorizontalAlignment = HorizontalAlignment.Left };
+            AutomationProperties.SetName(resetButton, $"Reset {item.DisplayName} icon color");
+
+            var flyoutContent = new StackPanel { Spacing = 8 };
+            flyoutContent.Children.Add(picker);
+            flyoutContent.Children.Add(resetButton);
+            var flyout = new Flyout { Content = flyoutContent };
+
+            // Persist once on close rather than on every drag tick, which would rewrite the settings file
+            // and re-render every widget continuously.
+            flyout.Closed += (_, _) =>
+            {
+                string hex = ToHex(picker.Color);
+                if (WidgetSettingsService.GetConfiguredProviderIconColorHex(item.Id) != hex)
+                    WidgetSettingsService.SetProviderIconColor(item.Id, hex);
+                swatch.Background = SwatchBrush();
+            };
+            resetButton.Click += (_, _) =>
+            {
+                WidgetSettingsService.ResetProviderIconColor(item.Id);
+                picker.Color = ParseIconColor(WidgetSettingsService.GetConfiguredProviderIconColorHex(item.Id));
+                swatch.Background = SwatchBrush();
+                flyout.Hide();
+            };
+
+            var swatchButton = new Button { Content = swatch, Flyout = flyout, Padding = new Thickness(8, 6, 8, 6) };
+            AutomationProperties.SetName(swatchButton, $"{item.DisplayName} icon color");
+            AutomationProperties.SetAutomationId(swatchButton, $"IconColor_{item.Id}");
+
+            return new CommunityToolkit.WinUI.Controls.SettingsCard
+            {
+                Header = item.DisplayName,
+                Content = swatchButton,
+            };
         }
 
         private void OnProviderDashboardToggled(object sender, RoutedEventArgs e)

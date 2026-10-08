@@ -197,6 +197,7 @@ namespace TaskbarQuota.Controls
             Foreground = new SolidColorBrush(light ? Color.FromArgb(255, 28, 28, 28) : Colors.White);
             HostBadgeBox.Background = new SolidColorBrush(light ? Colors.White : Color.FromArgb(255, 32, 32, 32));
             HostBadgeGlyph.Fill = Foreground;
+            ActivityDot.Stroke = HostBadgeBox.Background;
             var track = new SolidColorBrush(light ? Color.FromArgb(90, 28, 28, 28) : Color.FromArgb(110, 255, 255, 255));
 
             foreach (var row in _renderedRows)
@@ -400,7 +401,49 @@ namespace TaskbarQuota.Controls
         };
 
         private void UpdateBadgeFill()
-            => BadgeGlyph.Fill = AgentActivityVisuals.StatusBrush(_agentStatus, Foreground);
+        {
+            // Monochrome icons keep the original behavior: the glyph itself carries the activity color.
+            if (WidgetSettingsService.MonochromeProviderIcons)
+            {
+                BadgeGlyph.Fill = AgentActivityVisuals.StatusBrush(_agentStatus, Foreground);
+                ActivityDot.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            // Colored icons: the glyph always keeps its provider color and activity moves to a corner dot,
+            // otherwise the status gradient would hide the color that tells providers apart.
+            Brush providerBrush = Foreground;
+            if (_lastAppliedProvider is { } provider
+                && WidgetSettingsService.GetProviderIconColorHex(provider) is { } hex
+                && TryParseHexColor(hex, out var color))
+            {
+                providerBrush = new SolidColorBrush(color);
+            }
+
+            BadgeGlyph.Fill = providerBrush;
+            if (_agentStatus is { } status)
+            {
+                ActivityDot.Fill = AgentActivityVisuals.StatusBrush(status, Foreground);
+                ActivityDot.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                ActivityDot.Visibility = Visibility.Collapsed;
+            }
+        }
+
+        private static bool TryParseHexColor(string hex, out Color color)
+        {
+            color = default;
+            if (hex.Length != 7 || hex[0] != '#'
+                || !int.TryParse(hex.AsSpan(1), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out int rgb))
+            {
+                return false;
+            }
+
+            color = Color.FromArgb(255, (byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb);
+            return true;
+        }
 
         /// <summary>
         /// Badge the provider glyph with its active source (browser, host app, terminal, desktop app).
