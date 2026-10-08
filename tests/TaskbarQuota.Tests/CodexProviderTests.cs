@@ -162,6 +162,37 @@ public class CodexProviderTests
     }
 
     [Fact]
+    public void BuildResult_BusinessSpendControl_NullResetAt_FallsBackToResetAfterSeconds()
+    {
+        // When reset_at is explicitly null, ensure it doesn't throw and falls back to reset_after_seconds.
+        var json = """
+            {
+              "plan_type": "business",
+              "rate_limit": null,
+              "spend_control": {
+                "individual_limit": {
+                  "limit": "2400",
+                  "used": "600",
+                  "reset_at": null,
+                  "reset_after_seconds": 3600
+                }
+              }
+            }
+            """;
+        using var doc = JsonDocument.Parse(json);
+
+        var before = DateTimeOffset.UtcNow;
+        var result = CodexProvider.BuildResult(doc.RootElement);
+        var after = DateTimeOffset.UtcNow;
+
+        Assert.True(result.Usage.HasPrimaryWindow);
+        Assert.Equal(25, result.Usage.Primary.UsedPercent, 3);
+        Assert.NotNull(result.Usage.Primary.ResetAt);
+        Assert.InRange(result.Usage.Primary.ResetAt.Value, before.AddSeconds(3600), after.AddSeconds(3600));
+        Assert.NotNull(result.Usage.Primary.ResetDescription);
+    }
+
+    [Fact]
     public void BuildResult_RateLimitPresent_IgnoresSpendControl()
     {
         var json = """
