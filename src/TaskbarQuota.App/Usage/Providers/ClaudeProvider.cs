@@ -842,8 +842,10 @@ namespace TaskbarQuota.Usage.Providers
             // Desktop store: when the user signs in through the Claude desktop app instead, the CLI
             // file holds only metadata with an empty token — the live token lives in the desktop
             // app's encrypted config. Auto-detect it so local Claude works without an explicit login.
+            // No refresh token passed on: the desktop app owns and rotates this grant, and refreshing
+            // it here would invalidate the app's copy. A 401 just waits for the app's next refresh.
             if (ClaudeDesktopTokenReader.TryRead() is { } desktop)
-                return new Credentials(desktop.AccessToken, desktop.SubscriptionType, desktop.RateLimitTier, desktop.RefreshToken, desktop.ExpiresAtMs);
+                return new Credentials(desktop.AccessToken, desktop.SubscriptionType, desktop.RateLimitTier, null, desktop.ExpiresAtMs);
 
             // Nothing usable on disk — surface the right state so the caller can fall back to web /
             // prompt the one-click login.
