@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Net;
@@ -34,14 +35,14 @@ namespace TaskbarQuota.Usage.Providers
 
         public async Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
         {
-            var appAuth = LoadCursorAppAuth();
+            var cliAuth = LoadCursorCliAuth();
+            var appAuth = LoadCursorAppAuth() is { AccessToken.Length: > 0 } desktop ? desktop : cliAuth;
             if (appAuth?.AccessToken is { Length: > 0 })
             {
                 try
                 {
                     var fetch = await FetchUsageWithAppTokenAsync(appAuth, ct).ConfigureAwait(false);
-                    if (TryResolveCookieHeader() is { } historyCookie)
-                        await TryAttachDashboardHistoryAsync(fetch.Usage, historyCookie, ct).ConfigureAwait(false);
+                    await TryAttachDashboardHistoryAsync(fetch.Usage, HistoryCookies(appAuth, cliAuth), ct).ConfigureAwait(false);
                     return fetch;
                 }
                 catch (ProviderException)
@@ -68,28 +69,82 @@ namespace TaskbarQuota.Usage.Providers
             using (me)
             {
                 var fetch = Build(summary.RootElement, me?.RootElement);
-                await TryAttachDashboardHistoryAsync(fetch.Usage, cookie, ct).ConfigureAwait(false);
+                await TryAttachDashboardHistoryAsync(fetch.Usage, new[] { cookie }, ct).ConfigureAwait(false);
                 return fetch;
+            }
+        }
+
+        /// <summary>
+        /// Cookies that can read the account-wide dashboard history, best first: a browser
+        /// session, then a session cookie built from the desktop app's or cursor-agent CLI's
+        /// login (how T3 Code reads it). The dashboard covers desktop, CLI and headless usage.
+        /// </summary>
+        private static IEnumerable<string> HistoryCookies(CursorAppAuth? appAuth, CursorAppAuth? cliAuth)
+        {
+            if (TryResolveCookieHeader() is { } browser)
+                yield return browser;
+            if (DashboardSessionCookie(appAuth?.AccessToken) is { } app)
+                yield return app;
+            if (cliAuth?.AccessToken != appAuth?.AccessToken && DashboardSessionCookie(cliAuth?.AccessToken) is { } cli)
+                yield return cli;
+        }
+
+        /// <summary>
+        /// cursor.com accepts <c>WorkosCursorSessionToken=&lt;userId&gt;::&lt;accessToken&gt;</c>, where the
+        /// user id is the last segment of the token's <c>sub</c> claim (e.g. <c>auth0|user_…</c>).
+        /// </summary>
+        internal static string? DashboardSessionCookie(string? accessToken)
+        {
+            if (string.IsNullOrWhiteSpace(accessToken))
+                return null;
+            var parts = accessToken.Split('.');
+            if (parts.Length < 2)
+                return null;
+            try
+            {
+                var payload = parts[1].Replace('-', '+').Replace('_', '/');
+                payload = payload.PadRight(payload.Length + (4 - payload.Length % 4) % 4, '=');
+                using var claims = JsonDocument.Parse(Convert.FromBase64String(payload));
+                if (!claims.RootElement.TryGetProperty("sub", out var sub) || sub.ValueKind != JsonValueKind.String)
+                    return null;
+                var userId = sub.GetString()!.Split('|')[^1];
+                return userId.Length == 0
+                    ? null
+                    : "WorkosCursorSessionToken=" + Uri.EscapeDataString($"{userId}::{accessToken.Trim()}");
+            }
+            catch (Exception ex) when (ex is FormatException or JsonException)
+            {
+                return null;
             }
         }
 
         private static async Task TryAttachDashboardHistoryAsync(
             UsageSnapshot usage,
-            string cookie,
+            IEnumerable<string> cookies,
             CancellationToken cancellationToken)
         {
-            try
+            foreach (var cookie in cookies)
             {
-                usage.UsageHistory = await CursorUsageEventsClient.FetchHistoryAsync(
-                    cookie, DateTimeOffset.Now, cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                Diagnostics.Log.Debug("Cursor dashboard history unavailable: request timed out.");
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                Diagnostics.Log.Debug($"Cursor dashboard history unavailable: {ex.Message}");
+                try
+                {
+                    usage.UsageHistory = await CursorUsageEventsClient.FetchHistoryAsync(
+                        cookie, DateTimeOffset.Now, cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+                catch (ProviderException ex) when (ex.Kind == ProviderErrorKind.AuthRequired)
+                {
+                    Diagnostics.Log.Debug("Cursor dashboard history rejected a credential; trying the next one.");
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    Diagnostics.Log.Debug("Cursor dashboard history unavailable: request timed out.");
+                    return;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    Diagnostics.Log.Debug($"Cursor dashboard history unavailable: {ex.Message}");
+                    return;
+                }
             }
         }
 
@@ -312,6 +367,34 @@ namespace TaskbarQuota.Usage.Providers
             catch (Exception ex)
             {
                 Diagnostics.Log.Debug($"Cursor app auth read failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// The cursor-agent CLI's saved login: <c>%APPDATA%\Cursor\auth.json</c> on Windows,
+        /// <c>$XDG_CONFIG_HOME/cursor/auth.json</c> elsewhere. Unused when the CLI runs from
+        /// <c>CURSOR_API_KEY</c>/<c>CURSOR_AUTH_TOKEN</c> instead of a saved login.
+        /// </summary>
+        private static CursorAppAuth? LoadCursorCliAuth()
+        {
+            var path = OperatingSystem.IsWindows()
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Cursor", "auth.json")
+                : Path.Combine(Environment.GetEnvironmentVariable("XDG_CONFIG_HOME") is { Length: > 0 } xdg
+                    ? xdg
+                    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config"), "cursor", "auth.json");
+            try
+            {
+                if (!File.Exists(path)) return null;
+                using var document = JsonDocument.Parse(File.ReadAllText(path));
+                string? Read(string name) => document.RootElement.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+                    ? value.GetString()
+                    : null;
+                return Read("accessToken") is { Length: > 0 } token ? new CursorAppAuth(token, Read("refreshToken"), null, null) : null;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+            {
+                Diagnostics.Log.Debug($"Cursor CLI auth read failed: {ex.Message}");
                 return null;
             }
         }
