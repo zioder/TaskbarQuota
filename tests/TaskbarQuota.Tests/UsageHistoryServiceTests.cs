@@ -456,6 +456,85 @@ namespace TaskbarQuota.Tests
             }
         }
 
+        [Theory]
+        [InlineData("gemini-3.6-flash-tiered", 1196UL, "gemini-3.6-flash")]
+        [InlineData("Gemini 3.6 Flash (Medium)", 1072UL, "gemini-3.6-flash")]
+        [InlineData("gemini-default", 1187UL, "gemini-3.5-flash")]
+        [InlineData("gemini-3-flash-a", 1020UL, "gemini-3.5-flash")]
+        [InlineData("claude-sonnet-5-5-medium", 1404UL, "claude-sonnet-5-5")]
+        [InlineData("Claude Sonnet 4.6 (Thinking)", 1035UL, "claude-sonnet-4-6")]
+        [InlineData("MODEL_PLACEHOLDER_M196", 1196UL, "gemini-3.6-flash")]
+        // An id missing from the built-in table still resolves through the recorded name.
+        [InlineData("Gemini 3.9 Flash (High)", 1500UL, "gemini-3.9-flash")]
+        [InlineData("claude-4.7-opus-thinking", 1501UL, "claude-opus-4-7")]
+        public void AntigravityDatabase_MapsModelsToPricingKeys(string recordedName, ulong modelId, string expectedModel)
+        {
+            var directory = CreateTemporaryDirectory();
+            try
+            {
+                var path = Path.Combine(directory, "session-map.db");
+                var timestamp = new DateTimeOffset(2026, 8, 5, 10, 0, 0, TimeSpan.Zero);
+                CreateAntigravityDatabase(path, AntigravityGenerationBlob(
+                    recordedName, modelId, timestamp,
+                    AntigravityUsageBlob(100, 20, 0, 0, 0, 20, "response-map")));
+
+                var history = UsageHistoryService.BuildFromFilesForTesting(
+                    ProviderId.Antigravity, new[] { path }, timestamp.AddHours(2));
+
+                Assert.Equal(expectedModel, history.Today!.ModelBreakdown!.Models[0].Model);
+            }
+            finally
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public void AntigravityDatabase_StepsWithOnlyAnIdUseTheNameLearnedFromGenerations()
+        {
+            var directory = CreateTemporaryDirectory();
+            try
+            {
+                var path = Path.Combine(directory, "session-learn.db");
+                var timestamp = new DateTimeOffset(2026, 8, 5, 10, 0, 0, TimeSpan.Zero);
+                CreateAntigravityDatabase(path, AntigravityGenerationBlob(
+                    "Gemini 3.9 Pro (High)", 1600, timestamp,
+                    AntigravityUsageBlob(100, 20, 0, 0, 0, 20, "response-gen")));
+
+                // A step whose usage names only the model id (field 1), as Antigravity writes them.
+                var usage = new List<byte>();
+                ProtoVarintField(usage, 1, 1600);
+                ProtoVarintField(usage, 2, 50);
+                ProtoVarintField(usage, 3, 10);
+                ProtoBytesField(usage, 11, System.Text.Encoding.UTF8.GetBytes("response-step"));
+                var time = new List<byte>();
+                ProtoVarintField(time, 1, (ulong)timestamp.ToUnixTimeSeconds());
+                var step = new List<byte>();
+                ProtoBytesField(step, 1, time.ToArray());
+                ProtoBytesField(step, 9, usage.ToArray());
+                using (var connection = new SqliteConnection($"Data Source={path};Pooling=False"))
+                {
+                    connection.Open();
+                    Execute(connection, "CREATE TABLE steps (idx INTEGER PRIMARY KEY, metadata BLOB);");
+                    using var command = connection.CreateCommand();
+                    command.CommandText = "INSERT INTO steps (idx,metadata) VALUES (0,$data)";
+                    command.Parameters.AddWithValue("$data", step.ToArray());
+                    command.ExecuteNonQuery();
+                }
+
+                var history = UsageHistoryService.BuildFromFilesForTesting(
+                    ProviderId.Antigravity, new[] { path }, timestamp.AddHours(2));
+
+                var model = Assert.Single(history.Today!.ModelBreakdown!.Models);
+                Assert.Equal("gemini-3.9-pro", model.Model);
+                Assert.Equal(180UL, history.Today.Tokens);
+            }
+            finally
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
         [Fact]
         public void AntigravityDatabase_DoesNotGuessUnknownPlaceholderModel()
         {

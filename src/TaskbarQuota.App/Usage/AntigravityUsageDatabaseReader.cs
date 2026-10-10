@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 
 namespace TaskbarQuota.Usage
@@ -63,10 +64,31 @@ namespace TaskbarQuota.Usage
             using var connection = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Cache=Private;Pooling=False");
             connection.Open();
 
-            if (TableExists(connection, "steps"))
-                ReadRows(connection, "steps", "metadata", sessionId, fallbackTimestamp, ParseStepRow, candidates);
-            if (TableExists(connection, "gen_metadata"))
-                ReadGenerationRows(connection, sessionId, fallbackTimestamp, candidates);
+            var steps = TableExists(connection, "steps")
+                ? ReadRows(connection, "steps", "metadata", ParseStepRow)
+                : new List<(ParsedRow Row, string Key)>();
+            var generations = TableExists(connection, "gen_metadata")
+                ? ReadGenerationRows(connection)
+                : new List<(ParsedRow Row, string Key)>();
+
+            // Steps usually carry only a numeric model id while generation rows also name the
+            // model. Learn this file's id -> name pairs so ids missing from the built-in table
+            // still resolve to a priceable model.
+            var learned = new Dictionary<ulong, string>();
+            foreach (var (row, _) in generations.Concat(steps))
+            {
+                if (row.ModelId is { } id && id != 0 && NormalizeModel(row.Model) is { } name && !IsUnresolved(name))
+                    learned.TryAdd(id, name);
+            }
+
+            foreach (var (row, key) in steps)
+                Append(row, ResolveModel(row.Model, row.ModelId, null, learned), sessionId, fallbackTimestamp, key, learned, candidates);
+            string? currentModel = null;
+            foreach (var (row, key) in generations)
+            {
+                currentModel = ResolveModel(row.Model, row.ModelId, null, learned) ?? currentModel;
+                Append(row, currentModel, sessionId, fallbackTimestamp, key, learned, candidates);
+            }
 
             // The same provider response may occur in both steps and gen_metadata. Stable response,
             // provider-message, and message identifiers win; rows without an identifier remain
@@ -90,18 +112,14 @@ namespace TaskbarQuota.Usage
             return anonymous;
         }
 
-        private static void ReadGenerationRows(
-            SqliteConnection connection,
-            string sessionId,
-            DateTimeOffset fallbackTimestamp,
-            List<AntigravityRecordedUsage> output)
+        private static List<(ParsedRow Row, string Key)> ReadGenerationRows(SqliteConnection connection)
         {
+            var rows = new List<(ParsedRow Row, string Key)>();
             using var command = connection.CreateCommand();
             command.CommandText = "SELECT idx, data FROM gen_metadata ORDER BY idx ASC LIMIT $limit";
             command.Parameters.AddWithValue("$limit", MaxRowsPerTable + 1);
             using var reader = command.ExecuteReader();
             var count = 0;
-            string? currentModel = null;
             while (reader.Read())
             {
                 if (++count > MaxRowsPerTable)
@@ -111,20 +129,18 @@ namespace TaskbarQuota.Usage
                 var blob = (byte[])reader.GetValue(1);
                 if (blob.Length == 0 || blob.Length > MaxBlobBytes || !TryParseGeneratorRow(blob, out var parsed))
                     continue;
-                currentModel = ResolveModel(parsed.Model, parsed.ModelId, null) ?? currentModel;
-                Append(parsed, currentModel, sessionId, fallbackTimestamp, $"gen:{reader.GetInt64(0)}", output);
+                rows.Add((parsed, $"gen:{reader.GetInt64(0)}"));
             }
+            return rows;
         }
 
-        private static void ReadRows(
+        private static List<(ParsedRow Row, string Key)> ReadRows(
             SqliteConnection connection,
             string table,
             string column,
-            string sessionId,
-            DateTimeOffset fallbackTimestamp,
-            Func<byte[], ParsedRow?> parser,
-            List<AntigravityRecordedUsage> output)
+            Func<byte[], ParsedRow?> parser)
         {
+            var rows = new List<(ParsedRow Row, string Key)>();
             using var command = connection.CreateCommand();
             command.CommandText = $"SELECT idx, {column} FROM {table} WHERE {column} IS NOT NULL ORDER BY idx ASC LIMIT $limit";
             command.Parameters.AddWithValue("$limit", MaxRowsPerTable + 1);
@@ -138,11 +154,10 @@ namespace TaskbarQuota.Usage
                 if (blob.Length == 0 || blob.Length > MaxBlobBytes)
                     continue;
                 var parsed = parser(blob);
-                if (parsed is null)
-                    continue;
-                Append(parsed, ResolveModel(parsed.Model, parsed.ModelId, null), sessionId,
-                    fallbackTimestamp, $"{table}:{reader.GetInt64(0)}", output);
+                if (parsed is not null)
+                    rows.Add((parsed, $"{table}:{reader.GetInt64(0)}"));
             }
+            return rows;
         }
 
         private static void Append(
@@ -151,6 +166,7 @@ namespace TaskbarQuota.Usage
             string sessionId,
             DateTimeOffset fallbackTimestamp,
             string rowKey,
+            IReadOnlyDictionary<ulong, string> learned,
             List<AntigravityRecordedUsage> output)
         {
             for (var index = 0; index < row.Usages.Count; index++)
@@ -159,7 +175,7 @@ namespace TaskbarQuota.Usage
                 if (!usage.HasTokens)
                     continue;
                 var totalOutput = Math.Max(usage.TotalOutput, SaturatingAdd(usage.VisibleOutput, usage.Reasoning));
-                var model = ResolveModel(null, usage.ModelId, rowModel) ?? UnknownModel;
+                var model = ResolveModel(null, usage.ModelId, rowModel, learned) ?? UnknownModel;
                 var identity = usage.Identity;
                 var key = identity is { Length: > 0 }
                     ? $"identity:{sessionId}:{identity}"
@@ -385,63 +401,116 @@ namespace TaskbarQuota.Usage
             return command.ExecuteScalar() is not null;
         }
 
-        private static string? ResolveModel(string? text, ulong? id, string? fallback)
+        /// <summary>
+        /// Resolves a usage's model: a known numeric id wins (it is exact per request), then the
+        /// row's model name, then an id learned from this file, then the row's model.
+        /// Unknown models stay visible under their recorded name or id rather than guessed.
+        /// </summary>
+        private static string? ResolveModel(string? text, ulong? id, string? fallback, IReadOnlyDictionary<ulong, string> learned)
         {
-            if (id is { } modelId && modelId != 0)
-                return NormalizeModel(ModelNameFromId(modelId));
-            return NormalizeModel(text) ?? NormalizeModel(fallback);
+            if (id is { } modelId && modelId != 0 && KnownModelName(modelId) is { } known)
+                return known;
+            var named = NormalizeModel(text);
+            if (named is not null && !IsUnresolved(named))
+                return named;
+            if (id is { } learnedId && learnedId != 0 && learned.TryGetValue(learnedId, out var learnedName))
+                return learnedName;
+            return NormalizeModel(fallback)
+                ?? named
+                ?? (id is { } unknownId && unknownId != 0 ? $"antigravity-model-{unknownId}" : null);
         }
 
-        private static string ModelNameFromId(ulong id) => id switch
+        private static bool IsUnresolved(string name)
+            => name.StartsWith("antigravity-model-", StringComparison.Ordinal)
+                || name.StartsWith("model_placeholder_", StringComparison.Ordinal)
+                || CodenameModels.Contains(name);
+
+        /// <summary>
+        /// Antigravity's numeric model ids. Ids from 1000 up are the ones its UI and older logs
+        /// show as <c>MODEL_PLACEHOLDER_M&lt;id - 1000&gt;</c>. Names are the LiteLLM keys the
+        /// pricing table knows; effort and thinking variants bill at the base model's rates.
+        /// </summary>
+        private static string? KnownModelName(ulong id) => id switch
         {
             246 => "gemini-2.5-pro",
-            312 => "gemini-2.5-flash",
-            313 or 329 => "gemini-2.5-flash-thinking",
+            312 or 313 or 329 => "gemini-2.5-flash",
             330 => "gemini-2.5-flash-lite",
-            281 or 282 => "claude-4-sonnet",
-            290 or 291 => "claude-4-opus",
-            333 or 334 => "claude-4.5-sonnet",
-            340 or 341 => "claude-4.5-haiku",
-            342 => "gpt-oss-120b-medium",
-            >= 1000 => $"model_placeholder_m{id - 1000}",
-            _ => $"antigravity-model-{id}",
+            281 or 282 => "claude-sonnet-4-20250514",
+            290 or 291 => "claude-opus-4-20250514",
+            333 or 334 => "claude-sonnet-4-5",
+            340 or 341 => "claude-haiku-4-5",
+            342 => "gpt-oss-120b",
+            1016 or 1036 or 1037 => "gemini-3.1-pro",
+            1018 or 1047 or 1084 => "gemini-3-flash-preview",
+            1020 or 1132 or 1133 or 1187 => "gemini-3.5-flash",
+            1026 => "claude-opus-4-6",
+            1035 => "claude-sonnet-4-6",
+            1071 or 1072 or 1073 or 1196 => "gemini-3.6-flash",
+            1299 or 1300 => "gemini-3.7-flash",
+            >= 1318 and <= 1322 => "gemini-3.8-flash",
+            1404 => "claude-sonnet-5-5",
+            _ => null,
         };
 
+        /// <summary>Internal routing names that do not identify a model on their own.</summary>
+        private static readonly HashSet<string> CodenameModels = new(StringComparer.Ordinal)
+        {
+            "gemini-default", "gemini-3-flash-a", "gemini-3-flash-b",
+        };
+
+        private static readonly string[] VariantSuffixes =
+        {
+            "-tiered", "-thinking", "-extra-low", "-low", "-medium", "-high", "-minimal", "-n",
+        };
+
+        /// <summary>
+        /// Normalizes Antigravity's display ("Gemini 3.6 Flash (Medium)", "Claude Sonnet 4.6
+        /// (Thinking)") and internal ("gemini-3.8-flash-n", "claude-sonnet-5-5-medium") names to
+        /// the base model's pricing key.
+        /// </summary>
         private static string? NormalizeModel(string? raw)
         {
             if (string.IsNullOrWhiteSpace(raw)) return null;
             var value = raw.Trim().ToLowerInvariant();
             var parenthesis = value.IndexOf('(');
             if (parenthesis >= 0) value = value[..parenthesis].Trim();
-            return value switch
+            if (value.Length == 0) return null;
+            value = value.Replace(' ', '-');
+
+            const string placeholderPrefix = "model_placeholder_m";
+            if (value.StartsWith(placeholderPrefix, StringComparison.Ordinal)
+                && ulong.TryParse(value[placeholderPrefix.Length..], out var placeholder))
+                return KnownModelName(placeholder + 1000) ?? value;
+
+            switch (value)
             {
-                "gemini 3.7 flash" or "gemini 3.7 flash thinking" or "gemini-3.7-flash-low"
-                    or "gemini-3.7-flash-medium" or "gemini-3.7-flash-high" or "gemini-3.7-flash-tiered"
-                    or "model_placeholder_m299" => "gemini-3.7-flash",
-                "gemini 3.8 flash" or "gemini 3.8 flash low" or "gemini 3.8 flash medium"
-                    or "gemini 3.8 flash high" or "gemini-3.8-flash-low" or "gemini-3.8-flash-medium"
-                    or "gemini-3.8-flash-high" or "gemini-3.8-flash-tiered" or "model_placeholder_m318"
-                    or "model_placeholder_m319" or "model_placeholder_m320" or "model_placeholder_m322"
-                    => "gemini-3.8-flash",
-                "gemini 3.7 pro" or "gemini 3.7 pro thinking" => "gemini-3.7-pro",
-                "gemini 3.6 flash" or "gemini 3 flash" => "gemini-3.6-flash",
-                "gemini 3.6 pro" => "gemini-3.6-pro",
-                "gemini 3 pro" or "gemini 3 pro thinking" => "gemini-3-pro",
-                "gemini 2.5 flash" => "gemini-2.5-flash",
-                "gemini 2.5 pro" => "gemini-2.5-pro",
-                "model_placeholder_m26" => "claude-opus-4-6",
-                "model_placeholder_m35" => "claude-sonnet-4-6",
-                "model_placeholder_m36" or "model_placeholder_m37" or "model_placeholder_m16" => "gemini-3.1-pro",
-                "model_placeholder_m18" or "model_placeholder_m84" or "model_placeholder_m47" => "gemini-3-flash-preview",
-                "model_placeholder_m132" or "model_placeholder_m133" => "gemini-3.5-flash-high",
-                "model_placeholder_m187" => "gemini-3.5-flash-extra-low",
-                "model_placeholder_m20" => "gemini-3.5-flash-medium",
-                "gemini-pro-default" or "gemini-pro-agent" => "gemini-3.1-pro",
-                _ when value.StartsWith("gemini-") || value.StartsWith("claude-") || value.StartsWith("gpt-") => value,
-                _ when value.StartsWith("model_placeholder_") => value,
-                _ => raw.Trim(),
-            };
+                case "gemini-pro-default" or "gemini-pro-agent": return "gemini-3.1-pro";
+                case "gemini-3-flash": return "gemini-3.6-flash";
+            }
+
+            for (var stripped = true; stripped;)
+            {
+                stripped = false;
+                foreach (var suffix in VariantSuffixes)
+                {
+                    if (value.Length > suffix.Length && value.EndsWith(suffix, StringComparison.Ordinal))
+                    {
+                        value = value[..^suffix.Length];
+                        stripped = true;
+                    }
+                }
+            }
+
+            if (value.StartsWith("claude-", StringComparison.Ordinal))
+            {
+                // "claude-4.5-sonnet" -> "claude-sonnet-4-5": LiteLLM writes family first and
+                // versions with dashes.
+                value = ClaudeVersionFirst.Replace(value, "claude-$2-$1").Replace('.', '-');
+            }
+            return value;
         }
+
+        private static readonly Regex ClaudeVersionFirst = new(@"^claude-(\d+(?:\.\d+)?)-(sonnet|opus|haiku)", RegexOptions.CultureInvariant);
 
         private static string? FirstNonEmpty(params string?[] values)
             => values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
