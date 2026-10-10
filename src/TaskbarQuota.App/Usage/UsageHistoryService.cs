@@ -91,7 +91,7 @@ namespace TaskbarQuota.Usage
             }
             PruneFileEvents(providerId, files);
 
-            history = Aggregate(events, now, SourceNote(providerId), providerId);
+            history = Aggregate(DropSupersededEvents(providerId, events), now, SourceNote(providerId), providerId);
             var loaded = history.Last90Days is not null;
             lock (CacheLock)
                 Cache[providerId] = new HistoryCacheEntry(DateTime.Today, fingerprint.FileCount, fingerprint.TotalLength, fingerprint.LatestWriteTicks, fingerprint.PathHash, history);
@@ -203,8 +203,27 @@ namespace TaskbarQuota.Usage
             IEnumerable<string> files,
             DateTimeOffset now)
         {
-            var events = files.SelectMany(file => ParseFile(providerId, file, now));
-            return Aggregate(events, now, SourceNote(providerId), providerId);
+            var events = files.SelectMany(file => ParseFile(providerId, file, now)).ToList();
+            return Aggregate(DropSupersededEvents(providerId, events), now, SourceNote(providerId), providerId);
+        }
+
+        /// <summary>
+        /// Grok Build's per-session <c>updates.jsonl</c> reports billed usage per turn; the legacy
+        /// shell log (<c>logs/unified.jsonl</c>) recorded per-inference token counts for the same
+        /// sessions. Where a session has session-log usage, its legacy events are dropped.
+        /// </summary>
+        private static List<UsageEvent> DropSupersededEvents(ProviderId providerId, List<UsageEvent> events)
+        {
+            if (providerId != ProviderId.Grok)
+                return events;
+            var reported = events
+                .Where(item => item.DedupeKey?.StartsWith(GrokSessionKeyPrefix, StringComparison.Ordinal) == true)
+                .Select(item => item.SessionId)
+                .ToHashSet(StringComparer.Ordinal);
+            return reported.Count == 0
+                ? events
+                : events.Where(item => item.DedupeKey?.StartsWith(GrokSessionKeyPrefix, StringComparison.Ordinal) == true
+                    || !reported.Contains(item.SessionId)).ToList();
         }
 
         internal static UsageHistory BuildFromCursorDashboardEvents(
@@ -241,6 +260,8 @@ namespace TaskbarQuota.Usage
                     => ParseZaiDatabase(path, now),
                 ProviderId.Codex when Path.GetExtension(path).Equals(".jsonl", StringComparison.OrdinalIgnoreCase)
                     => ParseCodex(ReadSharedLines(path)).Where(item => !IsOpenCodeGoModel(item.Model)),
+                ProviderId.Grok when Path.GetFileName(path).Equals("updates.jsonl", StringComparison.OrdinalIgnoreCase)
+                    => ParseGrokSessionUpdates(ReadSharedLines(path)),
                 ProviderId.Claude or ProviderId.Grok
                     => ParseEvents(providerId, ReadSharedLines(path)),
                 _ => Array.Empty<UsageEvent>(),
@@ -365,9 +386,28 @@ namespace TaskbarQuota.Usage
                     Path.Combine(home, ".claude", "projects"),
                     Path.Combine(home, ".config", "claude", "projects"),
                 },
-                ProviderId.Grok => new[] { Path.Combine(home, ".grok", "logs") },
+                ProviderId.Grok => new[] { Path.Combine(GrokHome(home), "logs") },
                 _ => Array.Empty<string>(),
             };
+
+            if (providerId == ProviderId.Grok)
+            {
+                // Grok Build writes one updates.jsonl per session under sessions/<cwd>/<id>/. The
+                // sibling chat_history and events logs are large and never carry usage.
+                var sessions = Path.Combine(GrokHome(home), "sessions");
+                if (Directory.Exists(sessions))
+                {
+                    IEnumerable<string> updates;
+                    try { updates = Directory.EnumerateFiles(sessions, "updates.jsonl", SearchOption.AllDirectories).ToList(); }
+                    catch (IOException) { updates = Array.Empty<string>(); }
+                    catch (UnauthorizedAccessException) { updates = Array.Empty<string>(); }
+                    var oldestUsefulWrite = DateTime.UtcNow.AddDays(-91);
+                    foreach (var file in updates
+                        .Where(path => LastWriteUtc(path) >= oldestUsefulWrite)
+                        .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+                        yield return file;
+                }
+            }
 
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var root in roots)
@@ -398,7 +438,7 @@ namespace TaskbarQuota.Usage
 
             if (providerId == ProviderId.Grok)
             {
-                var unified = Path.Combine(home, ".grok", "logs", "unified.jsonl");
+                var unified = Path.Combine(GrokHome(home), "logs", "unified.jsonl");
                 if (File.Exists(unified) && seen.Add(unified))
                     yield return unified;
             }
@@ -709,6 +749,107 @@ namespace TaskbarQuota.Usage
             return events;
         }
 
+        private const string GrokSessionKeyPrefix = "grok-session:";
+
+        /// <summary>Grok reports cost in integer ticks: 1 USD = 10^10 ticks.</summary>
+        private const double GrokCostTicksPerDollar = 10_000_000_000d;
+
+        private static string GrokHome(string home)
+        {
+            var configured = Environment.GetEnvironmentVariable("GROK_HOME");
+            return string.IsNullOrWhiteSpace(configured) ? Path.Combine(home, ".grok") : configured.Trim();
+        }
+
+        /// <summary>
+        /// Parses a Grok Build session log (<c>sessions/&lt;cwd&gt;/&lt;id&gt;/updates.jsonl</c>). Usage
+        /// lands on <c>turn_completed</c> updates with the billed cost in <c>costUsdTicks</c>;
+        /// <c>usage.modelUsage</c> splits a turn by model. Models without their own ticks share
+        /// the turn's remaining cost by token count.
+        /// </summary>
+        private static List<UsageEvent> ParseGrokSessionUpdates(IEnumerable<string> lines)
+        {
+            var events = new List<UsageEvent>();
+            foreach (var line in lines)
+            {
+                if (!line.Contains("\"turn_completed\"", StringComparison.Ordinal)
+                    || !TryDocument(line, out var root)
+                    || !root.TryGetProperty("params", out var parameters)
+                    || parameters.ValueKind != JsonValueKind.Object
+                    || !parameters.TryGetProperty("update", out var update)
+                    || update.ValueKind != JsonValueKind.Object
+                    || ReadDirectString(update, "sessionUpdate") != "turn_completed"
+                    || !update.TryGetProperty("usage", out var usage)
+                    || usage.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                DateTimeOffset timestamp;
+                if (parameters.TryGetProperty("_meta", out var meta) && ReadDirectInt64(meta, "agentTimestampMs") is { } agentMs)
+                    timestamp = DateTimeOffset.FromUnixTimeMilliseconds(agentMs);
+                else if (ReadDirectInt64(root, "timestamp") is { } seconds)
+                    timestamp = seconds > 1_000_000_000_000 ? DateTimeOffset.FromUnixTimeMilliseconds(seconds) : DateTimeOffset.FromUnixTimeSeconds(seconds);
+                else
+                    continue;
+
+                var sessionId = ReadDirectString(parameters, "sessionId") ?? string.Empty;
+                var turnKey = ReadDirectString(update, "prompt_id") ?? timestamp.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture);
+                var turnCost = GrokCostUsd(usage);
+
+                var models = new List<(string Model, TokenBreakdown Tokens, double? Cost)>();
+                if (usage.TryGetProperty("modelUsage", out var modelUsage) && modelUsage.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var entry in modelUsage.EnumerateObject())
+                    {
+                        if (entry.Name.Length == 0 || entry.Value.ValueKind != JsonValueKind.Object)
+                            continue;
+                        var tokens = GrokTokens(entry.Value);
+                        if (tokens.TotalTokens > 0)
+                            models.Add((entry.Name, tokens, GrokCostUsd(entry.Value)));
+                    }
+                }
+
+                if (models.Count == 0)
+                {
+                    var tokens = GrokTokens(usage);
+                    if (tokens.TotalTokens > 0)
+                        events.Add(new UsageEvent(timestamp, "grok", tokens, turnCost, sessionId, $"{GrokSessionKeyPrefix}{sessionId}:{turnKey}:grok"));
+                    continue;
+                }
+
+                var remaining = turnCost is { } total
+                    ? Math.Max(0, total - models.Sum(item => item.Cost ?? 0))
+                    : (double?)null;
+                var untickedTokens = (double)models.Where(item => item.Cost is null).Sum(item => (decimal)item.Tokens.TotalTokens);
+                foreach (var (model, tokens, cost) in models)
+                {
+                    var reported = cost ?? (remaining is { } share && untickedTokens > 0 ? share * tokens.TotalTokens / untickedTokens : null);
+                    events.Add(new UsageEvent(timestamp, model, tokens, reported, sessionId, $"{GrokSessionKeyPrefix}{sessionId}:{turnKey}:{model}"));
+                }
+            }
+            return events;
+        }
+
+        /// <summary>Grok Build counts cached reads and cache writes inside <c>inputTokens</c>.</summary>
+        private static TokenBreakdown GrokTokens(JsonElement usage)
+        {
+            var input = ReadDirectUInt64(usage, "inputTokens");
+            var cacheRead = ReadDirectUInt64(usage, "cachedReadTokens");
+            var cacheWrite = ReadDirectUInt64(usage, "cacheCreationTokens");
+            var output = ReadDirectUInt64(usage, "outputTokens");
+            return new TokenBreakdown
+            {
+                Input = input > cacheRead + cacheWrite ? input - cacheRead - cacheWrite : 0,
+                CacheRead = cacheRead,
+                CacheWrite5m = cacheWrite,
+                Output = output,
+                Reasoning = Math.Min(output, ReadDirectUInt64(usage, "reasoningTokens")),
+            };
+        }
+
+        private static double? GrokCostUsd(JsonElement usage)
+            => usage.TryGetProperty("costUsdTicks", out var ticks) && ticks.TryGetDouble(out var value) && value >= 0
+                ? value / GrokCostTicksPerDollar
+                : null;
+
         private static List<UsageEvent> ParseGrok(IEnumerable<string> lines)
         {
             var events = new List<UsageEvent>();
@@ -747,7 +888,9 @@ namespace TaskbarQuota.Usage
                 var eventModel = processId is { } modelPid && modelByProcess.TryGetValue(modelPid, out var known)
                     ? known
                     : "grok-unknown";
-                events.Add(new UsageEvent(timestamp, eventModel, tokens, null, processId?.ToString(CultureInfo.InvariantCulture) ?? string.Empty, null));
+                // "sid" is the Grok Build session id, which lets session-log usage supersede these events.
+                var sessionId = TryFindString(root, "sid") ?? processId?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
+                events.Add(new UsageEvent(timestamp, eventModel, tokens, null, sessionId, null));
             }
 
             return events;
@@ -1097,7 +1240,7 @@ namespace TaskbarQuota.Usage
 
         private static string SourceNote(ProviderId providerId) => providerId switch
         {
-            ProviderId.Grok => "From your Grok logs (estimated cost)",
+            ProviderId.Grok => "From your Grok Build logs (reported cost; older shell logs estimated)",
             ProviderId.OpenCode or ProviderId.OpenCodeGo => $"From your {DisplayName(providerId)} database (reported cost)",
             ProviderId.Cline or ProviderId.ClinePass => $"From your {DisplayName(providerId)} sessions (reported cost)",
             ProviderId.Zai => "From your Z.ai model usage database (estimated cost)",
