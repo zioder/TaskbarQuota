@@ -599,12 +599,14 @@ namespace TaskbarQuota.Usage
             string? currentModel = null;
             string sessionId = string.Empty;
             string? previousSignature = null;
+            bool fast = false;
 
             foreach (var line in lines)
             {
                 if (!line.Contains("token_count", StringComparison.OrdinalIgnoreCase)
                     && !line.Contains("turn_context", StringComparison.OrdinalIgnoreCase)
-                    && !line.Contains("session_meta", StringComparison.OrdinalIgnoreCase))
+                    && !line.Contains("session_meta", StringComparison.OrdinalIgnoreCase)
+                    && !line.Contains("thread_settings_applied", StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 if (!TryDocument(line, out var root))
@@ -625,6 +627,25 @@ namespace TaskbarQuota.Usage
                     && TryFindModel(root, out var contextModel))
                 {
                     currentModel = contextModel;
+                    continue;
+                }
+
+                // Codex records the requested service tier when thread settings apply. Omitted,
+                // "default" and "standard" bill at standard rates; "priority" (alias "fast") at
+                // the model's priority rates.
+                if (root.TryGetProperty("payload", out var settingsPayload)
+                    && settingsPayload.ValueKind == JsonValueKind.Object
+                    && settingsPayload.TryGetProperty("type", out var settingsType)
+                    && settingsType.GetString() == "thread_settings_applied")
+                {
+                    if (settingsPayload.TryGetProperty("thread_settings", out var settings)
+                        && settings.ValueKind == JsonValueKind.Object)
+                    {
+                        var tier = settings.TryGetProperty("service_tier", out var tierValue) && tierValue.ValueKind == JsonValueKind.String
+                            ? tierValue.GetString()
+                            : null;
+                        fast = tier is "priority" or "fast";
+                    }
                     continue;
                 }
 
@@ -658,10 +679,12 @@ namespace TaskbarQuota.Usage
 
                 if (TryFindModel(payload, out var model))
                     currentModel = model;
+                var tokens = usage.ToTokens(inputIncludesCache: true);
+                tokens.IsFast = fast;
                 events.Add(new UsageEvent(
                     timestamp,
                     currentModel ?? "gpt-5",
-                    usage.ToTokens(inputIncludesCache: true),
+                    tokens,
                     null,
                     sessionId,
                     null));

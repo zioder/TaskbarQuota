@@ -152,6 +152,80 @@ namespace TaskbarQuota.Tests
         }
 
         [Fact]
+        public void LiteLlmEntry_ReadsPriorityAnd272kTiers()
+        {
+            using var document = JsonDocument.Parse("""
+                {"input_cost_per_token":4e-06,"output_cost_per_token":2e-05,"cache_read_input_token_cost":4e-07,
+                 "cache_creation_input_token_cost":5e-06,
+                 "input_cost_per_token_above_272k_tokens":8e-06,"output_cost_per_token_above_272k_tokens":3e-05,
+                 "input_cost_per_token_priority":8e-06,"output_cost_per_token_priority":4e-05,
+                 "cache_read_input_token_cost_priority":8e-07}
+                """);
+
+            var rates = PricingCatalogStore.TryReadRateOverride(document.RootElement);
+
+            Assert.NotNull(rates);
+            Assert.Equal(4, rates.InputPerMillion, 6);
+            Assert.Equal(272_000ul, rates.LongContextThreshold);
+            Assert.Equal(8, rates.InputAbove200kPerMillion!.Value, 6);
+            Assert.NotNull(rates.Fast);
+            Assert.Equal(8, rates.Fast.InputPerMillion, 6);
+            Assert.Equal(40, rates.Fast.OutputPerMillion, 6);
+            Assert.Equal(0.8, rates.Fast.CacheReadPerMillion, 6);
+            // Priority omits a cache-write rate: it keeps the standard cache-write-to-input ratio.
+            Assert.Equal(10, rates.Fast.CacheWritePerMillion, 6);
+        }
+
+        [Fact]
+        public void LiteLlmProviderSpecificFast_ScalesStandardRates()
+        {
+            using var document = JsonDocument.Parse("""
+                {"input_cost_per_token":5e-06,"output_cost_per_token":2.5e-05,"provider_specific_entry":{"us":1.1,"fast":2.0}}
+                """);
+
+            var rates = PricingCatalogStore.TryReadRateOverride(document.RootElement);
+
+            Assert.NotNull(rates?.Fast);
+            Assert.Equal(10, rates.Fast.InputPerMillion, 6);
+            Assert.Equal(50, rates.Fast.OutputPerMillion, 6);
+        }
+
+        [Fact]
+        public void FastTokens_BillAtPriorityRates()
+        {
+            var rates = new ModelRates(4, 20, 5, 0.4) { Fast = new ModelRates(8, 40, 10, 0.8) };
+            var tokens = new TokenBreakdown { Input = 1_000_000, Output = 1_000_000 };
+
+            Assert.Equal(24, rates.ForSpeed(tokens.IsFast).CalculateCostDollars(tokens), 6);
+            tokens.IsFast = true;
+            Assert.Equal(48, rates.ForSpeed(tokens.IsFast).CalculateCostDollars(tokens), 6);
+        }
+
+        [Theory]
+        [InlineData("gpt-5.6-sol", 4.0, 20.0, 0.4)]
+        [InlineData("gpt-5.6-terra", 2.0, 12.0, 0.2)]
+        [InlineData("gpt-5.6-luna", 0.2, 1.2, 0.02)]
+        public void Gpt56Models_UseLiteLlmRates(string model, double input, double output, double cacheRead)
+        {
+            var rates = PricingEngine.Resolve(model);
+
+            Assert.NotNull(rates);
+            Assert.Equal(input, rates.InputPerMillion, 6);
+            Assert.Equal(output, rates.OutputPerMillion, 6);
+            Assert.Equal(cacheRead, rates.CacheReadPerMillion, 6);
+        }
+
+        [Fact]
+        public void Gpt56FastAlias_UsesPriorityTier()
+        {
+            var rates = PricingEngine.Resolve("gpt-5.6-sol-high-fast");
+
+            Assert.NotNull(rates);
+            Assert.Equal(8, rates.InputPerMillion, 6);
+            Assert.Equal(40, rates.OutputPerMillion, 6);
+        }
+
+        [Fact]
         public void Glm52Rates_AreDollarsPerMillionRatherThanDollarsPerToken()
         {
             var rates = PricingEngine.Resolve("GLM-5.2");

@@ -28,6 +28,24 @@ namespace TaskbarQuota.Tests
         }
 
         [Fact]
+        public void CodexPriorityServiceTier_BillsAtFastRates()
+        {
+            var now = new DateTimeOffset(2026, 8, 5, 12, 0, 0, TimeSpan.Zero);
+            string[] Lines(string tier) => new[]
+            {
+                "{\"timestamp\":\"2026-08-05T10:00:00Z\",\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-sol\"}}",
+                "{\"timestamp\":\"2026-08-05T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_settings\":{\"service_tier\":\"" + tier + "\"}}}",
+                "{\"timestamp\":\"2026-08-05T10:01:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":100000,\"output_tokens\":0,\"total_tokens\":100000}}}}",
+            };
+
+            var standard = UsageHistoryService.BuildFromLines(ProviderId.Codex, Lines("default"), now);
+            var priority = UsageHistoryService.BuildFromLines(ProviderId.Codex, Lines("priority"), now);
+
+            Assert.Equal(0.4, standard.Today!.EstimatedCostUsd!.Value, 6);
+            Assert.Equal(0.8, priority.Today!.EstimatedCostUsd!.Value, 6);
+        }
+
+        [Fact]
         public void ClaudeUsageEvents_UseReportedCostWhenAvailable()
         {
             var now = new DateTimeOffset(2026, 8, 5, 12, 0, 0, TimeSpan.Zero);
