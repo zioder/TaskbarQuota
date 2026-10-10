@@ -81,9 +81,10 @@ namespace TaskbarQuota.ActiveApp
 
             // SQLite WAL updates when thread metadata changes (e.g. model selection on send). Watching
             // alongside localStorage covers both the live draft and any persisted projection updates.
-            var dbPath = SynaraStateReader.GetStateDbPath();
-            if (dbPath != null)
+            foreach (var host in new[] { HostApp.Synara, HostApp.T3Code })
             {
+                if (SynaraStateReader.GetStateDbPath(host) is not { } dbPath)
+                    continue;
                 var dbDir = Path.GetDirectoryName(dbPath);
                 if (dbDir != null && Directory.Exists(dbDir))
                 {

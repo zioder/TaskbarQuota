@@ -313,6 +313,15 @@ namespace TaskbarQuota.ActiveApp
             string? literal = null, modelId = null;
             lock (Gate)
             {
+                // T3 Code appends the reasoning level to some display names ("Gemini 3.8 Flash (High)")
+                // while the stored id omits it. Exact core first, so an id that does carry it still wins.
+                if (!_modelCatalog.ContainsKey(core)
+                    && StripTrailingParenthetical(onScreenModel) is { } bare
+                    && ModelCore(bare) is { Length: > 0 } bareCore)
+                {
+                    core = bareCore;
+                }
+
                 if (_modelCatalog.TryGetValue(core, out var providers) && providers.Count > 0)
                 {
                     if (providers.Count == 1)
@@ -368,6 +377,16 @@ namespace TaskbarQuota.ActiveApp
             return AlphaNumCore(s);
         }
 
+        /// <summary>"Gemini 3.8 Flash (High)" → "Gemini 3.8 Flash"; null when there is no trailing "(...)".</summary>
+        internal static string? StripTrailingParenthetical(string name)
+        {
+            var s = name.TrimEnd();
+            if (!s.EndsWith(')'))
+                return null;
+            var open = s.LastIndexOf('(');
+            return open > 0 ? s[..open].TrimEnd() : null;
+        }
+
         private static string? _lastByModelLog;
         private static void LogByModel(string onScreen, string core, int providerCount, string? hit = null)
         {
@@ -410,7 +429,7 @@ namespace TaskbarQuota.ActiveApp
                     using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadWrite;Cache=Private");
                     conn.Open();
                     using var cmd = conn.CreateCommand();
-                    cmd.CommandText = "SELECT title FROM projection_threads WHERE thread_id = $id LIMIT 1";
+                    cmd.CommandText = $"SELECT title FROM {ThreadsTable(dbPath)} WHERE thread_id = $id LIMIT 1";
                     cmd.Parameters.AddWithValue("$id", threadId);
                     if (cmd.ExecuteScalar() is string t && t.Length > 0)
                         title = t;
@@ -441,14 +460,42 @@ namespace TaskbarQuota.ActiveApp
             {
                 foreach (var profile in new[] { "userdata", "dev" })
                 {
-                    var candidate = Path.Combine(home, profile, "state.sqlite");
-                    if (File.Exists(candidate))
-                        return candidate;
+                    // T3 Code V2 moved to statev2.sqlite (imported once from state.sqlite, which V1 builds
+                    // and `t3 serve` keep writing). Both can coexist, so take whichever was written last.
+                    string? best = null;
+                    var bestWriteUtc = DateTime.MinValue;
+                    foreach (var file in new[] { V2DbFileName, "state.sqlite" })
+                    {
+                        var candidate = Path.Combine(home, profile, file);
+                        if (!File.Exists(candidate))
+                            continue;
+                        var writeUtc = LatestWriteUtc(candidate);
+                        if (best == null || writeUtc > bestWriteUtc)
+                        {
+                            best = candidate;
+                            bestWriteUtc = writeUtc;
+                        }
+                    }
+                    if (best != null)
+                        return best;
                 }
             }
 
             return null;
         }
+
+        private const string V2DbFileName = "statev2.sqlite";
+
+        /// <summary>
+        /// True for T3 Code V2's <c>statev2.sqlite</c>. Its live thread projection is
+        /// <c>orchestration_v2_projection_threads</c> (selection in <c>payload_json.modelSelection</c>);
+        /// the legacy <c>projection_*</c> tables in that file are a frozen one-time import from V1.
+        /// </summary>
+        internal static bool IsV2Db(string dbPath) =>
+            string.Equals(Path.GetFileName(dbPath), V2DbFileName, StringComparison.OrdinalIgnoreCase);
+
+        private static string ThreadsTable(string dbPath) =>
+            IsV2Db(dbPath) ? "orchestration_v2_projection_threads" : "projection_threads";
 
         private static IEnumerable<string> GetStateRoots(HostApp host = HostApp.Synara)
         {
@@ -542,13 +589,18 @@ namespace TaskbarQuota.ActiveApp
                 pragma.ExecuteNonQuery();
             }
 
+            var v2 = IsV2Db(dbPath);
             string? title = null, threadModelJson = null, projectId = null;
             bool exists = false, hasLatestTurn = false;
             using (var cmd = conn.CreateCommand())
             {
-                cmd.CommandText =
-                    "SELECT title, project_id, latest_turn_id, model_selection_json FROM projection_threads " +
-                    "WHERE thread_id = $id AND deleted_at IS NULL LIMIT 1";
+                cmd.CommandText = v2
+                    ? "SELECT title, project_id, " +
+                      "(SELECT 1 FROM orchestration_v2_projection_runs r WHERE r.thread_id = t.thread_id LIMIT 1), " +
+                      "json_extract(payload_json, '$.modelSelection') FROM orchestration_v2_projection_threads t " +
+                      "WHERE thread_id = $id AND deleted_at IS NULL LIMIT 1"
+                    : "SELECT title, project_id, latest_turn_id, model_selection_json FROM projection_threads " +
+                      "WHERE thread_id = $id AND deleted_at IS NULL LIMIT 1";
                 cmd.Parameters.AddWithValue("$id", threadId);
                 using var reader = cmd.ExecuteReader();
                 if (reader.Read())
@@ -565,7 +617,10 @@ namespace TaskbarQuota.ActiveApp
             bool hasSession = false;
             using (var cmd = conn.CreateCommand())
             {
-                cmd.CommandText = "SELECT provider_name FROM projection_thread_sessions WHERE thread_id = $id LIMIT 1";
+                cmd.CommandText = v2
+                    ? "SELECT provider FROM orchestration_v2_projection_provider_sessions WHERE thread_id = $id " +
+                      "ORDER BY updated_at DESC LIMIT 1"
+                    : "SELECT provider_name FROM projection_thread_sessions WHERE thread_id = $id LIMIT 1";
                 cmd.Parameters.AddWithValue("$id", threadId);
                 using var reader = cmd.ExecuteReader();
                 if (reader.Read())
@@ -578,7 +633,9 @@ namespace TaskbarQuota.ActiveApp
             bool hasMessages = false;
             using (var cmd = conn.CreateCommand())
             {
-                cmd.CommandText = "SELECT 1 FROM projection_thread_messages WHERE thread_id = $id LIMIT 1";
+                cmd.CommandText = v2
+                    ? "SELECT 1 FROM orchestration_v2_projection_messages WHERE thread_id = $id LIMIT 1"
+                    : "SELECT 1 FROM projection_thread_messages WHERE thread_id = $id LIMIT 1";
                 cmd.Parameters.AddWithValue("$id", threadId);
                 hasMessages = cmd.ExecuteScalar() != null;
             }
@@ -674,11 +731,17 @@ namespace TaskbarQuota.ActiveApp
 
             using var cmd = conn.CreateCommand();
             // Most recently touched visible thread. Switching the provider bumps updated_at (not
-            // latest_user_message_at), so order by the MAX of both timestamps.
-            cmd.CommandText =
-                "SELECT thread_id, title, model_selection_json FROM projection_threads " +
-                "WHERE deleted_at IS NULL AND archived_at IS NULL AND model_selection_json IS NOT NULL " +
-                "ORDER BY MAX(COALESCE(latest_user_message_at, ''), COALESCE(updated_at, '')) DESC LIMIT 1";
+            // latest_user_message_at), so order by the MAX of both timestamps. V2 has no
+            // latest_user_message_at column but records lastVisitedAt, a closer "focused thread" signal.
+            cmd.CommandText = IsV2Db(dbPath)
+                ? "SELECT thread_id, title, json_extract(payload_json, '$.modelSelection') " +
+                  "FROM orchestration_v2_projection_threads " +
+                  "WHERE deleted_at IS NULL AND archived_at IS NULL " +
+                  "AND json_extract(payload_json, '$.modelSelection') IS NOT NULL " +
+                  "ORDER BY MAX(COALESCE(json_extract(payload_json, '$.lastVisitedAt'), ''), COALESCE(updated_at, '')) DESC LIMIT 1"
+                : "SELECT thread_id, title, model_selection_json FROM projection_threads " +
+                  "WHERE deleted_at IS NULL AND archived_at IS NULL AND model_selection_json IS NOT NULL " +
+                  "ORDER BY MAX(COALESCE(latest_user_message_at, ''), COALESCE(updated_at, '')) DESC LIMIT 1";
 
             string? threadId, title, modelJson;
             using (var reader = cmd.ExecuteReader())
@@ -784,6 +847,9 @@ namespace TaskbarQuota.ActiveApp
                     return ProviderId.Cursor;
                 case "grok":
                     return ProviderId.Grok;
+                case "antigravity":
+                    // T3 Code's Antigravity driver (ACP over the Antigravity IDE/CLI); Gemini models.
+                    return ProviderId.Antigravity;
                 case "opencode":
                     // Synara prefixes the model with the underlying provider id; "opencode-go/..." is the
                     // OpenCode Go (subscription) backend, everything else is OpenCode (zen/BYOK).
@@ -812,7 +878,10 @@ namespace TaskbarQuota.ActiveApp
             if (slash >= 0 && slash < id.Length - 1)
                 id = id[(slash + 1)..];
 
-            return string.Equals(AlphaNumCore(id), AlphaNumCore(onScreenModel), StringComparison.Ordinal);
+            var idCore = AlphaNumCore(id);
+            return string.Equals(idCore, AlphaNumCore(onScreenModel), StringComparison.Ordinal)
+                || (StripTrailingParenthetical(onScreenModel) is { } bare
+                    && string.Equals(idCore, AlphaNumCore(bare), StringComparison.Ordinal));
         }
 
         private static string AlphaNumCore(string s)

@@ -11,11 +11,21 @@ public class SynaraStateReaderTests
     [InlineData("claudeAgent", null, ProviderId.Claude)]
     [InlineData("cursor", null, ProviderId.Cursor)]
     [InlineData("grok", null, ProviderId.Grok)]
+    [InlineData("antigravity", "gemini-3.8-flash", ProviderId.Antigravity)]
     [InlineData("opencode", "openai/gpt-5", ProviderId.OpenCode)]
     [InlineData("opencode", "opencode-go/kimi-k2.6", ProviderId.OpenCodeGo)]
     public void MapProvider_maps_supported_providers(string literal, string? model, ProviderId expected)
     {
         Assert.Equal(expected, SynaraStateReader.MapProvider(literal, model));
+    }
+
+    [Theory]
+    [InlineData("gemini-3.8-flash", "Gemini 3.8 Flash (High)", true)]
+    [InlineData("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)", true)]
+    [InlineData("gemini-3.8-pro", "Gemini 3.8 Flash (High)", false)]
+    public void ModelMatchesOnScreen_ignores_trailing_reasoning_suffix(string stored, string onScreen, bool expected)
+    {
+        Assert.Equal(expected, SynaraStateReader.ModelMatchesOnScreen(stored, onScreen));
     }
 
     [Theory]
