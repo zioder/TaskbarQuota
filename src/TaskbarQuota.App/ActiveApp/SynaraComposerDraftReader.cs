@@ -44,6 +44,8 @@ namespace TaskbarQuota.ActiveApp
             "DP Code (Dev)",
             "dp-code-desktop",
             // Upstream T3 Code (pingdotgg/t3code): Electron userData = productName / legacyUserDataDirName.
+            // V2 desktop builds (Nightly included) moved to their own "t3code-v2" profile.
+            "t3code-v2",
             "T3 Code (Alpha)",
             "T3 Code (Nightly)",
             "T3 Code (Dev)",
@@ -262,7 +264,7 @@ namespace TaskbarQuota.ActiveApp
         // the foreground host so a more-recently-active OTHER app can't override the active one's draft.
         private static readonly HashSet<string> T3CodeProfileNames = new(StringComparer.OrdinalIgnoreCase)
         {
-            "t3code", "t3code-dev", "T3 Code (Alpha)", "T3 Code (Nightly)", "T3 Code (Dev)",
+            "t3code", "t3code-v2", "t3code-dev", "T3 Code (Alpha)", "T3 Code (Nightly)", "T3 Code (Dev)",
         };
 
         private static bool ProfileBelongsToHost(string profile, HostApp host) =>
@@ -309,9 +311,21 @@ namespace TaskbarQuota.ActiveApp
                     || !string.IsNullOrEmpty(snapshot.FocusedThreadId));
         }
 
+        // Recency of a profile = its newest .log/.ldb write, so an abandoned profile (e.g. T3 Code V1's
+        // "t3code" after V2 moved to "t3code-v2") never outranks the live one. DirectoryStamp is a
+        // change-detection hash, not an ordering, so it can't be used here.
         private static long LevelDbActivityStamp(string dir)
         {
-            return DirectoryStamp(dir, "*.log") * 31 + DirectoryStamp(dir, "*.ldb");
+            long newest = 0;
+            foreach (var pattern in new[] { "*.log", "*.ldb" })
+            {
+                foreach (var file in Directory.EnumerateFiles(dir, pattern))
+                {
+                    try { newest = Math.Max(newest, File.GetLastWriteTimeUtc(file).Ticks); }
+                    catch { }
+                }
+            }
+            return newest;
         }
 
         private static long DirectoryStamp(string dir, string pattern)

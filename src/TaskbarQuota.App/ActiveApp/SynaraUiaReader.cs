@@ -26,6 +26,11 @@ namespace TaskbarQuota.ActiveApp
         // classes, so this cheaply narrows the FindAll result to the three pickers.
         private const string PickerClassSignature = "rounded-lg border";
 
+        // T3 Code V2 composer controls (model picker, agent/effort picker, branch picker) all style an
+        // inner icon via this Tailwind token; nothing outside the composer carries it. Its header buttons
+        // ("Toggle thread details panel", ...) DO carry "rounded-lg border", so V2 must be matched first.
+        private const string ComposerControlSignature = "data-composer-control-icon";
+
         private IUIAutomation? _automation;
         private IUIAutomationElement? _modelButton;
         private IntPtr _cachedHwnd;
@@ -116,7 +121,7 @@ namespace TaskbarQuota.ActiveApp
             if (buttons is null)
                 return null;
 
-            IUIAutomationElement? candidate = null;
+            IUIAutomationElement? synaraCandidate = null;
             int count = buttons.Length;
             for (int i = 0; i < count; i++)
             {
@@ -132,8 +137,19 @@ namespace TaskbarQuota.ActiveApp
                 }
                 catch { continue; }
 
-                // Only the access/model/effort picker trio carries the signature class.
-                if (cls.IndexOf(PickerClassSignature, StringComparison.Ordinal) < 0)
+                // T3 Code V2: the model picker is the first composer control in document order (then the
+                // agent/effort picker "Unknown · Build", then the branch picker below the composer).
+                if (cls.IndexOf(ComposerControlSignature, StringComparison.Ordinal) >= 0)
+                {
+                    if (IsAccessOrEffortLabel(name) || IsT3NonModelControl(name))
+                        continue;
+                    return el;
+                }
+
+                // Synara: only the access/model/effort picker trio carries the signature class. Keep
+                // scanning after a hit so a later T3 composer control still wins over T3's header buttons.
+                if (synaraCandidate is not null
+                    || cls.IndexOf(PickerClassSignature, StringComparison.Ordinal) < 0)
                     continue;
 
                 // The access and effort buttons have fixed, recognizable labels; whatever remains in the
@@ -141,11 +157,23 @@ namespace TaskbarQuota.ActiveApp
                 if (IsAccessOrEffortLabel(name))
                     continue;
 
-                candidate = el;
-                break;
+                synaraCandidate = el;
             }
 
-            return candidate;
+            return synaraCandidate;
+        }
+
+        /// <summary>
+        /// T3 Code V2 composer controls that are never the model picker: the branch/checkout picker. (The
+        /// agent/effort picker, "Unknown · Build", always follows the model picker, so first-match wins;
+        /// it is not excluded by name because labelled builds name the model "{Provider} · {Model}".)
+        /// </summary>
+        private static bool IsT3NonModelControl(string name)
+        {
+            var n = name.Trim().ToLowerInvariant();
+            return n.Contains("checkout")
+                || n.Contains("branch")
+                || n.Contains("worktree");
         }
 
         /// <summary>
