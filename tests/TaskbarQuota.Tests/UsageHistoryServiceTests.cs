@@ -28,6 +28,55 @@ namespace TaskbarQuota.Tests
         }
 
         [Fact]
+        public void GrokBuildSessionUpdates_UseReportedCostAndSupersedeLegacyShellLog()
+        {
+            var directory = CreateTemporaryDirectory();
+            try
+            {
+                var session = Path.Combine(directory, "sessions", "C%3A%5Cwork", "s-1");
+                Directory.CreateDirectory(session);
+                var updates = Path.Combine(session, "updates.jsonl");
+                File.WriteAllLines(updates, new[]
+                {
+                    "{\"timestamp\":1785664800,\"params\":{\"sessionId\":\"s-1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\"}}}",
+                    // Two models in one turn: grok-4.5 reports its own ticks, grok-code shares the rest.
+                    "{\"timestamp\":1785664800,\"params\":{\"sessionId\":\"s-1\",\"update\":{\"sessionUpdate\":\"turn_completed\",\"prompt_id\":\"p-1\","
+                        + "\"usage\":{\"inputTokens\":1500,\"outputTokens\":300,\"cachedReadTokens\":500,\"cacheCreationTokens\":0,\"reasoningTokens\":100,\"costUsdTicks\":30000000000,"
+                        + "\"modelUsage\":{\"grok-4.5\":{\"inputTokens\":1000,\"outputTokens\":200,\"cachedReadTokens\":500,\"reasoningTokens\":100,\"costUsdTicks\":10000000000},"
+                        + "\"grok-code\":{\"inputTokens\":500,\"outputTokens\":100,\"cachedReadTokens\":0}}}},"
+                        + "\"_meta\":{\"agentTimestampMs\":1785664800500}}}",
+                    // The same turn written again is counted once.
+                    "{\"timestamp\":1785664801,\"params\":{\"sessionId\":\"s-1\",\"update\":{\"sessionUpdate\":\"turn_completed\",\"prompt_id\":\"p-1\","
+                        + "\"usage\":{\"inputTokens\":1500,\"outputTokens\":300,\"cachedReadTokens\":500,\"costUsdTicks\":30000000000,"
+                        + "\"modelUsage\":{\"grok-4.5\":{\"inputTokens\":1000,\"outputTokens\":200,\"cachedReadTokens\":500,\"reasoningTokens\":100,\"costUsdTicks\":10000000000},"
+                        + "\"grok-code\":{\"inputTokens\":500,\"outputTokens\":100,\"cachedReadTokens\":0}}}}}}",
+                });
+                // The legacy shell log saw the same session (sid s-1) plus an older one (s-0).
+                var unified = Path.Combine(directory, "unified.jsonl");
+                File.WriteAllLines(unified, new[]
+                {
+                    "{\"ts\":\"2026-08-02T10:00:00Z\",\"pid\":7,\"sid\":\"s-1\",\"msg\":\"shell.turn.inference_done\",\"ctx\":{\"prompt_tokens\":900,\"cached_prompt_tokens\":0,\"completion_tokens\":90}}",
+                    "{\"ts\":\"2026-08-02T09:00:00Z\",\"pid\":6,\"sid\":\"s-0\",\"msg\":\"shell.turn.inference_done\",\"ctx\":{\"prompt_tokens\":40,\"cached_prompt_tokens\":0,\"completion_tokens\":10}}",
+                });
+
+                var now = new DateTimeOffset(2026, 8, 2, 12, 0, 0, TimeSpan.Zero);
+                var history = UsageHistoryService.BuildFromFilesForTesting(ProviderId.Grok, new[] { updates, unified }, now);
+
+                var today = history.Today!;
+                Assert.Equal(1800UL + 50UL, today.Tokens);
+                Assert.Equal(500UL, today.CachedInputTokens);
+                var models = today.ModelBreakdown!.Models;
+                Assert.Equal(1.0, models.Single(item => item.Model == "grok-4.5").CostUsd!.Value, 6);
+                Assert.Equal(2.0, models.Single(item => item.Model == "grok-code").CostUsd!.Value, 6);
+                Assert.Equal(2, today.Sessions);
+            }
+            finally
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
         public void ClaudeUsageEvents_UseReportedCostWhenAvailable()
         {
             var now = new DateTimeOffset(2026, 8, 5, 12, 0, 0, TimeSpan.Zero);
