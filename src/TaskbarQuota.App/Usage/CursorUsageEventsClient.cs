@@ -167,7 +167,8 @@ namespace TaskbarQuota.Usage
                 double? meteredCost = ReadOptionalNonNegativeDouble(eventNode, "chargedCents") is { } charged
                     ? charged / 100d
                     : null;
-                var session = ReadOptionalString(eventNode, "composerId")
+                var session = ReadOptionalString(eventNode, "conversationId")
+                    ?? ReadOptionalString(eventNode, "composerId")
                     ?? ReadOptionalString(eventNode, "sessionId");
                 events.Add(new CursorDashboardUsageEvent(
                     DateTimeOffset.FromUnixTimeMilliseconds(timestampMs),
