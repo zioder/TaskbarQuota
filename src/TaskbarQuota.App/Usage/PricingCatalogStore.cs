@@ -12,8 +12,8 @@ using System.Threading.Tasks;
 namespace TaskbarQuota.Usage;
 
 /// <summary>
-/// Supplement-compatible pricing store: the bundled supplement overrides LiteLLM, which overrides
-/// models.dev.
+/// Pricing store: LiteLLM (refreshed at runtime, the table T3 Code and ccusage price against) wins,
+/// the bundled supplement fills models LiteLLM has not published yet, and models.dev comes last.
 /// Bundled snapshots make the estimator useful offline; cached refreshed feeds are preferred at runtime.
 /// </summary>
 internal sealed class PricingCatalogStore
@@ -139,19 +139,60 @@ internal sealed class PricingCatalogStore
 
     private static ModelRates? ReadRate(JsonElement value)
     {
+        var rates = ReadTier(value, "");
+        if (rates is null) return null;
+        // LiteLLM publishes faster service either as "*_priority" rates (OpenAI priority tier)
+        // or as a provider_specific_entry.fast multiple (Claude fast mode). The compact
+        // snapshot carries the same data as "f*" rates and a "fast" multiple.
+        var fast = ReadTier(value, "_priority", rates);
+        if (fast is null && (Number(value, "fast")
+            ?? (value.TryGetProperty("provider_specific_entry", out var specific) ? Number(specific, "fast") : null)) is { } multiple && multiple > 0)
+            fast = rates.Scale(multiple);
+        return fast is null ? rates : new ModelRates(rates.InputPerMillion, rates.OutputPerMillion, rates.CacheWritePerMillion, rates.CacheReadPerMillion,
+            rates.InputAbove200kPerMillion, rates.OutputAbove200kPerMillion, rates.CacheWriteAbove200kPerMillion, rates.CacheReadAbove200kPerMillion,
+            rates.LongContextThreshold) { Fast = fast };
+    }
+
+    /// <summary>
+    /// Reads one rate set. <paramref name="suffix"/> selects a LiteLLM tier such as <c>_priority</c>
+    /// (compact form: an "f" prefix). A faster tier that omits cache rates keeps the standard tier's
+    /// cache-to-input ratio.
+    /// </summary>
+    private static ModelRates? ReadTier(JsonElement value, string suffix, ModelRates? standard = null)
+    {
+        var compact = suffix.Length == 0 ? "" : "f";
         // models.dev's nested cost object is already expressed in USD per million tokens.
         // Only LiteLLM's explicit *_cost_per_token fields need the 1,000,000 conversion.
-        var input = Number(value, "i") ?? Number(value, "input_per_million") ?? Number(value, "input_cost_per_token") * 1_000_000 ?? (value.TryGetProperty("cost", out var cost) ? Number(cost, "input") : null);
-        var output = Number(value, "o") ?? Number(value, "output_per_million") ?? Number(value, "output_cost_per_token") * 1_000_000 ?? (value.TryGetProperty("cost", out var cost2) ? Number(cost2, "output") : null);
+        double? Rate(string compactKey, string perMillionKey, string liteLlmKey, string modelsDevKey)
+            => Number(value, compact + compactKey)
+                ?? (suffix.Length == 0 ? Number(value, perMillionKey) : null)
+                ?? Number(value, liteLlmKey + suffix) * 1_000_000
+                ?? (suffix.Length == 0 && value.TryGetProperty("cost", out var cost) ? Number(cost, modelsDevKey) : null);
+        var input = Rate("i", "input_per_million", "input_cost_per_token", "input");
+        var output = Rate("o", "output_per_million", "output_cost_per_token", "output");
         if (input is null || output is null) return null;
-        var cacheRead = Number(value, "cr") ?? Number(value, "cache_read_per_million") ?? Number(value, "cache_read_input_token_cost") * 1_000_000 ?? (value.TryGetProperty("cost", out var c) ? Number(c, "cache_read") : null);
-        var cacheWrite = Number(value, "cw") ?? Number(value, "cache_write_per_million") ?? Number(value, "cache_creation_input_token_cost") * 1_000_000 ?? (value.TryGetProperty("cost", out var c2) ? Number(c2, "cache_write") : null);
-        var threshold = Number(value, "long_context_threshold") ?? Number(value, "ctx_threshold") ?? Number(value, "long_context_threshold_tokens");
+        var cacheRead = Rate("cr", "cache_read_per_million", "cache_read_input_token_cost", "cache_read");
+        var cacheWrite = Rate("cw", "cache_write_per_million", "cache_creation_input_token_cost", "cache_write");
+        if (standard is not null && standard.InputPerMillion > 0)
+        {
+            cacheRead ??= standard.CacheReadPerMillion / standard.InputPerMillion * input;
+            cacheWrite ??= standard.CacheWritePerMillion / standard.InputPerMillion * input;
+        }
+
+        // LiteLLM names the long-context tier by its boundary: Anthropic/Gemini at 200K,
+        // OpenAI at 272K. Either switches the whole request once input crosses it.
+        var tier = Number(value, "input_cost_per_token_above_272k_tokens" + suffix) is not null ? "272k" : "200k";
+        double? Above(string compactKey, string perMillionKey, string liteLlmKey)
+            => Number(value, compact + compactKey)
+                ?? (suffix.Length == 0 ? Number(value, perMillionKey) : null)
+                ?? Number(value, $"{liteLlmKey}_above_{tier}_tokens{suffix}") * 1_000_000;
+        var threshold = Number(value, "ctx") ?? Number(value, "long_context_threshold") ?? Number(value, "ctx_threshold") ?? Number(value, "long_context_threshold_tokens")
+            ?? (tier == "272k" ? 272_000 : null);
         return new ModelRates(input.Value, output.Value, cacheWrite ?? input, cacheRead ?? input * 0.1,
-            Number(value, "ia") ?? Number(value, "input_above_200k_per_million"),
-            Number(value, "oa") ?? Number(value, "output_above_200k_per_million"),
-            Number(value, "cwa") ?? Number(value, "cache_write_above_200k_per_million"),
-            Number(value, "cra") ?? Number(value, "cache_read_above_200k_per_million"),
+            Above("ia", "input_above_200k_per_million", "input_cost_per_token"),
+            Above("oa", "output_above_200k_per_million", "output_cost_per_token"),
+            Above("cwa", "cache_write_above_200k_per_million", "cache_creation_input_token_cost"),
+            Above("cra", "cache_read_above_200k_per_million", "cache_read_input_token_cost"),
             threshold is { } t && t > 0 ? (ulong)t : null);
     }
 
@@ -171,16 +212,21 @@ internal sealed class PricingCatalogStore
         {
             var canonical = Supplement.Aliases.FirstOrDefault(a => a.Pattern.IsMatch(model)).Canonical;
             if (!string.IsNullOrEmpty(canonical)) model = canonical;
-            if (Supplement.Rates.TryGetValue(model, out var rate)) return rate;
-            if (Primary.TryGetValue(model, out rate)) return ApplyFast(model, rate);
-            if (model.EndsWith("-fast", StringComparison.OrdinalIgnoreCase) && Supplement.Rates.TryGetValue(model[..^5], out rate))
-                return rate.Scale(Supplement.Fast.TryGetValue(model[..^5], out var supplementMultiplier) ? supplementMultiplier : 1d);
-            if (model.EndsWith("-fast", StringComparison.OrdinalIgnoreCase) && Primary.TryGetValue(model[..^5], out rate)) return ApplyFast(model, rate);
-            if (Secondary.TryGetValue(model, out rate)) return ApplyFast(model, rate);
+            if (Primary.TryGetValue(model, out var rate)) return rate;
+            if (Supplement.Rates.TryGetValue(model, out rate)) return rate;
+            if (model.EndsWith("-fast", StringComparison.OrdinalIgnoreCase))
+            {
+                // A "-fast" model bills at its base model's fast tier: LiteLLM's published
+                // priority rates first, else the supplement's multiple for models it prices.
+                var baseName = model[..^5];
+                if ((Primary.TryGetValue(baseName, out rate) || Supplement.Rates.TryGetValue(baseName, out rate)
+                    || Secondary.TryGetValue(baseName, out rate)) && rate is not null)
+                    return rate.Fast ?? rate.Scale(Supplement.Fast.TryGetValue(baseName, out var multiple) ? multiple : 1d);
+            }
+            if (Secondary.TryGetValue(model, out rate)) return rate;
             var match = Primary.FirstOrDefault(p => p.Key.EndsWith(model, StringComparison.OrdinalIgnoreCase));
-            return match.Key is null ? null : ApplyFast(model, match.Value);
+            return match.Key is null ? null : match.Value;
         }
-        private ModelRates ApplyFast(string name, ModelRates rate) => name.EndsWith("-fast", StringComparison.OrdinalIgnoreCase) && Supplement.Fast.TryGetValue(name[..^5], out var m) ? rate.Scale(m) : rate;
     }
 
     internal sealed record Supplement(Dictionary<string, ModelRates> Rates, List<(Regex Pattern, string Canonical)> Aliases, Dictionary<string, double> Fast);

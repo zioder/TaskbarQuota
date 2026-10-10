@@ -29,6 +29,13 @@ public sealed class ModelRates
     /// </summary>
     public ulong? LongContextThreshold { get; }
 
+    /// <summary>
+    /// Rates for priority/fast service (Codex <c>service_tier: priority</c>, Claude fast mode), from
+    /// LiteLLM's <c>*_priority</c> fields or its <c>provider_specific_entry.fast</c> multiple.
+    /// Null when the catalog publishes none; fast requests then bill at the standard rates.
+    /// </summary>
+    public ModelRates? Fast { get; init; }
+
     public ModelRates(double inputPerMillion, double outputPerMillion, double? cacheWritePerMillion = null, double? cacheReadPerMillion = null,
         double? inputAbove200kPerMillion = null, double? outputAbove200kPerMillion = null,
         double? cacheWriteAbove200kPerMillion = null, double? cacheReadAbove200kPerMillion = null,
@@ -50,6 +57,18 @@ public sealed class ModelRates
         CacheWriteAbove200kPerMillion is { } cwa ? cwa * factor : null,
         CacheReadAbove200kPerMillion is { } cra ? cra * factor : null,
         LongContextThreshold);
+
+    internal ModelRates WithThreshold(ulong? threshold) => new(
+        InputPerMillion, OutputPerMillion, CacheWritePerMillion, CacheReadPerMillion,
+        InputAbove200kPerMillion, OutputAbove200kPerMillion,
+        CacheWriteAbove200kPerMillion, CacheReadAbove200kPerMillion,
+        threshold)
+    {
+        Fast = Fast?.WithThreshold(threshold),
+    };
+
+    /// <summary>The rates a request bills at: <see cref="Fast"/> for fast requests when published.</summary>
+    internal ModelRates ForSpeed(bool isFast) => isFast ? Fast ?? this : this;
 
     public double CalculateCostDollars(TokenBreakdown tokens)
     {
@@ -162,32 +181,22 @@ public static class PricingEngine
         return rates;
     }
 
-    private static ModelRates WithThreshold(ModelRates rates, ulong threshold)
-        => new(rates.InputPerMillion, rates.OutputPerMillion, rates.CacheWritePerMillion, rates.CacheReadPerMillion,
-            rates.InputAbove200kPerMillion, rates.OutputAbove200kPerMillion,
-            rates.CacheWriteAbove200kPerMillion, rates.CacheReadAbove200kPerMillion,
-            threshold);
+    private static ModelRates WithThreshold(ModelRates rates, ulong threshold) => rates.WithThreshold(threshold);
 
     public static double? EstimateCostUsd(string modelName, TokenBreakdown tokens)
-        => Resolve(modelName) is { } rates ? rates.CalculateCostDollars(tokens) * (tokens.IsFast ? FastMultiplier(modelName) : 1d) : null;
+        => Resolve(modelName) is { } rates ? rates.ForSpeed(tokens.IsFast).CalculateCostDollars(tokens) : null;
 
     public static double? EstimateCostUsd(string modelName, TokenBreakdown tokens, DateTimeOffset pricingDate)
-        => Resolve(modelName, pricingDate) is { } rates ? rates.CalculateCostDollars(tokens) * (tokens.IsFast ? FastMultiplier(modelName) : 1d) : null;
+        => Resolve(modelName, pricingDate) is { } rates ? rates.ForSpeed(tokens.IsFast).CalculateCostDollars(tokens) : null;
 
     public static double? EstimateCostUsd(string modelName, ulong inputTokens, ulong outputTokens)
         => Resolve(modelName) is { } rates ? rates.CalculateCostDollars(inputTokens, outputTokens) : null;
 
     public static double? EstimateCacheSavingsUsd(string modelName, TokenBreakdown tokens)
-        => Resolve(modelName) is { } rates ? rates.CalculateCacheSavingsDollars(tokens) : null;
+        => Resolve(modelName) is { } rates ? rates.ForSpeed(tokens.IsFast).CalculateCacheSavingsDollars(tokens) : null;
 
     public static double? EstimateCacheSavingsUsd(string modelName, TokenBreakdown tokens, DateTimeOffset pricingDate)
-        => Resolve(modelName, pricingDate) is { } rates ? rates.CalculateCacheSavingsDollars(tokens) : null;
-
-    private static double FastMultiplier(string modelName)
-    {
-        // The store already scales catalog fast entries. This fallback is for supplement-priced bases.
-        return 1d;
-    }
+        => Resolve(modelName, pricingDate) is { } rates ? rates.ForSpeed(tokens.IsFast).CalculateCacheSavingsDollars(tokens) : null;
 
     private static Dictionary<string, ModelRates> LoadOverrides()
     {
