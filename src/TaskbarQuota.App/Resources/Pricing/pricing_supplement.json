@@ -147,6 +147,7 @@
   },
   "alias_rules": [
     { "pattern": "^agent_review$", "canonical": "gpt-5.4" },
+    { "pattern": "^gpt-oss-120b$", "canonical": "vertex_ai/openai/gpt-oss-120b-maas" },
     { "pattern": "^default$", "canonical": "auto" },
     { "pattern": "^auto$", "canonical": "auto" },
     { "pattern": "^composer-1$", "canonical": "composer-1" },
