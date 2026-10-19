@@ -52,19 +52,47 @@ internal static class GitHubStarService
 
         try
         {
-            if (!File.Exists(FirstSeenPath))
+            var firstUse = EstimateFirstUse();
+            if (firstUse is null)
             {
                 Directory.CreateDirectory(AppStorage.AppDataDirectory);
                 File.WriteAllText(FirstSeenPath, DateTimeOffset.UtcNow.ToString("O"));
                 return false;
             }
-            return DateTimeOffset.TryParse(File.ReadAllText(FirstSeenPath), out var firstSeen)
-                && DateTimeOffset.UtcNow - firstSeen >= PromptDelay;
+            return DateTimeOffset.UtcNow - firstUse.Value >= PromptDelay;
         }
         catch
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Earliest sign of use: the first-seen marker or the oldest app data file, so people who
+    /// used the app long before this prompt shipped don't wait another few days.
+    /// </summary>
+    private static DateTimeOffset? EstimateFirstUse()
+    {
+        DateTimeOffset? earliest = null;
+        if (File.Exists(FirstSeenPath)
+            && DateTimeOffset.TryParse(File.ReadAllText(FirstSeenPath), out var firstSeen))
+        {
+            earliest = firstSeen;
+        }
+
+        var dir = new DirectoryInfo(AppStorage.AppDataDirectory);
+        if (!dir.Exists)
+            return earliest;
+
+        foreach (var entry in dir.EnumerateFileSystemInfos())
+        {
+            if (entry.Name.StartsWith("star-prompt", StringComparison.OrdinalIgnoreCase))
+                continue;
+            var written = new DateTimeOffset(entry.LastWriteTimeUtc, TimeSpan.Zero);
+            if (earliest is null || written < earliest)
+                earliest = written;
+        }
+        return earliest;
     }
 
     public static void DismissPrompt()
