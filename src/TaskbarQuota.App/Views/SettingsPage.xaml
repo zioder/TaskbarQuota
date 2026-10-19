@@ -349,6 +349,23 @@
                 </tk:SettingsCard.Header>
             </tk:SettingsCard>
 
+            <tk:SettingsCard x:Name="StarCard"
+                             Header="Enjoying TaskbarQuota?"
+                             Description="A GitHub star helps other people find it.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE734;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <Button x:Name="StarButton"
+                        Click="StarButton_Click"
+                        Style="{StaticResource AccentButtonStyle}"
+                        AutomationProperties.AutomationId="StarOnGitHubButton">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon x:Name="StarButtonIcon" Glyph="&#xE734;" FontSize="14"/>
+                        <TextBlock x:Name="StarButtonText" Text="Star on GitHub"/>
+                    </StackPanel>
+                </Button>
+            </tk:SettingsCard>
+
             <controls:UpdateActionBar x:Name="SettingsUpdateBar"
                                         Placement="Settings"/>
 

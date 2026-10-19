@@ -96,8 +96,13 @@ namespace TaskbarQuota.Views
             RebuildIconColorSettings();
             RefreshProviderOrder();
             VersionLabel.Text = $"Version {AppVersion.GetDisplayLabel()}";
+            if (GitHubStarService.IsMarkedStarred())
+                ShowStarred();
             Loaded += async (_, _) =>
             {
+                GitHubStarService.Changed -= OnStarStateChanged;
+                GitHubStarService.Changed += OnStarStateChanged;
+                _ = RefreshStarStateAsync();
                 ProviderDiscoveryService.Changed -= OnProviderDiscoveryChanged;
                 ProviderDiscoveryService.Changed += OnProviderDiscoveryChanged;
                 await RefreshStartupToggleAsync();
@@ -112,6 +117,7 @@ namespace TaskbarQuota.Views
                 RefreshProviderOrder();
             };
             Unloaded += (_, _) => ProviderDiscoveryService.Changed -= OnProviderDiscoveryChanged;
+            Unloaded += (_, _) => GitHubStarService.Changed -= OnStarStateChanged;
             _isInitializing = false;
         }
 
@@ -774,6 +780,55 @@ namespace TaskbarQuota.Views
             int percent = (int)System.Math.Round(e.NewValue);
             FloatingWindowOpacityLabel.Text = $"{percent}%";
             WidgetSettingsService.ApplyFloatingWindowOpacity(percent / 100d);
+        }
+
+        private async System.Threading.Tasks.Task RefreshStarStateAsync()
+        {
+            if (GitHubStarService.IsMarkedStarred())
+                return;
+            // Picks up a star given outside the app; stays silent when gh is unavailable.
+            if (await GitHubStarService.IsStarredAsync() == true)
+                ShowStarred();
+        }
+
+        private void OnStarStateChanged() =>
+            _ = DispatcherQueue.TryEnqueue(() =>
+            {
+                if (GitHubStarService.IsMarkedStarred())
+                    ShowStarred();
+            });
+
+        private async void StarButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (GitHubStarService.IsMarkedStarred())
+            {
+                _ = Windows.System.Launcher.LaunchUriAsync(GitHubStarService.RepoUri);
+                return;
+            }
+
+            StarButton.IsEnabled = false;
+            StarButtonText.Text = "Starring...";
+            var result = await GitHubStarService.StarAsync();
+            StarButton.IsEnabled = true;
+
+            if (result == GitHubStarResult.Starred)
+            {
+                ShowStarred();
+                return;
+            }
+
+            // No signed-in gh CLI: let the user star from the repo page instead.
+            StarButtonText.Text = "Star on GitHub";
+            _ = Windows.System.Launcher.LaunchUriAsync(GitHubStarService.RepoUri);
+        }
+
+        private void ShowStarred()
+        {
+            StarCard.Header = "Thanks for the star!";
+            StarCard.Description = "You starred TaskbarQuota on GitHub.";
+            StarButtonIcon.Glyph = "";
+            StarButtonText.Text = "View on GitHub";
+            StarButton.Style = (Style)Application.Current.Resources["DefaultButtonStyle"];
         }
 
         private void OnFloatingClickThroughToggled(object sender, RoutedEventArgs e)
