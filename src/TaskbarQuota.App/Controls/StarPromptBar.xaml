@@ -8,7 +8,54 @@
     mc:Ignorable="d"
     HorizontalAlignment="Stretch">
 
-    <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+    <UserControl.Resources>
+        <!-- Outline star gives way to a yellow filled star that pops in. -->
+        <Storyboard x:Name="FillStarStoryboard">
+            <DoubleAnimation Storyboard.TargetName="StarOutline"
+                             Storyboard.TargetProperty="Opacity"
+                             To="0" Duration="0:0:0.15"/>
+            <DoubleAnimation Storyboard.TargetName="StarFill"
+                             Storyboard.TargetProperty="Opacity"
+                             To="1" Duration="0:0:0.2"/>
+            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="StarFillScale"
+                                           Storyboard.TargetProperty="ScaleX">
+                <EasingDoubleKeyFrame KeyTime="0:0:0" Value="0.3"/>
+                <EasingDoubleKeyFrame KeyTime="0:0:0.25" Value="1.35">
+                    <EasingDoubleKeyFrame.EasingFunction>
+                        <CubicEase EasingMode="EaseOut"/>
+                    </EasingDoubleKeyFrame.EasingFunction>
+                </EasingDoubleKeyFrame>
+                <EasingDoubleKeyFrame KeyTime="0:0:0.45" Value="1">
+                    <EasingDoubleKeyFrame.EasingFunction>
+                        <CubicEase EasingMode="EaseInOut"/>
+                    </EasingDoubleKeyFrame.EasingFunction>
+                </EasingDoubleKeyFrame>
+            </DoubleAnimationUsingKeyFrames>
+            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="StarFillScale"
+                                           Storyboard.TargetProperty="ScaleY">
+                <EasingDoubleKeyFrame KeyTime="0:0:0" Value="0.3"/>
+                <EasingDoubleKeyFrame KeyTime="0:0:0.25" Value="1.35">
+                    <EasingDoubleKeyFrame.EasingFunction>
+                        <CubicEase EasingMode="EaseOut"/>
+                    </EasingDoubleKeyFrame.EasingFunction>
+                </EasingDoubleKeyFrame>
+                <EasingDoubleKeyFrame KeyTime="0:0:0.45" Value="1">
+                    <EasingDoubleKeyFrame.EasingFunction>
+                        <CubicEase EasingMode="EaseInOut"/>
+                    </EasingDoubleKeyFrame.EasingFunction>
+                </EasingDoubleKeyFrame>
+            </DoubleAnimationUsingKeyFrames>
+        </Storyboard>
+
+        <Storyboard x:Name="FadeOutStoryboard">
+            <DoubleAnimation Storyboard.TargetName="Card"
+                             Storyboard.TargetProperty="Opacity"
+                             To="0" Duration="0:0:0.3"/>
+        </Storyboard>
+    </UserControl.Resources>
+
+    <Border x:Name="Card"
+            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
             BorderThickness="1"
             CornerRadius="8"
@@ -16,20 +63,13 @@
             HorizontalAlignment="Stretch">
         <Grid ColumnSpacing="8">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
 
-            <FontIcon Grid.Column="0"
-                      Glyph="&#xE735;"
-                      FontSize="16"
-                      Foreground="{ThemeResource SystemFillColorCautionBrush}"
-                      VerticalAlignment="Center"/>
-
             <TextBlock x:Name="StatusText"
-                       Grid.Column="1"
+                       Grid.Column="0"
                        Text="Enjoying TaskbarQuota?"
                        Style="{StaticResource BodyStrongTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -37,16 +77,37 @@
                        VerticalAlignment="Center"/>
 
             <Button x:Name="StarButton"
-                    Grid.Column="2"
+                    Grid.Column="1"
                     MinWidth="96"
                     VerticalAlignment="Center"
                     Click="StarButton_Click"
                     AutomationProperties.AutomationId="FlyoutStarOnGitHubButton"
-                    Content="Star it"
-                    Style="{StaticResource AccentButtonStyle}"/>
+                    AutomationProperties.Name="Star TaskbarQuota on GitHub"
+                    Style="{StaticResource AccentButtonStyle}">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Grid Width="16" Height="16" VerticalAlignment="Center">
+                        <FontIcon x:Name="StarOutline"
+                                  Glyph="&#xE734;"
+                                  FontSize="16"/>
+                        <FontIcon x:Name="StarFill"
+                                  Glyph="&#xE735;"
+                                  FontSize="16"
+                                  Foreground="#FFC83D"
+                                  Opacity="0"
+                                  RenderTransformOrigin="0.5,0.5">
+                            <FontIcon.RenderTransform>
+                                <ScaleTransform x:Name="StarFillScale" ScaleX="1" ScaleY="1"/>
+                            </FontIcon.RenderTransform>
+                        </FontIcon>
+                    </Grid>
+                    <TextBlock x:Name="StarButtonText"
+                               Text="Star it"
+                               VerticalAlignment="Center"/>
+                </StackPanel>
+            </Button>
 
             <Button x:Name="DismissButton"
-                    Grid.Column="3"
+                    Grid.Column="2"
                     Width="32"
                     Height="32"
                     Padding="0"

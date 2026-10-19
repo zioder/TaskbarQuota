@@ -68,25 +68,31 @@ public sealed partial class StarPromptBar : UserControl
 
   private async void StarButton_Click(object sender, RoutedEventArgs e)
   {
-    StarButton.IsEnabled = false;
+    if (_thanking)
+      return;
+
+    // Set before the call: a successful star raises Changed, which must not hide the bar mid-thanks.
+    _thanking = true;
     DismissButton.IsEnabled = false;
-    StarButton.Content = "Starring…";
+    StarButtonText.Text = "Starring…";
 
     var result = await GitHubStarService.StarAsync();
     if (result == GitHubStarResult.Starred)
     {
-      // Hold a short thank-you before the bar goes away.
-      _thanking = true;
       StatusText.Text = "Thanks for the star!";
-      StarButton.Visibility = Visibility.Collapsed;
+      StarButtonText.Text = "Starred";
       DismissButton.Visibility = Visibility.Collapsed;
+      FillStarStoryboard.Begin();
       await Task.Delay(TimeSpan.FromSeconds(2.5));
-      _thanking = false;
-      ApplyVisibility();
+
+      FadeOutStoryboard.Begin();
+      await Task.Delay(TimeSpan.FromMilliseconds(300));
+      Visibility = Visibility.Collapsed;
       return;
     }
 
     // No signed-in gh CLI: open the repo so the user can star it there, and stop asking.
+    _thanking = false;
     _ = Launcher.LaunchUriAsync(GitHubStarService.RepoUri);
     GitHubStarService.DismissPrompt();
   }
