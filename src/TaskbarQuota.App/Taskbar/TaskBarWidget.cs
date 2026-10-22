@@ -244,7 +244,7 @@ namespace TaskbarQuota.Taskbar
         /// </summary>
         public Func<ProviderId, UsageResult?>? HydrateProvider { get; set; }
         /// <summary>Raised when any quota tile is clicked; provider-agnostic, it opens the provider flyout.</summary>
-        public event Action? Clicked;
+        public event Action<ProviderId>? Clicked;
         /// <summary>Raised when the agent activity summary is clicked, so its activity panel can open.</summary>
         public event Action<AgentActivityItem?>? ActivityClicked;
 
@@ -826,7 +826,7 @@ namespace TaskbarQuota.Taskbar
             IsHitTestVisible = false,
         };
 
-        private void OnTileClicked() => Clicked?.Invoke();
+        private void OnTileClicked(ProviderId provider) => Clicked?.Invoke(provider);
 
         private void OnActivityClicked(AgentActivityItem? item) => ActivityClicked?.Invoke(item);
 

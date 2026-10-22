@@ -321,7 +321,7 @@ namespace TaskbarQuota.Taskbar
             {
                 var window = new FloatingUsageWindow();
                 window.HydrateProvider = provider => HydrateResult(UsageCoordinator.Instance, provider);
-                window.Clicked += () => _dispatcher?.TryEnqueue(() => ToggleFlyout(window.Handle));
+                window.Clicked += provider => _dispatcher?.TryEnqueue(() => ToggleFlyout(window.Handle, provider));
                 window.ActivityClicked += item => _dispatcher?.TryEnqueue(
                     () => ToggleActivityFlyout(window.Handle, item?.Id));
                 _floatingWindow = window;
@@ -681,7 +681,7 @@ namespace TaskbarQuota.Taskbar
                         _dispatcher?.TryEnqueue(DispatcherQueuePriority.High, () => OnWidgetDestroying(destroyedWidget));
                 };
                 widget.HydrateProvider = provider => HydrateResult(UsageCoordinator.Instance, provider);
-                widget.Clicked += () => _dispatcher?.TryEnqueue(() => ToggleFlyout(widget));
+                widget.Clicked += provider => _dispatcher?.TryEnqueue(() => ToggleFlyout(widget, provider));
                 widget.ActivityClicked += item => _dispatcher?.TryEnqueue(
                     () => ToggleActivityFlyout(widget, item?.Id));
                 Widgets[target.Handle] = widget;
@@ -1049,13 +1049,13 @@ namespace TaskbarQuota.Taskbar
             }
         }
 
-        private static void ToggleFlyout(TaskBarWidget widget)
+        private static void ToggleFlyout(TaskBarWidget widget, ProviderId provider)
         {
             if (!widget.IsAlive) return;
-            ToggleFlyout(widget.Handle);
+            ToggleFlyout(widget.Handle, provider);
         }
 
-        private static void ToggleFlyout(IntPtr anchorHandle)
+        private static void ToggleFlyout(IntPtr anchorHandle, ProviderId provider)
         {
             if (anchorHandle == IntPtr.Zero) return;
             FlyoutWindow? flyout = null;
@@ -1063,7 +1063,7 @@ namespace TaskbarQuota.Taskbar
             {
                 flyout = _flyout ?? new FlyoutWindow();
                 _flyout = flyout;
-                flyout.ToggleAbove(anchorHandle);
+                flyout.ToggleAbove(anchorHandle, provider);
             }
             catch (Exception ex)
             {

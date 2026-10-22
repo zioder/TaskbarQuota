@@ -21,6 +21,8 @@ namespace TaskbarQuota.ViewModels
         private ProviderId? _lastTopProvider;
         private volatile CancellationTokenSource? _loadCts;
         private readonly Dictionary<ProviderId, string> _cardSignatures = new();
+        private readonly DashboardProviderSelection _providerSelection = new();
+        private string? _widgetCardSignature;
 
         public ObservableCollection<ProviderCardViewModel> Cards { get; } = new();
         public ObservableCollection<ProviderCardViewModel> AvailableCards { get; } = new();
@@ -75,6 +77,7 @@ namespace TaskbarQuota.ViewModels
 
         public void SelectProvider(ProviderId id)
         {
+            _providerSelection.ClearWidgetProvider();
             foreach (var card in Cards)
             {
                 if (card.ProviderId != id)
@@ -97,6 +100,23 @@ namespace TaskbarQuota.ViewModels
                 return;
             }
         }
+
+        /// <summary>
+        /// Opens the provider represented by a widget tile, even before the dashboard has loaded.
+        /// A widget-only provider gets a transient detail card without enabling its dashboard entry.
+        /// </summary>
+        public void SelectWidgetProvider(ProviderId id)
+        {
+            if (!_providerSelection.SelectWidgetProvider(id, CanSelectWidgetProvider))
+                return;
+
+            RestoreSelectedCard(SelectedCard?.ProviderId);
+        }
+
+        private static bool CanSelectWidgetProvider(ProviderId id)
+            => !ProviderDiscoveryService.IsExplicitlyDisabled(id)
+                && WidgetSettingsService.IsProviderVisible(id)
+                && UsageCoordinator.Instance.Service.Get(id) is not null;
 
         public void EnableAvailableProvider(ProviderId id)
         {
@@ -140,8 +160,11 @@ namespace TaskbarQuota.ViewModels
 
         private void RefreshCardsVisibility()
         {
+            RestoreSelectedCard(SelectedCard?.ProviderId);
             foreach (var card in Cards)
                 card.RefreshVisibility();
+            if (SelectedCard is { } selected && !Cards.Contains(selected))
+                selected.RefreshVisibility();
         }
 
         private async Task LoadProgressiveAsync(bool force)
@@ -292,7 +315,7 @@ namespace TaskbarQuota.ViewModels
                 ? Visibility.Visible
                 : Visibility.Collapsed;
 
-            RestoreSelectedCard(selectedProviderId);
+            RestoreSelectedCard(selectedProviderId, force || refreshProviderHistory, historyOverrides);
 
             UpdateDetailContentMetrics(SelectedCard);
 
@@ -357,22 +380,55 @@ namespace TaskbarQuota.ViewModels
             }
         }
 
-        private void RestoreSelectedCard(ProviderId? selectedProviderId)
+        private void RestoreSelectedCard(
+            ProviderId? selectedProviderId,
+            bool force = false,
+            IReadOnlyDictionary<ProviderId, UsageHistory>? historyOverrides = null)
         {
-            if (selectedProviderId is { } preservedId)
+            var target = _providerSelection.Resolve(
+                selectedProviderId,
+                Cards.Select(card => card.ProviderId).ToArray(),
+                CanSelectWidgetProvider);
+
+            if (target is { } providerId)
             {
                 foreach (var card in Cards)
                 {
-                    if (card.ProviderId == preservedId)
+                    if (card.ProviderId == providerId)
                     {
+                        _widgetCardSignature = null;
                         SelectedCard = card;
                         return;
                     }
                 }
+
+                // The clicked tile can be visible while its dashboard entry is hidden, or while
+                // the first progressive load is still queued. Keep that detail outside Cards so
+                // the shared main-window navigation and saved visibility remain unchanged.
+                var result = _lastResults.FirstOrDefault(result => result.Id == providerId);
+                var service = UsageCoordinator.Instance.Service;
+                if (result is null && service.TryGetCached(providerId, out var cached))
+                    result = cached;
+                if (result is null && service.Get(providerId) is { } provider)
+                    result = UsageResult.Pending(providerId, provider, "Loading...");
+
+                if (result is not null)
+                {
+                    bool isActive = providerId == UsageCoordinator.Instance.ActiveProvider;
+                    var signature = BuildCardSignature(result, isActive);
+                    if (force || SelectedCard?.ProviderId != providerId || _widgetCardSignature != signature)
+                    {
+                        UsageHistory? historyOverride = null;
+                        historyOverrides?.TryGetValue(providerId, out historyOverride);
+                        SelectedCard = new ProviderCardViewModel(result, isActive, historyOverride);
+                        _widgetCardSignature = signature;
+                    }
+                    return;
+                }
             }
 
-            if (SelectedCard is null || !Cards.Any(c => c.ProviderId == SelectedCard.ProviderId))
-                SelectedCard = Cards.Count > 0 ? Cards[0] : null;
+            _widgetCardSignature = null;
+            SelectedCard = null;
         }
 
         private void UpdateDetailContentMetrics(ProviderCardViewModel? card)
@@ -383,7 +439,10 @@ namespace TaskbarQuota.ViewModels
             double widestHeader = Cards.Count == 0
                 ? 0
                 : Cards.Max(DashboardLayoutMetrics.EstimateHeaderWidth);
-            int flyoutWidth = FlyoutLayout.ComputeLogicalWidth(Cards.Count, widestHeader);
+            if (card is not null)
+                widestHeader = Math.Max(widestHeader, DashboardLayoutMetrics.EstimateHeaderWidth(card));
+            int providerCount = Cards.Count + (card is not null && !Cards.Contains(card) ? 1 : 0);
+            int flyoutWidth = FlyoutLayout.ComputeLogicalWidth(providerCount, widestHeader);
             DetailContentWidth = flyoutWidth - FlyoutLayout.DetailContentPadding;
 
             DetailContentHeight = FlyoutLayout.FixedLogicalContentHeight;

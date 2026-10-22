@@ -88,7 +88,7 @@ public sealed partial class FloatingUsageWindow : Window
     private readonly PointerEventHandler _rootPointerCaptureLost;
     private readonly PointerEventHandler _rootPointerWheelChanged;
 
-    public event Action? Clicked;
+    public event Action<ProviderId>? Clicked;
     public event Action<AgentActivityItem?>? ActivityClicked;
 
     public bool IsShown => _shown;
@@ -570,8 +570,8 @@ public sealed partial class FloatingUsageWindow : Window
         return Math.Clamp(Math.Round(next / OpacityWheelStep) * OpacityWheelStep, min, max);
     }
 
-    private void OnContentClicked()
-        => Clicked?.Invoke();
+    private void OnContentClicked(ProviderId provider)
+        => Clicked?.Invoke(provider);
 
     private void OnDesiredSizeChanged(int logicalWidth, int logicalHeight)
     {

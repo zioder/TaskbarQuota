@@ -50,7 +50,7 @@ namespace TaskbarQuota.Controls
         /// tile that renders on every usage publish does not allocate a list per pass.</summary>
         private static readonly List<WidgetUsageRow> PlaceholderRows = [new("Usage", 0, "--")];
 
-        public event Action? Clicked;
+        public event Action<ProviderId>? Clicked;
         public event Action<DisplayMode>? DisplayModeChanged;
         public event Action<int>? DesiredHostWidthChanged;
 
@@ -176,7 +176,9 @@ namespace TaskbarQuota.Controls
                     SuppressNextClick = false;
                     return;
                 }
-                Clicked?.Invoke();
+                // Read the rendered result at click time: pooled tiles can change providers.
+                if (_lastResult is { } result)
+                    Clicked?.Invoke(result.Id);
             };
             Unloaded += (_, _) =>
             {

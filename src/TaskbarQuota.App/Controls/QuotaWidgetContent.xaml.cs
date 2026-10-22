@@ -46,7 +46,7 @@ public sealed partial class QuotaWidgetContent : UserControl
     private int _desiredLogicalHeight = HostLogicalHeight;
     private bool _built;
 
-    public event Action? Clicked;
+    public event Action<ProviderId>? Clicked;
     public event Action<AgentActivityItem?>? ActivityClicked;
     public event Action<int, int>? DesiredSizeChanged;
 
@@ -158,7 +158,7 @@ public sealed partial class QuotaWidgetContent : UserControl
             UseApplicationChromeColors = true,
         };
         summary.DesiredHostWidthChanged += _ => RecomputeLayout();
-        summary.Clicked += () => Clicked?.Invoke();
+        summary.Clicked += provider => Clicked?.Invoke(provider);
         return summary;
     }
 

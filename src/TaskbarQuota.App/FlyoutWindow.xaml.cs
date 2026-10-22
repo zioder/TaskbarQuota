@@ -146,15 +146,17 @@ namespace TaskbarQuota
             }
         }
 
-        public void ToggleAbove(IntPtr widgetHandle)
+        public void ToggleAbove(IntPtr widgetHandle, ProviderId provider)
         {
-            if (_shown && !_showingActivity && !_showingCost)
+            if (FlyoutNavigation.ShouldHideProvider(
+                _shown, _showingActivity, _showingCost, _widgetHandle, widgetHandle,
+                _dashboardViewModel.SelectedCard?.ProviderId, provider))
             {
                 Hide();
                 return;
             }
 
-            ShowAbove(widgetHandle);
+            ShowAbove(widgetHandle, provider);
         }
 
         public void ToggleActivityAbove(IntPtr widgetHandle, string? selectedActivityId = null)
@@ -205,8 +207,8 @@ namespace TaskbarQuota
             ContentFrame.Navigate(typeof(CostPage), true, new SuppressNavigationTransitionInfo());
         }
 
-        public void ShowAbove(IntPtr widgetHandle)
-            => ShowSurfaceAbove(widgetHandle, showActivity: false, selectedActivityId: null);
+        public void ShowAbove(IntPtr widgetHandle, ProviderId provider)
+            => ShowSurfaceAbove(widgetHandle, showActivity: false, selectedActivityId: null, provider);
 
         public void ShowActivityAbove(IntPtr widgetHandle, string? selectedActivityId = null)
             => ShowSurfaceAbove(widgetHandle, showActivity: true, selectedActivityId);
@@ -224,7 +226,7 @@ namespace TaskbarQuota
             ScheduleFlyoutBoundsUpdate();
         }
 
-        private void ShowSurfaceAbove(IntPtr widgetHandle, bool showActivity, string? selectedActivityId)
+        private void ShowSurfaceAbove(IntPtr widgetHandle, bool showActivity, string? selectedActivityId, ProviderId? provider = null)
         {
             _widgetHandle = widgetHandle;
             _selectedActivityId = showActivity ? selectedActivityId : null;
@@ -238,10 +240,8 @@ namespace TaskbarQuota
                 ShowProviderDashboard();
             RenderActivity(AgentActivityService.Instance.Snapshot);
 
-            // Sync the strip selection to the provider the taskbar widget is currently showing,
-            // so opening the tray highlights/details that provider rather than a stale selection.
-            if (UsageCoordinator.Instance.ActiveProvider is { } active)
-                _dashboardViewModel.SelectProvider(active);
+            if (!showActivity && provider is { } clickedProvider)
+                _dashboardViewModel.SelectWidgetProvider(clickedProvider);
 
             PresentAbove();
         }
@@ -802,7 +802,7 @@ namespace TaskbarQuota
         {
             if ((e.Action == NotifyCollectionChangedAction.Replace
                     || e.Action == NotifyCollectionChangedAction.Move)
-                && ProviderStripStillMatchesCards())
+                && ProviderStripStillMatchesProviders())
             {
                 SyncProviderStripSelection(animate: true);
                 return;
@@ -813,6 +813,14 @@ namespace TaskbarQuota
 
         private void DashboardSelectedCardChanged(ProviderCardViewModel? card)
         {
+            // A widget-only provider gets a temporary strip item in this popup, without
+            // adding it to the main dashboard's provider list.
+            if (!ProviderStripStillMatchesProviders())
+            {
+                RebuildProviderStrip();
+                return;
+            }
+
             // Option A: the flyout is sized to the tallest provider and grows only. Switching
             // providers leaves bounds unchanged (ApplyFlyoutBounds early-returns on equal bounds),
             // so the content cross-fades inside a fixed frame with no native resize.
@@ -835,6 +843,13 @@ namespace TaskbarQuota
             foreach (var card in _dashboardViewModel.Cards)
             {
                 ProviderStrip.Children.Add(CreateStripButton(card));
+                _stripIconCount++;
+            }
+
+            if (_dashboardViewModel.SelectedCard is { } selected
+                && !_providerStripItems.ContainsKey(selected.ProviderId))
+            {
+                ProviderStrip.Children.Add(CreateStripButton(selected));
                 _stripIconCount++;
             }
 
@@ -947,7 +962,10 @@ namespace TaskbarQuota
             if (sender is Button { Tag: ProviderId providerId })
             {
                 ShowProviderDashboard();
-                _dashboardViewModel.SelectProvider(providerId);
+                if (_dashboardViewModel.Cards.Any(card => card.ProviderId == providerId))
+                    _dashboardViewModel.SelectProvider(providerId);
+                else
+                    _dashboardViewModel.SelectWidgetProvider(providerId);
             }
         }
 
@@ -1003,9 +1021,12 @@ namespace TaskbarQuota
             storyboard.Begin();
         }
 
-        private bool ProviderStripStillMatchesCards()
+        private bool ProviderStripStillMatchesProviders()
         {
-            if (_providerStripItems.Count != _dashboardViewModel.Cards.Count)
+            var selected = _dashboardViewModel.SelectedCard;
+            bool outsideDashboard = selected is not null
+                && !_dashboardViewModel.Cards.Any(card => card.ProviderId == selected.ProviderId);
+            if (_providerStripItems.Count != _dashboardViewModel.Cards.Count + (outsideDashboard ? 1 : 0))
                 return false;
 
             foreach (var card in _dashboardViewModel.Cards)
@@ -1014,7 +1035,7 @@ namespace TaskbarQuota
                     return false;
             }
 
-            return true;
+            return selected is null || _providerStripItems.ContainsKey(selected.ProviderId);
         }
 
         private static Brush GetSelectionBrush(bool isSelected) => isSelected
