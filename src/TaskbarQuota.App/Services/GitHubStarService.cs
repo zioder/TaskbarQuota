@@ -32,7 +32,10 @@ internal static class GitHubStarService
     private static readonly HttpClient SharedClient = new(new SocketsHttpHandler
     {
         PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-    });
+    })
+    {
+        Timeout = TimeSpan.FromSeconds(10),
+    };
 
     // Wait a few days after first launch so the prompt never greets a brand-new user.
     private static readonly TimeSpan PromptDelay = TimeSpan.FromDays(3);
@@ -52,14 +55,7 @@ internal static class GitHubStarService
 
         try
         {
-            var firstUse = EstimateFirstUse();
-            if (firstUse is null)
-            {
-                Directory.CreateDirectory(AppStorage.AppDataDirectory);
-                File.WriteAllText(FirstSeenPath, DateTimeOffset.UtcNow.ToString("O"));
-                return false;
-            }
-            return DateTimeOffset.UtcNow - firstUse.Value >= PromptDelay;
+            return DateTimeOffset.UtcNow - GetFirstUse() >= PromptDelay;
         }
         catch
         {
@@ -68,31 +64,40 @@ internal static class GitHubStarService
     }
 
     /// <summary>
-    /// Earliest sign of use: the first-seen marker or the oldest app data file, so people who
-    /// used the app long before this prompt shipped don't wait another few days.
+    /// First use, pinned in a marker the first time it is asked for. The seed is the earliest of now,
+    /// the app data folder's creation and its oldest file, so people who used the app long before
+    /// this prompt shipped don't wait another few days. Once written, the marker alone decides, so
+    /// later rewrites of settings files can't push the date forward.
     /// </summary>
-    private static DateTimeOffset? EstimateFirstUse()
+    private static DateTimeOffset GetFirstUse()
     {
-        DateTimeOffset? earliest = null;
         if (File.Exists(FirstSeenPath)
             && DateTimeOffset.TryParse(File.ReadAllText(FirstSeenPath), out var firstSeen))
         {
-            earliest = firstSeen;
+            return firstSeen;
         }
 
+        var earliest = DateTimeOffset.UtcNow;
         var dir = new DirectoryInfo(AppStorage.AppDataDirectory);
-        if (!dir.Exists)
-            return earliest;
-
-        foreach (var entry in dir.EnumerateFileSystemInfos())
+        if (dir.Exists)
         {
-            if (entry.Name.StartsWith("star-prompt", StringComparison.OrdinalIgnoreCase))
-                continue;
-            var written = new DateTimeOffset(entry.LastWriteTimeUtc, TimeSpan.Zero);
-            if (earliest is null || written < earliest)
-                earliest = written;
+            earliest = Min(earliest, dir.CreationTimeUtc);
+            foreach (var entry in dir.EnumerateFileSystemInfos())
+            {
+                if (!entry.Name.StartsWith("star-prompt", StringComparison.OrdinalIgnoreCase))
+                    earliest = Min(earliest, entry.LastWriteTimeUtc);
+            }
         }
+
+        Directory.CreateDirectory(AppStorage.AppDataDirectory);
+        File.WriteAllText(FirstSeenPath, earliest.ToString("O"));
         return earliest;
+    }
+
+    private static DateTimeOffset Min(DateTimeOffset current, DateTime utc)
+    {
+        var candidate = new DateTimeOffset(utc, TimeSpan.Zero);
+        return candidate < current ? candidate : current;
     }
 
     public static void DismissPrompt()
@@ -122,7 +127,8 @@ internal static class GitHubStarService
             }
             return response.StatusCode == HttpStatusCode.NotFound ? false : null;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // HttpClient timeouts surface as OperationCanceledException; only caller cancellation propagates.
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             Log.Warning(ex, "GitHub star status check failed");
             return null;
@@ -150,7 +156,8 @@ internal static class GitHubStarService
             Log.Warning($"GitHub star request returned {(int)response.StatusCode}");
             return GitHubStarResult.NeedsBrowser;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // HttpClient timeouts surface as OperationCanceledException; only caller cancellation propagates.
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             Log.Warning(ex, "GitHub star request failed");
             return GitHubStarResult.NeedsBrowser;
