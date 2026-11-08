@@ -75,9 +75,16 @@ namespace TaskbarQuota
         /// </summary>
         public void ReapplySelection()
         {
+            bool wasSyncing = IsSyncing;
             IsSyncing = true;
-            SyncSelection();
-            IsSyncing = false;
+            try
+            {
+                SyncSelection();
+            }
+            finally
+            {
+                IsSyncing = wasSyncing;
+            }
         }
 
         public void SetProviderPageActive(bool active)
@@ -85,9 +92,16 @@ namespace TaskbarQuota
             _providerPageActive = active;
             if (!active)
                 _requestedProviderId = null;
+            bool wasSyncing = IsSyncing;
             IsSyncing = true;
-            SyncSelection();
-            IsSyncing = false;
+            try
+            {
+                SyncSelection();
+            }
+            finally
+            {
+                IsSyncing = wasSyncing;
+            }
         }
 
         public bool SelectFromNavigation(NavigationViewSelectionChangedEventArgs args)
@@ -139,29 +153,36 @@ namespace TaskbarQuota
 
         private void Rebuild()
         {
+            bool wasSyncing = IsSyncing;
             IsSyncing = true;
-            _providerGroup.MenuItems.Clear();
-            foreach (var card in _viewModel.Cards)
+            try
             {
-                var item = new NavigationViewItem
+                _providerGroup.MenuItems.Clear();
+                foreach (var card in _viewModel.Cards)
                 {
-                    Content = card.DisplayName,
-                    Tag = card.ProviderId,
-                    Icon = CreateProviderIcon(card.ProviderId),
-                    HorizontalAlignment = HorizontalAlignment.Stretch,
-                };
-                ApplyPinBadge(item, card.ProviderId, card.DisplayName);
-                _providerGroup.MenuItems.Add(item);
-            }
+                    var item = new NavigationViewItem
+                    {
+                        Content = card.DisplayName,
+                        Tag = card.ProviderId,
+                        Icon = CreateProviderIcon(card.ProviderId),
+                        HorizontalAlignment = HorizontalAlignment.Stretch,
+                    };
+                    ApplyPinBadge(item, card.ProviderId, card.DisplayName);
+                    _providerGroup.MenuItems.Add(item);
+                }
 
-            if (_requestedProviderId is ProviderId requested
-                && !_viewModel.Cards.Any(card => card.ProviderId == requested))
+                if (_requestedProviderId is ProviderId requested
+                    && !_viewModel.Cards.Any(card => card.ProviderId == requested))
+                {
+                    _requestedProviderId = null;
+                }
+
+                SyncSelection();
+            }
+            finally
             {
-                _requestedProviderId = null;
+                IsSyncing = wasSyncing;
             }
-
-            SyncSelection();
-            IsSyncing = false;
         }
 
         private void ViewModel_SelectedCardChanged(ProviderCardViewModel? card)
@@ -169,9 +190,16 @@ namespace TaskbarQuota
             if (card is null || IsSyncing)
                 return;
 
+            bool wasSyncing = IsSyncing;
             IsSyncing = true;
-            SyncSelection();
-            IsSyncing = false;
+            try
+            {
+                SyncSelection();
+            }
+            finally
+            {
+                IsSyncing = wasSyncing;
+            }
         }
 
         private void SyncSelection()
