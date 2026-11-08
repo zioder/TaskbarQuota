@@ -203,6 +203,9 @@
                                 <StackPanel Orientation="Horizontal" Spacing="12" Padding="8">
                                     <FontIcon Glyph="&#xE700;" FontSize="14" Opacity="0.6"
                                               IsHitTestVisible="False"/>
+                                    <controls:ProviderAvatar ProviderId="{x:Bind Id}"
+                                                             ForegroundBrush="{ThemeResource TextFillColorPrimaryBrush}"
+                                                             Width="20" Height="20" IsHitTestVisible="False"/>
                                     <TextBlock Text="{x:Bind DisplayName}" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </DataTemplate>
