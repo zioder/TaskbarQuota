@@ -1454,7 +1454,7 @@ namespace TaskbarQuota.Controls
                 double iconWidth = row.GlyphData != null ? RowLabelGlyphReserve : 0;
                 widestLabel = Math.Max(widestLabel, MeasureTextWidth(BaseLabelText(row, mode), labelFont) + iconWidth);
                 if (!string.IsNullOrWhiteSpace(row.ResetDescription))
-                    widestReset = Math.Max(widestReset, MeasureTextWidth($"({CompactResetDescription(row.ResetDescription)})", labelFont));
+                    widestReset = Math.Max(widestReset, MeasureTextWidth($"({row.ResetDescription})", labelFont));
             }
 
             double widestValue = 0;
@@ -1695,7 +1695,7 @@ namespace TaskbarQuota.Controls
             if (string.IsNullOrWhiteSpace(row.ResetDescription))
                 return CreateText("", 0.9, TextAlignment.Left, fontSize);
 
-            var reset = CreateText($"({CompactResetDescription(row.ResetDescription)})", 0.9, TextAlignment.Left, fontSize);
+            var reset = CreateText($"({row.ResetDescription})", 0.9, TextAlignment.Left, fontSize);
             reset.Foreground = ResetBrush(row.ResetDescription);
             reset.TextTrimming = TextTrimming.None;
             return reset;
@@ -1860,9 +1860,6 @@ namespace TaskbarQuota.Controls
             textBlock.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             return Math.Ceiling(textBlock.DesiredSize.Width);
         }
-
-        private static string CompactResetDescription(string resetDescription)
-            => resetDescription == "now" ? "now" : resetDescription.Replace(" ", "", StringComparison.Ordinal);
 
         private static string FormatLocalDateTime(DateTimeOffset? timestamp)
         {
