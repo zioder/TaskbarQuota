@@ -491,7 +491,8 @@ namespace TaskbarQuota.Usage
         {
             if (left is null || right is null)
                 return left is null && right is null;
-            if (left.AvailableCount != right.AvailableCount || left.Credits.Count != right.Credits.Count)
+            if (left.AvailableCount != right.AvailableCount || left.Credits.Count != right.Credits.Count
+                || left.CachedAt != right.CachedAt)
                 return false;
 
             for (int i = 0; i < left.Credits.Count; i++)
@@ -634,7 +635,7 @@ namespace TaskbarQuota.Usage
             {
                 Id = Id,
                 Provider = Provider,
-                Fetch = Fetch,
+                Fetch = CurrentFetch(Fetch),
                 Error = Error,
                 ErrorKind = ErrorKind,
                 IsPending = IsPending,
@@ -644,5 +645,14 @@ namespace TaskbarQuota.Usage
                 ObservedAt = observedAt,
                 Source = Source,
             };
+
+        private static ProviderFetchResult? CurrentFetch(ProviderFetchResult? fetch)
+        {
+            if (fetch?.Usage.ResetCredits is not { IsCached: true } cached)
+                return fetch;
+            var current = cached.CurrentAt(DateTimeOffset.UtcNow);
+            return ReferenceEquals(current, cached) ? fetch : new ProviderFetchResult(
+                fetch.Usage.CopyWithResetCredits(current), fetch.SourceLabel, fetch.FetchedAt);
+        }
     }
 }

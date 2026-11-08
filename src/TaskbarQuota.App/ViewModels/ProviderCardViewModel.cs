@@ -385,13 +385,14 @@ namespace TaskbarQuota.ViewModels
 
                     if (u.ResetCredits is { } resetCredits)
                     {
-                        ResetCreditsCountText = FormatAvailableResetCredits(resetCredits.AvailableCount);
+                        ResetCreditsCountText = FormatAvailableResetCredits(resetCredits.AvailableCount)
+                            + (resetCredits.IsCached ? " (last known)" : string.Empty);
                         ResetCreditsGrantedText = FormatResetCreditTimes(resetCredits.Credits, static c => c.GrantedAt);
                         ResetCreditsExpiresText = FormatResetCreditTimes(resetCredits.Credits, static c => c.ExpiresAt);
                         for (int i = 0; i < resetCredits.Credits.Count; i++)
                             resetCreditItems.Add(new ResetCreditViewModel(i + 1, resetCredits.Credits[i]));
                         ResetCreditsVisibility = Visibility.Visible;
-                        ResetCreditsOpacity = resetCredits.AvailableCount > 0 ? 1.0 : 0.55;
+                        ResetCreditsOpacity = resetCredits.IsCached ? 0.7 : resetCredits.AvailableCount > 0 ? 1.0 : 0.55;
                     }
                 }
 

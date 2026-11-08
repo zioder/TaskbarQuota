@@ -143,7 +143,7 @@ namespace TaskbarQuota.Usage
                     ? new ResetCreditsSnapshot(
                         rc.AvailableCount,
                         rc.Credits?.Select(c => new ResetCreditGrant(c.Status ?? string.Empty, c.GrantedAt, c.ExpiresAt)).ToList()
-                            ?? new List<ResetCreditGrant>())
+                            ?? new List<ResetCreditGrant>(), rc.CachedAt).CurrentAt(DateTimeOffset.UtcNow)
                     : null,
             };
 
@@ -182,6 +182,7 @@ namespace TaskbarQuota.Usage
                 ? new StoredResetCredits
                 {
                     AvailableCount = rc.AvailableCount,
+                    CachedAt = rc.CachedAt,
                     Credits = rc.Credits
                         .Select(c => new StoredResetCredit { Status = c.Status, GrantedAt = c.GrantedAt, ExpiresAt = c.ExpiresAt })
                         .ToList(),
@@ -306,6 +307,7 @@ namespace TaskbarQuota.Usage
         private sealed class StoredResetCredits
         {
             public int AvailableCount { get; set; }
+            public DateTimeOffset? CachedAt { get; set; }
             public List<StoredResetCredit>? Credits { get; set; }
         }
 

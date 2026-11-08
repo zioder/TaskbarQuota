@@ -569,7 +569,7 @@ namespace TaskbarQuota.Controls
                     rows.Add(new WidgetUsageRow(
                         "Resets",
                         0,
-                        resetCredits.AvailableCount.ToString("N0", CultureInfo.InvariantCulture),
+                        resetCredits.AvailableCount.ToString("N0", CultureInfo.InvariantCulture) + (resetCredits.IsCached ? "*" : string.Empty),
                         expiresIn,
                         HasBar: false));
                 }
@@ -978,6 +978,8 @@ namespace TaskbarQuota.Controls
             {
                 $"Reset Credits: {resetCredits.AvailableCount.ToString("N0", CultureInfo.InvariantCulture)} available",
             };
+            if (resetCredits.CachedAt is { } cachedAt)
+                lines.Add($"Couldn't refresh reset credits. Last confirmed at {cachedAt.ToLocalTime():g}.");
 
             int shown = 0;
             for (int i = 0; i < resetCredits.Credits.Count && shown < 3; i++)
@@ -1795,6 +1797,7 @@ namespace TaskbarQuota.Controls
             if (usage.ResetCredits is { } resetCredits)
             {
                 parts.Add(resetCredits.AvailableCount.ToString(CultureInfo.InvariantCulture));
+                parts.Add(resetCredits.CachedAt?.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty);
                 foreach (var credit in resetCredits.Credits)
                 {
                     parts.Add(credit.Status);

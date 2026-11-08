@@ -95,6 +95,28 @@ public class UsageSnapshotStoreTests : IDisposable
         Assert.Empty(UsageSnapshotStore.Load(_dir, id => Provider(id)));
     }
 
+    [Theory]
+    [InlineData(-1, true)]
+    [InlineData(-11, false)]
+    [InlineData(1, false)]
+    public void SaveThenLoad_PreservesOnlyRecentCachedResetCredits(int minutes, bool expectCredits)
+    {
+        var result = Result(ProviderId.Codex, 34, 50, DateTimeOffset.UtcNow.AddDays(1));
+        var cachedAt = DateTimeOffset.UtcNow.AddMinutes(minutes);
+        result.Fetch!.Usage.ResetCredits = new ResetCreditsSnapshot(2, [], cachedAt);
+        UsageSnapshotStore.Save(_dir, new Dictionary<ProviderId, UsageResult> { [ProviderId.Codex] = result });
+
+        var restored = UsageSnapshotStore.Load(_dir, Provider)[ProviderId.Codex];
+        if (expectCredits)
+        {
+            Assert.Equal(2, restored.Fetch!.Usage.ResetCredits!.AvailableCount);
+            Assert.Equal(cachedAt, restored.Fetch.Usage.ResetCredits.CachedAt);
+        }
+        else
+            Assert.Null(restored.Fetch!.Usage.ResetCredits);
+        Assert.Equal(34, restored.Fetch!.Usage.Primary.UsedPercent);
+    }
+
     [Fact]
     public void Load_DropsSnapshotNotConfirmedWithinMaxRestoreAge()
     {
