@@ -51,6 +51,7 @@ namespace TaskbarQuota.ViewModels
                 ? Visibility.Collapsed
                 : Visibility.Visible;
             WidgetSettingsService.PercentageModeChanged += OnPercentageModeChanged;
+            WidgetSettingsService.UsageBarColorModeChanged += OnPercentageModeChanged;
             WidgetSettingsService.Changed += OnWidgetSettingsChanged;
             WidgetSettingsService.DashboardCompositionChanged += OnDashboardCompositionChanged;
             UsageCoordinator.Instance.StateChanged += OnCoordinatorStateChanged;
@@ -628,6 +629,7 @@ namespace TaskbarQuota.ViewModels
         public void Dispose()
         {
             WidgetSettingsService.PercentageModeChanged -= OnPercentageModeChanged;
+            WidgetSettingsService.UsageBarColorModeChanged -= OnPercentageModeChanged;
             WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
             WidgetSettingsService.DashboardCompositionChanged -= OnDashboardCompositionChanged;
             UsageCoordinator.Instance.StateChanged -= OnCoordinatorStateChanged;

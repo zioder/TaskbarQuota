@@ -85,6 +85,7 @@ namespace TaskbarQuota.Views
                 _ => 0,
             };
             PercentageModeCombo.SelectedIndex = WidgetSettingsService.CurrentPercentageMode == PercentageDisplayMode.Remaining ? 1 : 0;
+            UsageBarColorModeCombo.SelectedIndex = WidgetSettingsService.CurrentUsageBarColorMode == UsageBarColorMode.QuotaLevel ? 0 : 1;
             StartupToggle.IsEnabled = false;
             ApplyQuotaAlertSettingsToControls();
             AutoHideUnavailableToggle.IsOn = WidgetSettingsService.AutoHideUnavailable;
@@ -949,6 +950,15 @@ namespace TaskbarQuota.Views
                 _updatingStartupToggle = false;
                 StartupToggle.IsEnabled = true;
             }
+        }
+
+        private void OnUsageBarColorModeChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_isInitializing)
+                return;
+
+            if (UsageBarColorModeCombo.SelectedItem is ComboBoxItem item && item.Tag is string tag)
+                WidgetSettingsService.Apply(tag == "QuotaLevel" ? UsageBarColorMode.QuotaLevel : UsageBarColorMode.UsageForecast);
         }
 
         private void OnPercentageModeChanged(object sender, SelectionChangedEventArgs e)
