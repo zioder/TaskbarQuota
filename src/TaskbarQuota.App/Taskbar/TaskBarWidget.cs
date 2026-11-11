@@ -874,8 +874,6 @@ namespace TaskbarQuota.Taskbar
             var compact = snapshot.CompactItems;
             bool unchanged = IsActivitySnapshotUnchanged(activitySnapshot, snapshot, appliedCompactActivity, compact);
             activitySnapshot = snapshot;
-            if (!unchanged)
-                appliedCompactActivity = compact;
             // Transcript discovery publishes about once per second. Rebuilding and resizing the separate
             // activity island while its pointer is captured makes the native drag visibly stutter and can
             // change which gap fits underneath the cursor. Keep the newest snapshot and render it as soon
@@ -884,6 +882,7 @@ namespace TaskbarQuota.Taskbar
                 return;
             if (unchanged)
                 return;
+            appliedCompactActivity = compact;
             activitySummary?.Apply(snapshot, activeTileProvider);
             foreach (var tile in tiles)
                 tile?.SetAgentActivity(snapshot);
@@ -1998,6 +1997,7 @@ namespace TaskbarQuota.Taskbar
             {
                 draggingActivity = false;
                 EndUserRepositioning();
+                RenderDeferredActivitySnapshot();
             }
         }
 

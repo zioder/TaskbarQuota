@@ -1053,14 +1053,14 @@ namespace TaskbarQuota
             else if (!await _tickGate.WaitAsync(0).ConfigureAwait(false))
                 return;
 
+            ProviderId target = ProviderId.Codex;
+            ProviderId? detected = null;
+            ProviderSource detectedSource = ProviderSource.Unknown;
+            SynaraStateReader.SynaraSelection? detectedSynaraHost;
             try
             {
                 // Phase 1 — detection. Run the slow foreground/WMI scan outside the gate so Synara's
                 // file-watcher path can publish provider switches while a tick is mid-detect.
-                ProviderId target;
-                ProviderId? detected;
-                ProviderSource detectedSource;
-                SynaraStateReader.SynaraSelection? detectedSynaraHost;
                 try
                 {
                     detected = _detector.Detect(out var avoidedHeavyTerminalScan);
@@ -1178,6 +1178,11 @@ namespace TaskbarQuota
                 {
                     _detectGate.Release();
                 }
+            }
+            finally
+            {
+                _tickGate.Release();
+            }
 
             // Phase 2 — usage fetch (may hit the network). Gated separately and skipped if a fetch is
             // already running, so a slow fetch can never stall detection of the next provider switch.
@@ -1217,11 +1222,6 @@ namespace TaskbarQuota
             finally
             {
                 _gate.Release();
-            }
-            }
-            finally
-            {
-                _tickGate.Release();
             }
         }
 

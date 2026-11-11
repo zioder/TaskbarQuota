@@ -28,6 +28,8 @@ namespace TaskbarQuota.Taskbar
         private volatile int _geometryGeneration;
         private int _widgetsRectCommittedGeneration = -1;
         private int _taskRectsCommittedGeneration = -1;
+        private int _widgetsScanId;
+        private int _taskRectsScanId;
 
         private bool widgetsButtonEnabled;
         private bool taskbarCentered;
@@ -119,6 +121,7 @@ namespace TaskbarQuota.Taskbar
                 return widgetsCached;
 
             int generation = _geometryGeneration;
+            int scanId = Interlocked.Increment(ref _widgetsScanId);
             try
             {
                 _automation ??= new CUIAutomation();
@@ -142,12 +145,9 @@ namespace TaskbarQuota.Taskbar
                 if (!IsOnTaskbarBand(rect))
                     return CachedWidgetsButtonRect();
 
-                if (generation != _geometryGeneration)
-                    return CachedWidgetsButtonRect();
+                if (!TryCommitWidgetsRect(scanId, generation, rect))
+                    return CachedWidgetsButtonRect() ?? _lastWidgetsButtonRect;
 
-                _lastWidgetsButtonRect = rect;
-                _lastWidgetsButtonRectAt = DateTime.UtcNow;
-                _widgetsRectCommittedGeneration = generation;
                 return rect;
             }
             catch (Exception ex)
@@ -187,6 +187,7 @@ namespace TaskbarQuota.Taskbar
                 return cached;
 
             int generation = _geometryGeneration;
+            int scanId = Interlocked.Increment(ref _taskRectsScanId);
             try
             {
                 _automation ??= new CUIAutomation();
@@ -220,12 +221,9 @@ namespace TaskbarQuota.Taskbar
                     rects.Add(rect);
                 }
 
-                if (generation != _geometryGeneration)
-                    return CachedTaskButtonRects();
+                if (!TryCommitTaskRects(scanId, generation, rects))
+                    return CachedTaskButtonRects() ?? _lastTaskButtonRects;
 
-                _lastTaskButtonRects = rects;
-                _lastTaskButtonRectsAt = DateTime.UtcNow;
-                _taskRectsCommittedGeneration = generation;
                 return rects;
             }
             catch (Exception ex)
@@ -253,6 +251,32 @@ namespace TaskbarQuota.Taskbar
             => _lastTaskButtonRects is { } rects && DateTime.UtcNow - _lastTaskButtonRectsAt < TaskButtonRectsMaxAge
                 ? rects
                 : null;
+
+        private bool TryCommitWidgetsRect(int scanId, int generation, RECT rect)
+        {
+            if (generation != _geometryGeneration)
+                return false;
+            if (scanId != Volatile.Read(ref _widgetsScanId))
+                return false;
+
+            _lastWidgetsButtonRect = rect;
+            _lastWidgetsButtonRectAt = DateTime.UtcNow;
+            _widgetsRectCommittedGeneration = generation;
+            return true;
+        }
+
+        private bool TryCommitTaskRects(int scanId, int generation, List<RECT> rects)
+        {
+            if (generation != _geometryGeneration)
+                return false;
+            if (scanId != Volatile.Read(ref _taskRectsScanId))
+                return false;
+
+            _lastTaskButtonRects = rects;
+            _lastTaskButtonRectsAt = DateTime.UtcNow;
+            _taskRectsCommittedGeneration = generation;
+            return true;
+        }
 
         private bool IsTaskbarHidden()
         {
