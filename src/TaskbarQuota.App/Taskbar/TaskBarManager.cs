@@ -540,6 +540,12 @@ namespace TaskbarQuota.Taskbar
                 widget.UpdatePosition(resetManualPosition: true);
         }
 
+        /// <summary>
+        /// Five-second UI heartbeat for the active usage surface. On the taskbar path it ensures widgets exist,
+        /// reconciles pin budget and topology recovery, then refreshes each tile's layout from a
+        /// <see cref="TakeWidgetSnapshot"/> pass so geometry changes on a crowded bar can be picked up without
+        /// allocating on every tick.
+        /// </summary>
         private static void StartWidgetHealthTimer()
         {
             if (_widgetHealthTimer != null)
@@ -1172,6 +1178,12 @@ namespace TaskbarQuota.Taskbar
         private static void OnStateChanged(UsageResult result)
             => _dispatcher?.TryEnqueue(DispatcherQueuePriority.High, () => ApplyStateChanged(result));
 
+        /// <summary>
+        /// Applies a coordinator usage publish to every live taskbar widget (or the floating HUD). Walks widgets
+        /// via <see cref="TakeWidgetSnapshot"/> so a callback cannot mutate <see cref="Widgets"/> under the
+        /// loop, and pairs <see cref="ReleaseWidgetSnapshot"/> so a re-entrant publish during the pass cannot
+        /// clear the list an outer iteration still owns.
+        /// </summary>
         private static void ApplyStateChanged(UsageResult result)
         {
             var coordinator = UsageCoordinator.Instance;
@@ -1254,6 +1266,10 @@ namespace TaskbarQuota.Taskbar
             return buffer;
         }
 
+        /// <summary>
+        /// Pops one nesting level opened by <see cref="TakeWidgetSnapshot"/>. Call from a finally block after
+        /// iterating the returned list so depth stays balanced even when widget callbacks re-enter snapshotting.
+        /// </summary>
         internal static void ReleaseWidgetSnapshot()
         {
             if (_widgetSnapshotDepth > 0)
@@ -1351,6 +1367,10 @@ namespace TaskbarQuota.Taskbar
             });
         }
 
+        /// <summary>
+        /// Tears down timers, watchers, tray UI, and widget/floating surfaces during application quit. Resets
+        /// widget snapshot scratch buffers so a late timer tick cannot observe stale depth after shutdown.
+        /// </summary>
         private static void OnQuitting()
         {
             UsageCoordinator.Instance.StateChanged -= OnStateChanged;
