@@ -23,6 +23,9 @@ namespace TaskbarQuota.Usage.Providers
     {
         private const string BaseUrl = "https://cursor.com";
         private const string AppApiBaseUrl = "https://api2.cursor.sh";
+        private const string SandUsageAppPath = "/aiserver.v1.DashboardService/GetSandUsageStatus";
+        private const string SandUsageWebUrl = "https://cursor.com/api/dashboard/get-sand-usage-status";
+        internal const string GrokBotWindowId = "cursor-grok-bot";
         private const string CursorAuthClientId = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
         private static readonly string[] CookieDomains = { "cursor.com", "cursor.sh" };
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
@@ -49,6 +52,14 @@ namespace TaskbarQuota.Usage.Providers
                 {
                     throw;
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (OperationCanceledException ex)
+                {
+                    Diagnostics.Log.Debug($"Cursor app-token usage timed out; falling back to web cookies: {ex.Message}");
+                }
                 catch (Exception ex)
                 {
                     Diagnostics.Log.Debug($"Cursor app-token usage failed; falling back to web cookies: {ex.Message}");
@@ -69,6 +80,7 @@ namespace TaskbarQuota.Usage.Providers
             using (me)
             {
                 var fetch = Build(summary.RootElement, me?.RootElement);
+                await TryAttachGrokBotUsageAsync(fetch.Usage, cookie, bearerToken: null, ct).ConfigureAwait(false);
                 await TryAttachDashboardHistoryAsync(fetch.Usage, new[] { cookie }, ct).ConfigureAwait(false);
                 return fetch;
             }
@@ -148,6 +160,9 @@ namespace TaskbarQuota.Usage.Providers
             }
         }
 
+        /// <summary>
+        /// Loads usage via the desktop app Connect API, then best-effort Grok Bot and profile enrichment.
+        /// </summary>
         private static async Task<ProviderFetchResult> FetchUsageWithAppTokenAsync(CursorAppAuth auth, CancellationToken ct)
         {
             var token = auth.AccessToken ?? throw new ProviderException(ProviderErrorKind.AuthRequired, "Cursor app token missing");
@@ -173,8 +188,128 @@ namespace TaskbarQuota.Usage.Providers
                 }
                 catch { }
 
+                await TryAttachGrokBotUsageAsync(
+                    fetch.Usage,
+                    DashboardSessionCookie(token),
+                    bearerToken: token,
+                    ct).ConfigureAwait(false);
                 return fetch;
             }
+        }
+
+        /// <summary>
+        /// Grok Bot (Sand) weekly allowance — separate from plan auto/api meters; best-effort so
+        /// missing entitlements never break the main Cursor fetch.
+        /// </summary>
+        private static async Task TryAttachGrokBotUsageAsync(
+            UsageSnapshot usage,
+            string? cookieHeader,
+            string? bearerToken,
+            CancellationToken ct)
+        {
+            try
+            {
+                JsonDocument? doc = null;
+                if (bearerToken is { Length: > 0 })
+                {
+                    try { doc = await PostAppJson(SandUsageAppPath, bearerToken, "{}", ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (OperationCanceledException ex)
+                    {
+                        Diagnostics.Log.Debug($"Cursor Grok Bot app API timed out: {ex.Message}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Diagnostics.Log.Debug($"Cursor Grok Bot app API failed: {ex.Message}");
+                    }
+                }
+
+                if (doc is null && !string.IsNullOrWhiteSpace(cookieHeader))
+                {
+                    try { doc = await PostWebJson(SandUsageWebUrl, cookieHeader, "{}", ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (OperationCanceledException ex)
+                    {
+                        Diagnostics.Log.Debug($"Cursor Grok Bot web API timed out: {ex.Message}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Diagnostics.Log.Debug($"Cursor Grok Bot web API failed: {ex.Message}");
+                    }
+                }
+
+                if (doc is null)
+                    return;
+
+                using (doc)
+                {
+                    if (ParseGrokBotWindow(doc.RootElement) is not { } window)
+                        return;
+                    usage.ExtraRateWindows.RemoveAll(w => w.Id == GrokBotWindowId);
+                    usage.ExtraRateWindows.Add(window);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Diagnostics.Log.Debug($"Cursor Grok Bot usage unavailable: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Parses <c>GetSandUsageStatus</c> (REST or Connect JSON). Returns null when the account has
+        /// no Grok Bot grant or the payload is unusable.
+        /// </summary>
+        internal static NamedRateWindow? ParseGrokBotWindow(JsonElement root)
+        {
+            if (GetBool(root, "usesPooledEnterpriseAllowance", "uses_pooled_enterprise_allowance") == true)
+                return null;
+            if (GetBool(root, "includedLimitZero", "included_limit_zero") == true)
+                return null;
+            if (GetBool(root, "hasNonZeroIncludedLimit", "has_non_zero_included_limit") == false)
+                return null;
+
+            if (GetNumEither(root, "usagePercent", "usage_percent") is not double used)
+                return null;
+
+            var resetAt = ParseDateEither(root, "nextResetTimestampUtc", "next_reset_timestamp_utc");
+            var resetDescription = CodexProvider.FormatResetCountdown(resetAt);
+            var window = new RateWindow(
+                DisplayPercent(used),
+                QuotaWindowLength.Weekly,
+                resetAt,
+                resetDescription,
+                label: "Grok Bot");
+            return new NamedRateWindow(GrokBotWindowId, "Grok Bot", window);
+        }
+
+        /// <summary>POST JSON to a cursor.com dashboard route using a session cookie header.</summary>
+        private static async Task<JsonDocument> PostWebJson(string url, string cookie, string jsonBody, CancellationToken ct)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = new StringContent(jsonBody, Encoding.UTF8, "application/json"),
+            };
+            req.Headers.TryAddWithoutValidation("Cookie", cookie);
+            req.Headers.TryAddWithoutValidation("Origin", BaseUrl);
+            req.Headers.TryAddWithoutValidation("Referer", BaseUrl + "/bot");
+            req.Headers.Accept.ParseAdd("application/json");
+            using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
+            if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                throw new ProviderException(ProviderErrorKind.AuthRequired, "Cursor cookies expired. Sign in again.");
+            if (!resp.IsSuccessStatusCode)
+                throw new ProviderException(ProviderErrorKind.Other, $"Cursor API returned {(int)resp.StatusCode}");
+            var s = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            return await JsonDocument.ParseAsync(s, cancellationToken: ct).ConfigureAwait(false);
         }
 
         private static string ResolveCookieHeader()
@@ -429,6 +564,42 @@ namespace TaskbarQuota.Usage.Providers
                 JsonValueKind.String when double.TryParse(v.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var d) => d,
                 _ => null,
             };
+        }
+
+        /// <summary>Reads a numeric field accepting camelCase or snake_case names.</summary>
+        private static double? GetNumEither(JsonElement e, string primary, string alternate)
+            => GetNum(e, primary) ?? GetNum(e, alternate);
+
+        /// <summary>Reads a boolean field accepting camelCase or snake_case names.</summary>
+        private static bool? GetBool(JsonElement e, string primary, string alternate)
+        {
+            if (!TryGetEitherProperty(e, primary, alternate, out var v))
+                return null;
+            return v.ValueKind switch
+            {
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                _ => null,
+            };
+        }
+
+        /// <summary>Reads an ISO date string accepting camelCase or snake_case property names.</summary>
+        private static DateTimeOffset? ParseDateEither(JsonElement e, string primary, string alternate)
+        {
+            if (TryGetEitherProperty(e, primary, alternate, out var v) && v.ValueKind == JsonValueKind.String)
+                return ParseDate(v.GetString());
+            return null;
+        }
+
+        /// <summary>Resolves a JSON property by primary or alternate name.</summary>
+        private static bool TryGetEitherProperty(JsonElement e, string primary, string alternate, out JsonElement value)
+        {
+            if (e.TryGetProperty(primary, out value))
+                return true;
+            if (e.TryGetProperty(alternate, out value))
+                return true;
+            value = default;
+            return false;
         }
 
         // Cursor displays any positive fractional usage as at least 1%.

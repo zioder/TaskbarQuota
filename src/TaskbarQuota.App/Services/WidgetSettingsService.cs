@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using TaskbarQuota.Usage;
+using TaskbarQuota.Usage.Providers;
 
 namespace TaskbarQuota;
 
@@ -51,6 +52,7 @@ public static class WidgetSettingsService
     public const string RowModelSpecific = "model";
     public const string RowMonthly = "monthly";
     public const string RowExtra = "extra";
+    public const string RowCursorGrokBot = CursorProvider.GrokBotWindowId;
     public const string RowUsage = "usage";
     public const string RowBalance = "balance";
     public const string RowCredits = "credits";
@@ -503,13 +505,29 @@ public static class WidgetSettingsService
     public static string FormatDisplayPercent(double usedPercent)
         => $"{DisplayPercent(usedPercent):0}%";
 
+    /// <summary>
+    /// Whether a provider usage row is shown on the widget or dashboard.
+    /// Grok Bot inherits legacy <see cref="RowExtra"/> visibility when no dedicated key exists.
+    /// </summary>
     public static bool IsRowVisible(ProviderId provider, string rowId)
     {
         var key = RowVisibilityKey(provider, rowId);
-        return RowVisibility.TryGetValue(key, out bool visible)
-            ? visible
-            : DefaultRowVisible(provider, rowId);
+        if (RowVisibility.TryGetValue(key, out bool visible))
+            return visible;
+
+        if (provider == ProviderId.Cursor
+            && rowId == RowCursorGrokBot
+            && RowVisibility.TryGetValue(RowVisibilityKey(provider, RowExtra), out bool legacyExtra))
+            return legacyExtra;
+
+        return DefaultRowVisible(provider, rowId);
     }
+
+    /// <summary>Maps a named extra window to its widget row id (Grok Bot uses its own id, not generic extra).</summary>
+    public static string RowIdForNamedExtra(ProviderId provider, NamedRateWindow extra)
+        => provider == ProviderId.Cursor && extra.Id == RowCursorGrokBot
+            ? RowCursorGrokBot
+            : RowExtra;
 
     public static bool TryGetRowVisibilityOverride(ProviderId provider, string rowId, out bool visible)
         => RowVisibility.TryGetValue(RowVisibilityKey(provider, rowId), out visible);
@@ -815,6 +833,7 @@ public static class WidgetSettingsService
                 new(RowSecondary, "Auto + Composer"),
                 new(RowModelSpecific, "API usage"),
                 new(RowPrimary, "Total usage"),
+                new(RowCursorGrokBot, "Grok Bot"),
             ],
             ProviderId.Codex =>
             [
@@ -1312,6 +1331,7 @@ public static class WidgetSettingsService
 
     private static bool DefaultRowVisible(ProviderId provider, string rowId)
         => provider == ProviderId.Zai && rowId is RowExtra or RowCredits
+            || provider == ProviderId.Cursor && rowId == RowCursorGrokBot
             || provider != ProviderId.Codex
               || rowId == RowPrimary
               || rowId == RowSecondary
