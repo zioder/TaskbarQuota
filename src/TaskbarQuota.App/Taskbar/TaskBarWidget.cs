@@ -2720,6 +2720,7 @@ namespace TaskbarQuota.Taskbar
                 activityEmptySnapshotTimer.Stop();
                 activitySnapshot = pending;
             }
+            appliedCompactActivity = activitySnapshot.CompactItems;
             activitySummary.Apply(activitySnapshot, activeTileProvider);
             foreach (var tile in tiles)
                 tile?.SetAgentActivity(activitySnapshot);

@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 
 namespace TaskbarQuota.ActiveApp;
 
@@ -12,11 +13,11 @@ internal sealed class UiaTextCache
     private readonly long _minIntervalMs;
     private readonly long _maxStaleMs;
     private readonly object _gate = new();
+    private readonly SemaphoreSlim _readSerial = new(1, 1);
     private IntPtr _hwnd;
     private string? _discriminator;
     private string? _cached;
     private long _atTicks;
-    private int _readGeneration;
 
     internal UiaTextCache(int minIntervalMs, int maxStaleMs)
     {
@@ -26,50 +27,59 @@ internal sealed class UiaTextCache
 
     internal string? Read(IntPtr hwnd, string? discriminator, Func<string?> read)
     {
-        int generation;
-        lock (_gate)
+        _readSerial.Wait();
+        try
         {
-            var now = Environment.TickCount64;
-            if (_hwnd == hwnd
-                && string.Equals(_discriminator, discriminator, StringComparison.Ordinal)
-                && now - _atTicks < _minIntervalMs)
-                return _cached;
+            lock (_gate)
+            {
+                var now = Environment.TickCount64;
+                if (_hwnd == hwnd
+                    && string.Equals(_discriminator, discriminator, StringComparison.Ordinal)
+                    && now - _atTicks < _minIntervalMs)
+                    return _cached;
+            }
 
-            generation = ++_readGeneration;
+            var value = read();
+
+            lock (_gate)
+            {
+                var now = Environment.TickCount64;
+                if (value is null
+                    && _hwnd == hwnd
+                    && string.Equals(_discriminator, discriminator, StringComparison.Ordinal)
+                    && _cached is not null
+                    && now - _atTicks < _maxStaleMs)
+                    return _cached;
+
+                _hwnd = hwnd;
+                _discriminator = discriminator;
+                _cached = value;
+                _atTicks = now;
+                return value;
+            }
         }
-
-        var value = read();
-
-        lock (_gate)
+        finally
         {
-            if (generation != _readGeneration)
-                return _cached;
-
-            var now = Environment.TickCount64;
-            if (value is null
-                && _hwnd == hwnd
-                && string.Equals(_discriminator, discriminator, StringComparison.Ordinal)
-                && _cached is not null
-                && now - _atTicks < _maxStaleMs)
-                return _cached;
-
-            _hwnd = hwnd;
-            _discriminator = discriminator;
-            _cached = value;
-            _atTicks = now;
-            return value;
+            _readSerial.Release();
         }
     }
 
     internal void Reset()
     {
-        lock (_gate)
+        _readSerial.Wait();
+        try
         {
-            _readGeneration++;
-            _hwnd = IntPtr.Zero;
-            _discriminator = null;
-            _cached = null;
-            _atTicks = 0;
+            lock (_gate)
+            {
+                _hwnd = IntPtr.Zero;
+                _discriminator = null;
+                _cached = null;
+                _atTicks = 0;
+            }
+        }
+        finally
+        {
+            _readSerial.Release();
         }
     }
 }

@@ -25,7 +25,7 @@ namespace TaskbarQuota.Taskbar
         private DateTime _lastTaskButtonRectsAt = DateTime.MinValue;
         private static readonly TimeSpan TaskButtonRectsMaxAge = TimeSpan.FromSeconds(30);
         private static readonly TimeSpan GeometryCacheTtl = TimeSpan.FromSeconds(1);
-        private int _geometryGeneration;
+        private volatile int _geometryGeneration;
         private int _widgetsRectCommittedGeneration = -1;
         private int _taskRectsCommittedGeneration = -1;
 
