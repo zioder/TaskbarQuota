@@ -15,11 +15,25 @@ $previousDirectory = Join-Path $artifactsRoot 'local.previous'
 $stagingDirectory = Join-Path $artifactsRoot ('local-staging-' + [Guid]::NewGuid().ToString('N'))
 $localExecutable = Join-Path $localDirectory 'TaskbarQuota.exe'
 
+function Assert-OrdinaryAncestors([string]$Path) {
+    $current = [System.IO.Path]::GetFullPath($Path)
+    while ($current) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if (!$item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                throw "Expected ordinary build path ancestors: $current"
+            }
+        }
+        $current = [System.IO.Path]::GetDirectoryName($current)
+    }
+}
+
 function Assert-ArtifactDirectory([string]$Path) {
     $fullPath = [System.IO.Path]::GetFullPath($Path)
     if ([System.IO.Path]::GetDirectoryName($fullPath) -ne $artifactsRoot) {
         throw "Path is outside the build directory: $fullPath"
     }
+    Assert-OrdinaryAncestors $fullPath
     if (Test-Path -LiteralPath $fullPath) {
         $item = Get-Item -LiteralPath $fullPath -Force
         if (!$item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
@@ -31,6 +45,10 @@ function Assert-ArtifactDirectory([string]$Path) {
     }
 }
 
+Assert-OrdinaryAncestors $artifactsRoot
+Assert-ArtifactDirectory $stagingDirectory
+Assert-ArtifactDirectory $localDirectory
+Assert-ArtifactDirectory $previousDirectory
 New-Item -ItemType Directory -Path $artifactsRoot -Force | Out-Null
 $buildLock = [System.IO.File]::Open(
     (Join-Path $artifactsRoot 'local-build.lock'),
@@ -39,6 +57,9 @@ $buildLock = [System.IO.File]::Open(
     [System.IO.FileShare]::None)
 
 try {
+    Assert-ArtifactDirectory $stagingDirectory
+    Assert-ArtifactDirectory $localDirectory
+    Assert-ArtifactDirectory $previousDirectory
     Write-Host 'Building TaskbarQuota...'
     & dotnet publish $projectPath -c Release -p:Platform=x64 -r win-x64 -o $stagingDirectory --nologo --verbosity minimal
     if ($LASTEXITCODE -ne 0) {

@@ -47,8 +47,7 @@ jobs:
           }
 
           $semver = $tag.TrimStart('v')
-          $parts = $semver.Split('.', [StringSplitOptions]::RemoveEmptyEntries)
-          while ($parts.Count -lt 3) { $parts += '0' }
+          $null = & ./tools/Get-BuildVersion.ps1 -Version $semver
 
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "semver=$semver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -59,21 +58,25 @@ jobs:
       - name: Restore
         run: dotnet restore $env:PROJECT
 
+      - name: Test
+        run: dotnet test tests/TaskbarQuota.Tests/TaskbarQuota.Tests.csproj -c Release -p:Platform=x64 --nologo
+
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
 
       - name: Build installers (x64 + arm64)
         id: build
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.semver }}
         run: |
           $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
           if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found at $iscc" }
 
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          $semver = '${{ steps.version.outputs.semver }}'
-          $parts = $semver.Split('.', [StringSplitOptions]::RemoveEmptyEntries)
-          while ($parts.Count -lt 3) { $parts += '0' }
-          $assemblyVersion = "$($parts[0]).$($parts[1]).$($parts[2]).0"
-          $applicationVersion = [int]$parts[2]
+          $semver = $env:RELEASE_VERSION
+          $version = & ./tools/Get-BuildVersion.ps1 -Version $semver
+          $assemblyVersion = $version.AssemblyVersion
+          $applicationVersion = $version.ApplicationVersion
           $targets = @(
             @{ Platform = 'x64'; Rid = 'win-x64'; Arch = 'x64' },
             @{ Platform = 'ARM64'; Rid = 'win-arm64'; Arch = 'arm64' }
@@ -94,6 +97,7 @@ jobs:
               -p:ApplicationVersion=$applicationVersion `
               -r $($target.Rid) `
               --self-contained true
+            if ($LASTEXITCODE -ne 0) { throw "Publish failed for $($target.Arch)." }
 
             $candidates = @(
               "src/TaskbarQuota.App/bin/$($target.Platform)/Release/net10.0-windows10.0.19041.0/$($target.Rid)/publish",
@@ -138,6 +142,7 @@ jobs:
               "/DMyAppVersion=$semver" `
               "/DTargetArch=$($target.Arch)" `
               "/DOutputDir=$outputDir"
+            if ($LASTEXITCODE -ne 0) { throw "Installer compilation failed for $($target.Arch)." }
 
             $setupName = "TaskbarQuotaSetup-$semver-$($target.Arch).exe"
             $built = Get-ChildItem artifacts -Filter $setupName -File | Select-Object -First 1
