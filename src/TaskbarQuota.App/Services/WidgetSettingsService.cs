@@ -505,6 +505,10 @@ public static class WidgetSettingsService
     public static string FormatDisplayPercent(double usedPercent)
         => $"{DisplayPercent(usedPercent):0}%";
 
+    /// <summary>
+    /// Whether a provider usage row is shown on the widget or dashboard.
+    /// Grok Bot inherits legacy <see cref="RowExtra"/> visibility when no dedicated key exists.
+    /// </summary>
     public static bool IsRowVisible(ProviderId provider, string rowId)
     {
         var key = RowVisibilityKey(provider, rowId);
@@ -519,6 +523,7 @@ public static class WidgetSettingsService
         return DefaultRowVisible(provider, rowId);
     }
 
+    /// <summary>Maps a named extra window to its widget row id (Grok Bot uses its own id, not generic extra).</summary>
     public static string RowIdForNamedExtra(ProviderId provider, NamedRateWindow extra)
         => provider == ProviderId.Cursor && extra.Id == RowCursorGrokBot
             ? RowCursorGrokBot

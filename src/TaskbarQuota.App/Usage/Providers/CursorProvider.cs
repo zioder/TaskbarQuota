@@ -52,6 +52,14 @@ namespace TaskbarQuota.Usage.Providers
                 {
                     throw;
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (OperationCanceledException ex)
+                {
+                    Diagnostics.Log.Debug($"Cursor app-token usage timed out; falling back to web cookies: {ex.Message}");
+                }
                 catch (Exception ex)
                 {
                     Diagnostics.Log.Debug($"Cursor app-token usage failed; falling back to web cookies: {ex.Message}");
@@ -152,6 +160,9 @@ namespace TaskbarQuota.Usage.Providers
             }
         }
 
+        /// <summary>
+        /// Loads usage via the desktop app Connect API, then best-effort Grok Bot and profile enrichment.
+        /// </summary>
         private static async Task<ProviderFetchResult> FetchUsageWithAppTokenAsync(CursorAppAuth auth, CancellationToken ct)
         {
             var token = auth.AccessToken ?? throw new ProviderException(ProviderErrorKind.AuthRequired, "Cursor app token missing");
@@ -179,7 +190,7 @@ namespace TaskbarQuota.Usage.Providers
 
                 await TryAttachGrokBotUsageAsync(
                     fetch.Usage,
-                    TryResolveCookieHeader(),
+                    DashboardSessionCookie(token),
                     bearerToken: token,
                     ct).ConfigureAwait(false);
                 return fetch;
@@ -202,6 +213,14 @@ namespace TaskbarQuota.Usage.Providers
                 if (bearerToken is { Length: > 0 })
                 {
                     try { doc = await PostAppJson(SandUsageAppPath, bearerToken, "{}", ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (OperationCanceledException ex)
+                    {
+                        Diagnostics.Log.Debug($"Cursor Grok Bot app API timed out: {ex.Message}");
+                    }
                     catch (Exception ex)
                     {
                         Diagnostics.Log.Debug($"Cursor Grok Bot app API failed: {ex.Message}");
@@ -211,6 +230,14 @@ namespace TaskbarQuota.Usage.Providers
                 if (doc is null && !string.IsNullOrWhiteSpace(cookieHeader))
                 {
                     try { doc = await PostWebJson(SandUsageWebUrl, cookieHeader, "{}", ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (OperationCanceledException ex)
+                    {
+                        Diagnostics.Log.Debug($"Cursor Grok Bot web API timed out: {ex.Message}");
+                    }
                     catch (Exception ex)
                     {
                         Diagnostics.Log.Debug($"Cursor Grok Bot web API failed: {ex.Message}");
@@ -227,6 +254,10 @@ namespace TaskbarQuota.Usage.Providers
                     usage.ExtraRateWindows.RemoveAll(w => w.Id == GrokBotWindowId);
                     usage.ExtraRateWindows.Add(window);
                 }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -261,6 +292,7 @@ namespace TaskbarQuota.Usage.Providers
             return new NamedRateWindow(GrokBotWindowId, "Grok Bot", window);
         }
 
+        /// <summary>POST JSON to a cursor.com dashboard route using a session cookie header.</summary>
         private static async Task<JsonDocument> PostWebJson(string url, string cookie, string jsonBody, CancellationToken ct)
         {
             using var req = new HttpRequestMessage(HttpMethod.Post, url)
@@ -534,9 +566,11 @@ namespace TaskbarQuota.Usage.Providers
             };
         }
 
+        /// <summary>Reads a numeric field accepting camelCase or snake_case names.</summary>
         private static double? GetNumEither(JsonElement e, string primary, string alternate)
             => GetNum(e, primary) ?? GetNum(e, alternate);
 
+        /// <summary>Reads a boolean field accepting camelCase or snake_case names.</summary>
         private static bool? GetBool(JsonElement e, string primary, string alternate)
         {
             if (!TryGetEitherProperty(e, primary, alternate, out var v))
@@ -549,6 +583,7 @@ namespace TaskbarQuota.Usage.Providers
             };
         }
 
+        /// <summary>Reads an ISO date string accepting camelCase or snake_case property names.</summary>
         private static DateTimeOffset? ParseDateEither(JsonElement e, string primary, string alternate)
         {
             if (TryGetEitherProperty(e, primary, alternate, out var v) && v.ValueKind == JsonValueKind.String)
@@ -556,6 +591,7 @@ namespace TaskbarQuota.Usage.Providers
             return null;
         }
 
+        /// <summary>Resolves a JSON property by primary or alternate name.</summary>
         private static bool TryGetEitherProperty(JsonElement e, string primary, string alternate, out JsonElement value)
         {
             if (e.TryGetProperty(primary, out value))

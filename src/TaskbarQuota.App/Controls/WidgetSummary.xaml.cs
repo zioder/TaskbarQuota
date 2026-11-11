@@ -770,6 +770,9 @@ namespace TaskbarQuota.Controls
             return rows;
         }
 
+        /// <summary>
+        /// Cursor widget rows: plan meters plus each named extra (e.g. Grok Bot) with per-row visibility.
+        /// </summary>
         private static List<WidgetUsageRow> BuildCursorRows(UsageResult result, UsageSnapshot usage)
         {
             var rows = new List<WidgetUsageRow>();
