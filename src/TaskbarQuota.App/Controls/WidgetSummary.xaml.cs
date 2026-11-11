@@ -606,6 +606,9 @@ namespace TaskbarQuota.Controls
                 return rows;
             }
 
+            if (result.Id == ProviderId.Cursor)
+                return BuildCursorRows(result, usage);
+
             if (usage.ExtraRateWindows.Count > 0)
             {
                 if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
@@ -616,9 +619,6 @@ namespace TaskbarQuota.Controls
                 }
                 return new List<WidgetUsageRow>();
             }
-
-            if (result.Id == ProviderId.Cursor)
-                return BuildCursorRows(result, usage);
 
             return BuildBaseRows(result, usage);
         }
@@ -782,6 +782,13 @@ namespace TaskbarQuota.Controls
 
             if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowPrimary))
                 rows.Add(WindowRow(result.Provider?.SessionLabel ?? "Total usage", usage.Primary));
+
+            foreach (var extra in usage.ExtraRateWindows)
+            {
+                var rowId = WidgetSettingsService.RowIdForNamedExtra(result.Id, extra);
+                if (WidgetSettingsService.IsRowVisible(result.Id, rowId))
+                    rows.Add(WindowRow(extra.Title, extra.Window));
+            }
 
             return rows;
         }
