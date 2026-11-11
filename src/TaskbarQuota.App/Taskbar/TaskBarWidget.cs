@@ -129,6 +129,7 @@ namespace TaskbarQuota.Taskbar
         private readonly int[] layoutWidths = new int[UsageCoordinator.MaxWidgetTiles];
         private ProviderId? activeTileProvider;
         private IReadOnlyList<AgentActivityItem>? appliedCompactActivity;
+        private bool activitySnapshotRenderPending;
         // Where each shown provider sat in the last layout, so the next one can animate the difference.
         // Double-buffered and swapped each pass so a layout allocates no dictionary.
         private Dictionary<ProviderId, int> lastTilePositions = new();
@@ -881,9 +882,14 @@ namespace TaskbarQuota.Taskbar
             // change which gap fits underneath the cursor. Keep the newest snapshot and render it as soon
             // as the drag settles instead.
             if (IsUserRepositioning)
+            {
+                if (!unchanged)
+                    activitySnapshotRenderPending = true;
                 return;
+            }
             if (unchanged)
                 return;
+            activitySnapshotRenderPending = false;
             appliedCompactActivity = compact;
             pendingFreshObstacleScan = true;
             activitySummary?.Apply(snapshot, activeTileProvider);
@@ -2723,10 +2729,15 @@ namespace TaskbarQuota.Taskbar
             {
                 pendingEmptyActivitySnapshot = null;
                 activityEmptySnapshotTimer.Stop();
+                activitySnapshotRenderPending = true;
                 ApplyActivitySnapshot(pending, forceRender: true);
                 return;
             }
 
+            if (!activitySnapshotRenderPending)
+                return;
+
+            activitySnapshotRenderPending = false;
             ApplyActivitySnapshot(activitySnapshot, forceRender: true);
         }
 
