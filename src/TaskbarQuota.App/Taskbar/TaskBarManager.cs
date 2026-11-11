@@ -29,8 +29,12 @@ namespace TaskbarQuota.Taskbar
         private static System.Drawing.Icon? _trayIconSource;
         private static readonly Dictionary<IntPtr, TaskBarWidget> Widgets = new();
         // Reused snapshot of Widgets.Values, so iterating it while a callback may mutate the dictionary
-        // doesn't allocate. Only valid until the next SnapshotWidgets call, and only used on the UI thread.
+        // doesn't allocate. Nested passes use a second list so a re-entrant SnapshotWidgets (e.g. the 5 s
+        // health tick refreshing layout while a usage publish applies state) cannot clear the list an outer
+        // foreach is still walking — that mismatch was corrupting updates and could escalate into WinUI faults.
         private static readonly List<TaskBarWidget> _widgetBuffer = new();
+        private static readonly List<TaskBarWidget> _widgetBufferNested = new();
+        private static int _widgetSnapshotDepth;
         private static FloatingUsageWindow? _floatingWindow;
         private static FlyoutWindow? _flyout;
         private static DispatcherQueue? _dispatcher;
@@ -583,11 +587,18 @@ namespace TaskbarQuota.Taskbar
                 // were trimmed off a crowded taskbar come back once there is room for them again.
                 // Iterated over the reused buffer rather than Widgets.Values.ToArray(), which allocated an
                 // array every five seconds for the life of the process.
-                SnapshotWidgets();
-                foreach (var widget in _widgetBuffer)
+                var widgets = TakeWidgetSnapshot();
+                try
                 {
-                    if (widget.IsAlive)
-                        widget.RefreshLayout();
+                    foreach (var widget in widgets)
+                    {
+                        if (widget.IsAlive)
+                            widget.RefreshLayout();
+                    }
+                }
+                finally
+                {
+                    ReleaseWidgetSnapshot();
                 }
             };
             _widgetHealthTimer.Start();
@@ -1179,52 +1190,74 @@ namespace TaskbarQuota.Taskbar
             }
 
             // Reused buffer: this runs on every usage publish, so a fresh array per publish was pure waste.
-            SnapshotWidgets();
-            foreach (var widget in _widgetBuffer)
+            var widgets = TakeWidgetSnapshot();
+            try
             {
-                if (!widget.IsAlive)
-                    continue;
-
-                var providers = ProvidersForWidget(widget, allProviders);
-                var routedActivity = ActivityForWidget(widget, activity);
-                bool isDisplayedOnWidget = providers.Contains(result.Id);
-
-                // Reconcile the tile set first, so a provider that just became active already owns a slot
-                // before its result is routed. SetDisplayProviders is a cheap no-op when nothing changed.
-                widget.SetActivitySnapshot(routedActivity, allowEmptyGrace: activity.Primary is null);
-                // Keep the outgoing slots bound until their fade completes; the widget clears them in the
-                // completion callback, guarded so an interrupted hide cannot erase a returning provider.
-                if (providers.Count == 0)
+                foreach (var widget in widgets)
                 {
-                    widget.HideDisplayProviders(
-                        ActiveProviderForWidget(widget, providers, coordinator.ActiveProvider),
-                        keepActivityVisible: widget.HasVisibleActivity);
-                    continue;
+                    if (!widget.IsAlive)
+                        continue;
+
+                    var providers = ProvidersForWidget(widget, allProviders);
+                    var routedActivity = ActivityForWidget(widget, activity);
+                    bool isDisplayedOnWidget = providers.Contains(result.Id);
+
+                    // Reconcile the tile set first, so a provider that just became active already owns a slot
+                    // before its result is routed. SetDisplayProviders is a cheap no-op when nothing changed.
+                    widget.SetActivitySnapshot(routedActivity, allowEmptyGrace: activity.Primary is null);
+                    // Keep the outgoing slots bound until their fade completes; the widget clears them in the
+                    // completion callback, guarded so an interrupted hide cannot erase a returning provider.
+                    if (providers.Count == 0)
+                    {
+                        widget.HideDisplayProviders(
+                            ActiveProviderForWidget(widget, providers, coordinator.ActiveProvider),
+                            keepActivityVisible: widget.HasVisibleActivity);
+                        continue;
+                    }
+
+                    widget.SetDisplayProviders(
+                        providers,
+                        ActiveProviderForWidget(widget, providers, coordinator.ActiveProvider));
+                    widget.SetVisible(true);
+                    if (!isDisplayedOnWidget)
+                        continue;
+
+                    widget.ApplyResult(result);
+                    LogWidgetApply(result.Id, "state");
                 }
-
-                widget.SetDisplayProviders(
-                    providers,
-                    ActiveProviderForWidget(widget, providers, coordinator.ActiveProvider));
-                widget.SetVisible(true);
-                if (!isDisplayedOnWidget)
-                    continue;
-
-                widget.ApplyResult(result);
-                LogWidgetApply(result.Id, "state");
+            }
+            finally
+            {
+                ReleaseWidgetSnapshot();
             }
         }
 
         /// <summary>
-        /// Refills <see cref="_widgetBuffer"/> from the live dictionary. Callers iterate the buffer rather
-        /// than the dictionary because a widget callback can remove an entry mid-loop; the buffer replaces
-        /// the defensive copy that the hot paths used to allocate per pass. UI thread only, and the buffer
-        /// stays valid only until the next call.
+        /// Refills a scratch widget list from the live dictionary. Callers iterate the returned list rather
+        /// than the dictionary because a widget callback can remove an entry mid-loop. UI thread only; pair
+        /// with <see cref="ReleaseWidgetSnapshot"/> in a finally block. Nested calls use
+        /// <see cref="_widgetBufferNested"/> so an outer pass cannot be invalidated by an inner
+        /// <see cref="TakeWidgetSnapshot"/>.
         /// </summary>
-        private static void SnapshotWidgets()
+        internal static List<TaskBarWidget> TakeWidgetSnapshot()
         {
-            _widgetBuffer.Clear();
+            int depth = ++_widgetSnapshotDepth;
+            List<TaskBarWidget> buffer = depth switch
+            {
+                1 => _widgetBuffer,
+                2 => _widgetBufferNested,
+                _ => new List<TaskBarWidget>(Widgets.Count),
+            };
+            buffer.Clear();
             foreach (var widget in Widgets.Values)
-                _widgetBuffer.Add(widget);
+                buffer.Add(widget);
+            return buffer;
+        }
+
+        internal static void ReleaseWidgetSnapshot()
+        {
+            if (_widgetSnapshotDepth > 0)
+                _widgetSnapshotDepth--;
         }
 
         private static void LogWidgetApply(ProviderId provider, string source)
@@ -1335,6 +1368,9 @@ namespace TaskbarQuota.Taskbar
             _uiWatchdogTimer = null;
             _widgetHealthTimer?.Stop();
             _widgetHealthTimer = null;
+            _widgetSnapshotDepth = 0;
+            _widgetBuffer.Clear();
+            _widgetBufferNested.Clear();
             _topologyRecoveryTimer?.Stop();
             _topologyRecoveryTimer = null;
             _topologyRecoveryPending = false;
