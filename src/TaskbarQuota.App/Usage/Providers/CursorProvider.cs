@@ -347,20 +347,39 @@ namespace TaskbarQuota.Usage.Providers
             return new ProviderFetchResult(usage, "web");
         }
 
+        /// <summary>
+        /// Cursor/Electron user-data root: <c>%APPDATA%\Cursor</c> on Windows or
+        /// <c>$XDG_CONFIG_HOME/Cursor</c> (else <c>~/.config/Cursor</c>) elsewhere.
+        /// </summary>
+        private static string CursorConfigDirectory()
+        {
+            if (OperatingSystem.IsWindows())
+                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Cursor");
+            var xdg = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME");
+            return Path.Combine(
+                !string.IsNullOrEmpty(xdg)
+                    ? xdg
+                    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config"),
+                "Cursor");
+        }
+
+        /// <summary>
+        /// Reads Cursor desktop login from <c>state.vscdb</c>, decrypting safe-storage envelopes when present.
+        /// </summary>
         private static CursorAppAuth? LoadCursorAppAuth()
         {
-            var db = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "Cursor", "User", "globalStorage", "state.vscdb");
+            var appData = CursorConfigDirectory();
+            var db = Path.Combine(appData, "User", "globalStorage", "state.vscdb");
             if (!File.Exists(db)) return null;
 
             try
             {
                 using var conn = new SqliteConnection($"Data Source={db};Mode=ReadOnly;Cache=Private");
                 conn.Open();
+                var localState = Path.Combine(appData, "Local State");
                 return new CursorAppAuth(
-                    GetItem(conn, "cursorAuth/accessToken"),
-                    GetItem(conn, "cursorAuth/refreshToken"),
+                    DecodeStoredAuthSecret(GetItem(conn, "cursorAuth/accessToken"), localState),
+                    DecodeStoredAuthSecret(GetItem(conn, "cursorAuth/refreshToken"), localState),
                     GetItem(conn, "cursorAuth/cachedEmail"),
                     GetItem(conn, "cursorAuth/stripeMembershipType"));
             }
@@ -372,17 +391,64 @@ namespace TaskbarQuota.Usage.Providers
         }
 
         /// <summary>
+        /// Cursor 3.27+ stores tokens as <c>cursor-safe-storage:v1:</c> plus a base64
+        /// Electron safeStorage blob (AES-GCM <c>v10</c> on Windows). Older builds kept a plain JWT.
+        /// </summary>
+        /// <param name="stored">Value from <c>state.vscdb</c> or <c>auth.json</c>.</param>
+        /// <param name="localStatePath">Cursor profile <c>Local State</c> used to unwrap the blob.</param>
+        /// <returns>JWT plaintext, or null when the value is missing or cannot be decoded.</returns>
+        internal static string? DecodeStoredAuthSecret(string? stored, string localStatePath)
+        {
+            if (string.IsNullOrWhiteSpace(stored))
+                return null;
+            stored = stored.Trim();
+            if (LooksLikeJwt(stored))
+                return stored;
+
+            const string prefix = "cursor-safe-storage:v1:";
+            if (!stored.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            byte[] encrypted;
+            try
+            {
+                encrypted = Convert.FromBase64String(stored[prefix.Length..]);
+            }
+            catch (FormatException)
+            {
+                return null;
+            }
+
+            return CookieExtractor.TryDecryptFromLocalState(localStatePath, encrypted);
+        }
+
+        /// <summary>Fast check for a legacy plain JWT (<c>eyJ…</c> with at least two dots).</summary>
+        private static bool LooksLikeJwt(string value)
+        {
+            int dots = 0;
+            foreach (var c in value)
+                if (c == '.') dots++;
+            if (dots < 2 || value.Length < 3)
+                return false;
+            return value[0] == 'e' && (value[1] == 'y' || value[1] == 'Y');
+        }
+
+        /// <summary>
         /// The cursor-agent CLI's saved login: <c>%APPDATA%\Cursor\auth.json</c> on Windows,
         /// <c>$XDG_CONFIG_HOME/cursor/auth.json</c> elsewhere. Unused when the CLI runs from
         /// <c>CURSOR_API_KEY</c>/<c>CURSOR_AUTH_TOKEN</c> instead of a saved login.
         /// </summary>
         private static CursorAppAuth? LoadCursorCliAuth()
         {
+            var root = CursorConfigDirectory();
             var path = OperatingSystem.IsWindows()
-                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Cursor", "auth.json")
-                : Path.Combine(Environment.GetEnvironmentVariable("XDG_CONFIG_HOME") is { Length: > 0 } xdg
-                    ? xdg
-                    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config"), "cursor", "auth.json");
+                ? Path.Combine(root, "auth.json")
+                : Path.Combine(
+                    !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("XDG_CONFIG_HOME"))
+                        ? Environment.GetEnvironmentVariable("XDG_CONFIG_HOME")!
+                        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config"),
+                    "cursor",
+                    "auth.json");
             try
             {
                 if (!File.Exists(path)) return null;
@@ -390,7 +456,11 @@ namespace TaskbarQuota.Usage.Providers
                 string? Read(string name) => document.RootElement.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
                     ? value.GetString()
                     : null;
-                return Read("accessToken") is { Length: > 0 } token ? new CursorAppAuth(token, Read("refreshToken"), null, null) : null;
+                var localState = Path.Combine(root, "Local State");
+                var access = DecodeStoredAuthSecret(Read("accessToken"), localState);
+                return access is { Length: > 0 }
+                    ? new CursorAppAuth(access, DecodeStoredAuthSecret(Read("refreshToken"), localState), null, null)
+                    : null;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
             {
