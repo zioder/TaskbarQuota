@@ -18,6 +18,49 @@ public class ProviderDiscoveryServiceTests
     }
 
     [Fact]
+    public void Startup_sync_writes_nested_storage_and_preserves_the_assembly_storage()
+    {
+        Assert.Equal(TestEnvironment.AppDataDirectory, AppStorage.AppDataDirectory);
+        var baselinePaths = new[] { "widget-providers.json", "dashboard-providers.json" }
+            .Select(name => Path.Combine(TestEnvironment.AppDataDirectory, name)).ToArray();
+        var previousFiles = baselinePaths.ToDictionary(path => path, path => File.Exists(path) ? File.ReadAllBytes(path) : null);
+        var previousDetector = ProviderInstallDetector.IsInstalledOverrideForTesting;
+        var sentinel = System.Text.Encoding.UTF8.GetBytes("{\"sentinel\":true}");
+        var nested = Directory.CreateTempSubdirectory("TaskbarQuota.Tests-nested-").FullName;
+        try
+        {
+            foreach (var path in baselinePaths) File.WriteAllBytes(path, sentinel);
+            using (AppStorage.OverrideAppDataDirectoryForTesting(nested))
+            {
+                ProviderInstallDetector.IsInstalledOverrideForTesting = id => id == ProviderId.Grok;
+                WidgetSettingsService.SetProviderVisibleForTesting(ProviderId.Grok, false);
+                WidgetSettingsService.SetProviderDashboardVisibleForTesting(ProviderId.Grok, false);
+                ProviderDiscoveryService.SyncInstalledProviderVisibility();
+                foreach (var name in new[] { "widget-providers.json", "dashboard-providers.json" })
+                {
+                    using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(nested, name)));
+                    Assert.True(document.RootElement.GetProperty("Grok").GetBoolean());
+                    Assert.False(document.RootElement.GetProperty("Codex").GetBoolean());
+                }
+                Assert.All(baselinePaths, path => Assert.Equal(sentinel, File.ReadAllBytes(path)));
+            }
+            Assert.Equal(TestEnvironment.AppDataDirectory, AppStorage.AppDataDirectory);
+        }
+        finally
+        {
+            ProviderInstallDetector.IsInstalledOverrideForTesting = previousDetector;
+            WidgetSettingsService.ResetProviderVisibilityForTesting();
+            WidgetSettingsService.ResetDashboardProviderVisibilityForTesting();
+            foreach (var pair in previousFiles)
+            {
+                if (pair.Value is { } bytes) File.WriteAllBytes(pair.Key, bytes);
+                else File.Delete(pair.Key);
+            }
+            Directory.Delete(nested, recursive: true);
+        }
+    }
+
+    [Fact]
     public void RecordFetchResult_AutoHidesNotInstalledProvider()
     {
         var result = UsageResult.Failure(ProviderId.Grok, "Run grok login", kind: ProviderErrorKind.NotInstalled);
