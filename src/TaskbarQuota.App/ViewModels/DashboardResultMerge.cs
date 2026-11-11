@@ -18,4 +18,12 @@ internal static class DashboardResultMerge
                 ? previous
                 : result).ToArray();
     }
+
+    // A quota failure or a response without history doesn't invalidate a completed local-history
+    // snapshot. Only a newer result carrying history can supersede that snapshot.
+    internal static IReadOnlyList<UsageResult> KeepNewerHistorySnapshots(
+        IReadOnlyList<UsageResult> incoming,
+        IReadOnlyList<UsageResult> current)
+        => KeepNewerObservations(incoming,
+            current.Where(result => result.Fetch?.Usage.UsageHistory is not null).ToArray());
 }
