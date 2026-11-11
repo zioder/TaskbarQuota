@@ -59,15 +59,19 @@ namespace TaskbarQuota.Usage
                     // that here would discard an entry the previous session re-confirmed live moments
                     // before shutdown. SavedAt is absent on files written before this stamp existed, so
                     // fall back to FetchedAt for those.
-                    if (now - (entry.SavedAt ?? entry.FetchedAt) > MaxRestoreAge)
+                    var confirmedAt = entry.SavedAt ?? entry.FetchedAt;
+                    if (confirmedAt > now || now - confirmedAt > MaxRestoreAge)
                         continue;
                     if (entry.Usage is not { } usage)
                         continue;
                     if (HasResetWindow(usage, now))
                         continue;
 
-                    var fetch = new ProviderFetchResult(ToSnapshot(usage), entry.SourceLabel ?? string.Empty, entry.FetchedAt);
-                    restored[id] = UsageResult.Success(id, provider, fetch).AsStale();
+                    var fetch = new ProviderFetchResult(ToSnapshot(usage), entry.SourceLabel ?? string.Empty,
+                        entry.FetchedAt, entry.CacheIdentity);
+                    if (!UsageCacheIdentity.IsCurrent(provider, fetch))
+                        continue;
+                    restored[id] = UsageResult.Success(id, provider, fetch, confirmedAt).AsStale();
                 }
             }
             catch (Exception ex)
@@ -82,15 +86,15 @@ namespace TaskbarQuota.Usage
         {
             try
             {
-                var savedAt = DateTimeOffset.Now;
                 var entries = results
-                    .Where(kv => kv.Value.Fetch is not null)
+                    .Where(kv => kv.Value.Fetch is not null && UsageCacheIdentity.IsCurrent(kv.Value.Provider, kv.Value.Fetch))
                     .Select(kv => new StoredEntry
                     {
                         Provider = kv.Key.ToString(),
                         FetchedAt = kv.Value.Fetch!.FetchedAt,
-                        SavedAt = savedAt,
+                        SavedAt = kv.Value.LastConfirmedAt ?? kv.Value.Fetch!.FetchedAt,
                         SourceLabel = kv.Value.Fetch!.SourceLabel,
+                        CacheIdentity = kv.Value.Fetch!.CacheIdentity,
                         Usage = FromSnapshot(kv.Value.Fetch!.Usage),
                     })
                     .ToList();
@@ -143,7 +147,7 @@ namespace TaskbarQuota.Usage
                     ? new ResetCreditsSnapshot(
                         rc.AvailableCount,
                         rc.Credits?.Select(c => new ResetCreditGrant(c.Status ?? string.Empty, c.GrantedAt, c.ExpiresAt)).ToList()
-                            ?? new List<ResetCreditGrant>(), rc.CachedAt).CurrentAt(DateTimeOffset.UtcNow)
+                            ?? new List<ResetCreditGrant>(), rc.CachedAt, rc.ConfirmedAt).CurrentAt(DateTimeOffset.UtcNow, asCached: true)
                     : null,
             };
 
@@ -183,6 +187,7 @@ namespace TaskbarQuota.Usage
                 {
                     AvailableCount = rc.AvailableCount,
                     CachedAt = rc.CachedAt,
+                    ConfirmedAt = rc.ConfirmedAt,
                     Credits = rc.Credits
                         .Select(c => new StoredResetCredit { Status = c.Status, GrantedAt = c.GrantedAt, ExpiresAt = c.ExpiresAt })
                         .ToList(),
@@ -238,11 +243,12 @@ namespace TaskbarQuota.Usage
             public DateTimeOffset FetchedAt { get; set; }
 
             /// <summary>
-            /// When this entry was last written to disk, i.e. last confirmed live. Null on files written
+            /// When this entry was last confirmed live. Null on files written
             /// before this field existed. Drives restore expiry; FetchedAt drives the "Last updated" line.
             /// </summary>
             public DateTimeOffset? SavedAt { get; set; }
             public string? SourceLabel { get; set; }
+            public string? CacheIdentity { get; set; }
             public StoredUsage? Usage { get; set; }
         }
 
@@ -308,6 +314,7 @@ namespace TaskbarQuota.Usage
         {
             public int AvailableCount { get; set; }
             public DateTimeOffset? CachedAt { get; set; }
+            public DateTimeOffset? ConfirmedAt { get; set; }
             public List<StoredResetCredit>? Credits { get; set; }
         }
 

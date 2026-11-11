@@ -359,7 +359,7 @@ internal sealed class QuotaReplenishmentCrossSessionTracker
 
         return new PersistedQuotaProvider(
             result.Id,
-            QuotaReplenishmentStateStore.HashIdentity(usage.Email),
+            result.Fetch?.CacheIdentity ?? QuotaReplenishmentStateStore.HashIdentity(usage.Email),
             observedAt,
             windows);
     }

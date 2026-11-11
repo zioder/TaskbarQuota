@@ -19,7 +19,18 @@ public class UsageSnapshotStoreTests : IDisposable
         try { Directory.Delete(_dir, recursive: true); } catch { }
     }
 
-    private static IUsageProvider Provider(ProviderId id) => new UsageService().Get(id)!;
+    private static IUsageProvider Provider(ProviderId id) => new SnapshotProvider(id);
+
+    private sealed class SnapshotProvider(ProviderId id) : IUsageProvider
+    {
+        public ProviderId Id => id;
+        public string DisplayName => id.ToString();
+        public string SessionLabel => "Session";
+        public string WeeklyLabel => "Weekly";
+        public BillingKind Billing => BillingKind.Subscription;
+        public Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
+            => throw new NotSupportedException();
+    }
 
     private static UsageResult Result(ProviderId id, double session, double weekly, DateTimeOffset? resetAt, DateTimeOffset? fetchedAt = null)
     {
@@ -130,8 +141,7 @@ public class UsageSnapshotStoreTests : IDisposable
     }
 
     /// <summary>
-    /// Rewrites the persisted SavedAt stamp. Save always stamps "now" by design, so a genuinely old file
-    /// can only be simulated by editing what is on disk.
+    /// Rewrites the persisted confirmation stamp to exercise legacy files and the restore age gate.
     /// </summary>
     private void AgeSavedAt(DateTimeOffset savedAt)
     {
@@ -171,6 +181,160 @@ public class UsageSnapshotStoreTests : IDisposable
 
         Assert.True(restored.ContainsKey(ProviderId.Codex));
         Assert.Equal(valueChangedAt, restored[ProviderId.Codex].Fetch!.FetchedAt);
+    }
+
+    [Fact]
+    public void SavingAnotherProvider_DoesNotRenewRestoredConfirmation()
+    {
+        var confirmedAt = DateTimeOffset.Now.AddHours(-23);
+        var original = Result(ProviderId.Claude, 10, 20, resetAt: null)
+            .AsLiveObservation(1, confirmedAt);
+        UsageSnapshotStore.Save(_dir, new Dictionary<ProviderId, UsageResult> { [ProviderId.Claude] = original });
+        var restored = UsageSnapshotStore.Load(_dir, Provider)[ProviderId.Claude];
+        Assert.Equal(confirmedAt, restored.LastConfirmedAt);
+
+        UsageSnapshotStore.Save(_dir, new Dictionary<ProviderId, UsageResult>
+        {
+            [ProviderId.Claude] = restored,
+            [ProviderId.Codex] = Result(ProviderId.Codex, 34, 50, resetAt: null),
+        });
+        var again = UsageSnapshotStore.Load(_dir, Provider);
+        Assert.Equal(confirmedAt, again[ProviderId.Claude].LastConfirmedAt);
+
+        var path = Path.Combine(_dir, "usage-snapshots.json");
+        var node = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
+        foreach (var entry in node["Entries"]!.AsArray())
+            if (entry!["Provider"]!.GetValue<string>() == nameof(ProviderId.Claude))
+                entry["SavedAt"] = confirmedAt.AddHours(-2);
+        File.WriteAllText(path, node.ToJsonString());
+        var afterExpiry = UsageSnapshotStore.Load(_dir, Provider);
+        Assert.False(afterExpiry.ContainsKey(ProviderId.Claude));
+        Assert.True(afterExpiry.ContainsKey(ProviderId.Codex));
+    }
+
+    [Fact]
+    public void SaveThenLoad_FreshResetCreditsBecomeLastKnownAndExpiredGrantsArePruned()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var confirmation = now.AddMinutes(-1);
+        var result = Result(ProviderId.Codex, 34, 50, resetAt: null);
+        result.Fetch!.Usage.ResetCredits = new ResetCreditsSnapshot(2,
+        [
+            new("available", now.AddDays(-1), now.AddSeconds(-1)),
+            new("available", now.AddDays(-1), now.AddDays(1)),
+        ], confirmedAt: confirmation);
+        UsageSnapshotStore.Save(_dir, new Dictionary<ProviderId, UsageResult> { [ProviderId.Codex] = result });
+
+        var restored = UsageSnapshotStore.Load(_dir, Provider)[ProviderId.Codex];
+        Assert.Equal(1, restored.Fetch!.Usage.ResetCredits!.AvailableCount);
+        Assert.Single(restored.Fetch.Usage.ResetCredits.Credits);
+        Assert.True(restored.Fetch.Usage.ResetCredits.IsCached);
+        Assert.Equal(confirmation, restored.Fetch.Usage.ResetCredits.CachedAt);
+        Assert.False(result.Fetch.Usage.ResetCredits.IsCached);
+        Assert.Equal(2, result.Fetch.Usage.ResetCredits.AvailableCount);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Load_DiscardsOldOrUnstampedFreshCreditsWithoutLosingQuota(bool confirmed)
+    {
+        var result = Result(ProviderId.Codex, 34, 50, resetAt: null);
+        result.Fetch!.Usage.ResetCredits = new ResetCreditsSnapshot(2, [],
+            confirmedAt: confirmed ? DateTimeOffset.UtcNow.AddMinutes(-11) : null);
+        UsageSnapshotStore.Save(_dir, new Dictionary<ProviderId, UsageResult> { [ProviderId.Codex] = result });
+
+        var restored = UsageSnapshotStore.Load(_dir, Provider)[ProviderId.Codex];
+        Assert.Null(restored.Fetch!.Usage.ResetCredits);
+        Assert.Equal(34, restored.Fetch.Usage.Primary.UsedPercent);
+    }
+
+    [Fact]
+    public void LegacyFileWithoutSavedAt_RetainsFetchedAtAsConfirmation()
+    {
+        var fetchedAt = DateTimeOffset.Now.AddHours(-2);
+        UsageSnapshotStore.Save(_dir, new Dictionary<ProviderId, UsageResult>
+        {
+            [ProviderId.Codex] = Result(ProviderId.Codex, 34, 50, resetAt: null, fetchedAt: fetchedAt),
+        });
+        var path = Path.Combine(_dir, "usage-snapshots.json");
+        var node = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!;
+        foreach (var entry in node["Entries"]!.AsArray())
+            entry!.AsObject().Remove("SavedAt");
+        File.WriteAllText(path, node.ToJsonString());
+
+        var restored = UsageSnapshotStore.Load(_dir, Provider)[ProviderId.Codex];
+        Assert.Equal(fetchedAt, restored.LastConfirmedAt);
+        UsageSnapshotStore.Save(_dir, new Dictionary<ProviderId, UsageResult> { [ProviderId.Codex] = restored });
+        Assert.Equal(fetchedAt, UsageSnapshotStore.Load(_dir, Provider)[ProviderId.Codex].LastConfirmedAt);
+    }
+
+    [Fact]
+    public async Task BackgroundSaves_WaitForThePreviousSnapshotBeforePublishingNewerValues()
+    {
+        var service = new UsageService(_dir);
+        service.Register(new CountingProvider());
+        var field = typeof(UsageService).GetField("_snapshotWriteTask",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        field.SetValue(service, release.Task);
+        Task writes = Task.CompletedTask;
+        try
+        {
+            await service.FetchAsync(ProviderId.Copilot, force: true);
+            await service.FetchAsync(ProviderId.Copilot, force: true);
+            writes = (Task)field.GetValue(service)!;
+            Assert.False(writes.IsCompleted);
+            Assert.False(File.Exists(Path.Combine(_dir, "usage-snapshots.json")));
+        }
+        finally
+        {
+            release.TrySetResult();
+            writes = (Task)field.GetValue(service)!;
+            await writes.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+
+        var restored = UsageSnapshotStore.Load(_dir, Provider)[ProviderId.Copilot];
+        Assert.Equal(2, restored.Fetch!.Usage.Primary.UsedPercent);
+    }
+
+    private sealed class CountingProvider : IUsageProvider
+    {
+        private int _calls;
+        public Exception? Error { get; init; }
+        public ProviderId Id => ProviderId.Copilot;
+        public string DisplayName => "Copilot";
+        public string SessionLabel => "Session";
+        public string WeeklyLabel => "Weekly";
+        public BillingKind Billing => BillingKind.Subscription;
+        public Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
+            => Error is { } error ? Task.FromException<ProviderFetchResult>(error)
+                : Task.FromResult(new ProviderFetchResult(new UsageSnapshot(new RateWindow(++_calls)), "test"));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task FailedAttempts_StillHaveMonotonicSequenceAndAttemptTime(bool providerException)
+    {
+        var service = new UsageService();
+        service.Register(new CountingProvider
+        {
+            Error = providerException
+                ? new ProviderException(ProviderErrorKind.Other, "test failure")
+                : new InvalidOperationException("test failure"),
+        });
+
+        var first = await service.FetchAsync(ProviderId.Copilot, force: true);
+        var second = await service.FetchAsync(ProviderId.Copilot, force: true);
+        Assert.False(first.Ok);
+        Assert.False(second.Ok);
+        Assert.True(first.ObservationSequence > 0);
+        Assert.True(second.ObservationSequence > first.ObservationSequence);
+        Assert.NotNull(first.ObservedAt);
+        Assert.NotNull(second.ObservedAt);
+        Assert.Null(second.LastConfirmedAt);
+        Assert.Equal(UsageObservationOrigin.FailureFallback, second.ObservationOrigin);
     }
 
     [Fact]

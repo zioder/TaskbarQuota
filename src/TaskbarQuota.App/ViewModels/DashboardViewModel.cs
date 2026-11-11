@@ -176,18 +176,23 @@ namespace TaskbarQuota.ViewModels
             var cts = new CancellationTokenSource();
             _loadCts = cts;
             var ct = cts.Token;
+            var stages = new DashboardLoadStageGate();
+            long initialStage = stages.Reserve();
 
             var active = UsageCoordinator.Instance.ActiveProvider;
             var results = await Task.Run(() => BuildDashboardResults(active)).ConfigureAwait(false);
+            // The progressive fetch below mutates results off-thread. Never give a queued UI callback
+            // that live list: it can still be enumerating when the next provider completes.
+            var initialResults = results.ToArray();
             _dispatcher.TryEnqueue(() =>
             {
                 // A newer load may have superseded this one while we were off-thread; only the
                 // newest load may touch shared state, or a cancelled load can flip IsLoading off
                 // mid-fetch and flash the "No local usage history found" empty state (spinner →
                 // empty → data).
-                if (!ReferenceEquals(_loadCts, cts))
+                if (!ReferenceEquals(_loadCts, cts) || !stages.TryAccept(initialStage))
                     return;
-                UpdateCards(results, active);
+                UpdateCards(initialResults, active);
                 StatusText = force ? "Refreshing..." : "Loading...";
             });
 
@@ -208,12 +213,13 @@ namespace TaskbarQuota.ViewModels
 
                         var current = UsageCoordinator.Instance.ActiveProvider;
                         var snapshot = results.ToList();
+                        long stage = stages.Reserve();
                         _ = Task.Run(() =>
                         {
                             var merged = BuildDashboardResults(current, snapshot);
                             _dispatcher.TryEnqueue(() =>
                             {
-                                if (!ReferenceEquals(_loadCts, cts))
+                                if (!ReferenceEquals(_loadCts, cts) || !stages.TryAccept(stage))
                                     return;
                                 UpdateCards(merged, current);
                             });
@@ -225,6 +231,7 @@ namespace TaskbarQuota.ViewModels
                 {
                     var finalActive = UsageCoordinator.Instance.ActiveProvider;
                     var finalResults = results.ToList();
+                    long finalStage = stages.Reserve();
                     var completed = await Task.Run(() =>
                     {
                         var merged = BuildDashboardResults(finalActive, finalResults);
@@ -232,7 +239,7 @@ namespace TaskbarQuota.ViewModels
                     }).ConfigureAwait(false);
                     _dispatcher.TryEnqueue(() =>
                     {
-                        if (!ReferenceEquals(_loadCts, cts))
+                        if (!ReferenceEquals(_loadCts, cts) || !stages.TryAccept(finalStage))
                             return;
                         UpdateCards(
                             completed.Results,
@@ -289,7 +296,11 @@ namespace TaskbarQuota.ViewModels
         {
             var selectedProviderId = SelectedCard?.ProviderId;
 
-            results = BuildDashboardResults(active, results);
+            // Coordinator refreshes can complete while a dashboard pass is still merging. Its
+            // snapshot mustn't put an earlier provider observation back over the newer UI result.
+            results = DashboardResultMerge.KeepNewerObservations(BuildDashboardResults(active, results), _lastResults);
+            if (usageResults is not null)
+                usageResults = DashboardResultMerge.KeepNewerObservations(usageResults, results);
             _lastResults = results.ToArray();
             _lastActive = active;
 
