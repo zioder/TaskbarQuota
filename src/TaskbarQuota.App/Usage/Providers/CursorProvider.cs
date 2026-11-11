@@ -347,6 +347,10 @@ namespace TaskbarQuota.Usage.Providers
             return new ProviderFetchResult(usage, "web");
         }
 
+        /// <summary>
+        /// Cursor/Electron user-data root: <c>%APPDATA%\Cursor</c> on Windows or
+        /// <c>$XDG_CONFIG_HOME/Cursor</c> (else <c>~/.config/Cursor</c>) elsewhere.
+        /// </summary>
         private static string CursorConfigDirectory()
         {
             if (OperatingSystem.IsWindows())
@@ -359,6 +363,9 @@ namespace TaskbarQuota.Usage.Providers
                 "Cursor");
         }
 
+        /// <summary>
+        /// Reads Cursor desktop login from <c>state.vscdb</c>, decrypting safe-storage envelopes when present.
+        /// </summary>
         private static CursorAppAuth? LoadCursorAppAuth()
         {
             var appData = CursorConfigDirectory();
@@ -387,6 +394,9 @@ namespace TaskbarQuota.Usage.Providers
         /// Cursor 3.27+ stores tokens as <c>cursor-safe-storage:v1:</c> plus a base64
         /// Electron safeStorage blob (AES-GCM <c>v10</c> on Windows). Older builds kept a plain JWT.
         /// </summary>
+        /// <param name="stored">Value from <c>state.vscdb</c> or <c>auth.json</c>.</param>
+        /// <param name="localStatePath">Cursor profile <c>Local State</c> used to unwrap the blob.</param>
+        /// <returns>JWT plaintext, or null when the value is missing or cannot be decoded.</returns>
         internal static string? DecodeStoredAuthSecret(string? stored, string localStatePath)
         {
             if (string.IsNullOrWhiteSpace(stored))
@@ -412,6 +422,7 @@ namespace TaskbarQuota.Usage.Providers
             return CookieExtractor.TryDecryptFromLocalState(localStatePath, encrypted);
         }
 
+        /// <summary>Fast check for a legacy plain JWT (<c>eyJ…</c> with at least two dots).</summary>
         private static bool LooksLikeJwt(string value)
         {
             int dots = 0;
