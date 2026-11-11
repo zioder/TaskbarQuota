@@ -26,6 +26,8 @@ namespace TaskbarQuota
         [STAThread]
         private static int Main(string[] args)
         {
+            if (!RecoveryStartup.WaitForParent(args))
+                return 1;
             WinRT.ComWrappersSupport.InitializeComWrappers();
 
             if (RedirectToExistingInstance())

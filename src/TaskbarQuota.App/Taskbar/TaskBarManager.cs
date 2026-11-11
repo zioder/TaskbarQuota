@@ -70,6 +70,7 @@ namespace TaskbarQuota.Taskbar
         private static int _uiHeartbeatMisses;
         private static int _uiWatchdogStopping;
         private static int _uiWatchdogRestartRequested;
+        private static int _layoutFailurePending;
         private const int UiWatchdogMissLimit = 3;
 
         private static bool IsFloatingSurface => _activeSurface == WidgetSurfaceMode.Floating;
@@ -87,7 +88,6 @@ namespace TaskbarQuota.Taskbar
                 return;
 
             Interlocked.Exchange(ref _uiWatchdogStopping, 0);
-            Interlocked.Exchange(ref _uiWatchdogRestartRequested, 0);
             Interlocked.Exchange(ref _uiHeartbeat, 0);
             Interlocked.Exchange(ref _uiHeartbeatObserved, -1);
             Interlocked.Exchange(ref _uiHeartbeatMisses, 0);
@@ -104,6 +104,11 @@ namespace TaskbarQuota.Taskbar
 
             try
             {
+                if (Volatile.Read(ref _layoutFailurePending) != 0)
+                {
+                    TryRequestUiRestart("XAML layout cycle");
+                    return;
+                }
                 try
                 {
                     _dispatcher?.TryEnqueue(() => Interlocked.Increment(ref _uiHeartbeat));
@@ -130,17 +135,12 @@ namespace TaskbarQuota.Taskbar
                 if (ShouldRestartUiWatchdog(
                     misses,
                     App.IsQuitting,
-                    Volatile.Read(ref _uiWatchdogRestartRequested) != 0)
-                    && Interlocked.CompareExchange(ref _uiWatchdogRestartRequested, 1, 0) == 0)
+                    Volatile.Read(ref _uiWatchdogRestartRequested) != 0))
                 {
                     Log.Error("UI thread stopped servicing heartbeats for ~15s; taskbar widget is dead until " +
                               "the app is restarted (likely WinUI stowed exception, issue #70). Requesting " +
                               "an automatic restart; background services are still running.");
-                    if (!RequestUiRestart())
-                    {
-                        // Do not leave the one-shot latch set after a failed spawn — later ticks must retry.
-                        Interlocked.Exchange(ref _uiWatchdogRestartRequested, 0);
-                    }
+                    TryRequestUiRestart("UI watchdog");
                 }
             }
             catch (Exception ex)
@@ -154,27 +154,36 @@ namespace TaskbarQuota.Taskbar
         internal static bool ShouldRestartUiWatchdog(int misses, bool isQuitting, bool restartRequested)
             => misses >= UiWatchdogMissLimit && !isQuitting && !restartRequested;
 
+        private static void TryRequestUiRestart(string reason)
+        {
+            if (App.IsQuitting || Volatile.Read(ref _uiWatchdogStopping) != 0
+                || Interlocked.CompareExchange(ref _uiWatchdogRestartRequested, 1, 0) != 0)
+                return;
+            if (!RequestUiRestart(reason))
+                Interlocked.Exchange(ref _uiWatchdogRestartRequested, 0);
+        }
+
         /// <summary>
         /// Best-effort recovery for a dead dispatcher. <see cref="AppInstance.Restart"/> needs a foreground
         /// window and will not return on success, so a tray-only widget with a wedged UI thread has to
-        /// unregister the single-instance key and start a replacement process itself.
+        /// start a replacement that waits for this process to exit before registering its key.
         /// Returns true when a new process was started (this process should then exit).
         /// </summary>
-        private static bool RequestUiRestart()
+        private static bool RequestUiRestart(string recoveryReason)
         {
             try
             {
                 var reason = AppInstance.Restart(StartupSettingsService.StartupArgument);
-                Log.Error($"UI watchdog AppInstance.Restart returned {reason}; falling back to a new process");
+                Log.Error($"{recoveryReason}: AppInstance.Restart returned {reason}; falling back to a new process");
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "UI watchdog AppInstance.Restart threw; falling back to a new process");
+                Log.Error(ex, $"{recoveryReason}: AppInstance.Restart threw; falling back to a new process");
             }
 
-            if (!TrySpawnReplacementProcess())
+            if (!TrySpawnReplacementProcess(recoveryReason))
             {
-                Log.Error("UI watchdog could not start a replacement process; will retry on the next miss streak");
+                Log.Error($"{recoveryReason}: could not start a replacement process; the background watchdog will retry");
                 return false;
             }
 
@@ -182,7 +191,7 @@ namespace TaskbarQuota.Taskbar
             return true;
         }
 
-        private static bool TrySpawnReplacementProcess()
+        private static bool TrySpawnReplacementProcess(string recoveryReason)
         {
             var path = Environment.ProcessPath;
             if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
@@ -193,20 +202,13 @@ namespace TaskbarQuota.Taskbar
 
             try
             {
-                AppInstance.GetCurrent().UnregisterKey();
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "UI watchdog could not unregister the single-instance key");
-            }
-
-            try
-            {
                 var started = Process.Start(new ProcessStartInfo
                 {
                     FileName = path,
-                    Arguments = StartupSettingsService.StartupArgument,
+                    Arguments = $"{StartupSettingsService.StartupArgument} {RecoveryStartup.ParentArgument} {Environment.ProcessId}",
                     UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
                 });
                 if (started is null)
                 {
@@ -214,7 +216,8 @@ namespace TaskbarQuota.Taskbar
                     return false;
                 }
 
-                Log.Error($"UI watchdog started replacement pid {started.Id}");
+                Log.Error($"{recoveryReason}: started replacement pid {started.Id}, waiting for predecessor pid {Environment.ProcessId}");
+                started.Dispose();
                 return true;
             }
             catch (Exception ex)
@@ -828,9 +831,26 @@ namespace TaskbarQuota.Taskbar
         private static void OnTopologyChanged(TopologyChange change)
             => _dispatcher?.TryEnqueue(() => ScheduleTopologyRecovery(change));
 
-        // A tile that hit a XAML layout cycle stops redrawing while still accepting results.
-        public static void RebuildAfterLayoutFailure()
-            => OnTopologyChanged(new TopologyChange(TopologyChangeKind.LayoutFailure, "layout cycle"));
+        // A handled layout cycle permanently stops WinUI's rendering clock on this UI thread.
+        // Neither a XAML timer nor a new host on the same thread can repair it: recover the process.
+        public static void RestartAfterLayoutFailure()
+        {
+            if (App.IsQuitting)
+                return;
+            Interlocked.Exchange(ref _layoutFailurePending, 1);
+            StartUiWatchdog();
+            Log.Error("XAML layout cycle left the render clock unusable; requesting process recovery.");
+            try
+            {
+                var dispatcher = _dispatcher ?? App.Dispatcher;
+                if (dispatcher?.TryEnqueue(() => TryRequestUiRestart("XAML layout cycle")) != true)
+                    Log.Warning("Could not enqueue XAML recovery; the background watchdog will retry.");
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Could not enqueue XAML recovery; the background watchdog will retry.");
+            }
+        }
 
         private static void ScheduleTopologyRecovery(TopologyChange change)
         {
