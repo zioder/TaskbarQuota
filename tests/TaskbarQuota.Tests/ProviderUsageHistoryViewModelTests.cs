@@ -8,9 +8,12 @@ namespace TaskbarQuota.Tests
 {
     public sealed class ProviderUsageHistoryViewModelTests
     {
-        [Fact]
-        public void BuildsCompactPeriodReadingsAndFillsThirtyDayTrend()
+        [Theory]
+        [InlineData("en-US", "$1.25 · 1.5M tokens", "$349.92 · 2B tokens", "Peak 1.5M tokens")]
+        [InlineData("ru-RU", "$1,25 · 1,5M tokens", "$349,92 · 2B tokens", "Peak 1,5M tokens")]
+        public void BuildsCompactPeriodReadingsAndFillsThirtyDayTrend(string culture, string expectedToday, string expectedMonth, string expectedPeak)
         {
+            using var scope = new CultureScope(culture);
             var history = new UsageHistory
             {
                 Today = new UsagePeriod(1_500_000, 1.25, costEstimated: true),
@@ -32,10 +35,10 @@ namespace TaskbarQuota.Tests
             Assert.Equal(30, viewModel.TrendPoints.Count);
             Assert.Equal(new DateTime(2026, 7, 12), viewModel.TrendPoints[0].Date);
             Assert.Equal(1_500_000UL, viewModel.TrendPoints[^2].Tokens);
-            Assert.Equal("$1.25 · 1.5M tokens", viewModel.Periods[0].Reading);
+            Assert.Equal(expectedToday, viewModel.Periods[0].Reading);
             Assert.Equal("0 tokens", viewModel.Periods[1].Reading);
-            Assert.Equal("$349.92 · 2B tokens", viewModel.Periods[2].Reading);
-            Assert.Contains("Peak 1.5M tokens", viewModel.TrendAutomationName, StringComparison.Ordinal);
+            Assert.Equal(expectedMonth, viewModel.Periods[2].Reading);
+            Assert.Contains(expectedPeak, viewModel.TrendAutomationName, StringComparison.Ordinal);
         }
 
         [Fact]
@@ -49,12 +52,15 @@ namespace TaskbarQuota.Tests
             Assert.Empty(viewModel.TrendPoints);
         }
 
-        [Fact]
-        public void TokenOnlyPeriodsNeverInventCost()
+        [Theory]
+        [InlineData("en-US", "35.4M tokens")]
+        [InlineData("ru-RU", "35,4M tokens")]
+        public void TokenOnlyPeriodsNeverInventCost(string culture, string expectedReading)
         {
+            using var scope = new CultureScope(culture);
             var row = new ProviderUsagePeriodRowViewModel("Today", new UsagePeriod(35_400_000, null, estimateComplete: false));
 
-            Assert.Equal("35.4M tokens", row.Reading);
+            Assert.Equal(expectedReading, row.Reading);
             Assert.DoesNotContain('$', row.Reading);
             Assert.Contains("cost unavailable", row.TooltipText, StringComparison.OrdinalIgnoreCase);
         }
