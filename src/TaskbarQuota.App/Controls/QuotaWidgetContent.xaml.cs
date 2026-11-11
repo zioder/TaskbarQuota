@@ -40,6 +40,7 @@ public sealed partial class QuotaWidgetContent : UserControl
     private readonly ProviderId?[] _tileProviders = new ProviderId?[UsageCoordinator.MaxWidgetTiles];
     private ProviderId? _activeProvider;
     private AgentActivitySnapshot _activitySnapshot = new(Array.Empty<AgentActivityItem>());
+    private IReadOnlyList<AgentActivityItem>? _appliedCompactActivity;
     private AgentActivitySnapshot? _pendingEmptyActivitySnapshot;
     private readonly DispatcherTimer _activityEmptySnapshotTimer;
     private int _desiredLogicalWidth = DefaultHostLogicalWidth;
@@ -283,7 +284,13 @@ public sealed partial class QuotaWidgetContent : UserControl
 
     private void ApplyActivitySnapshot(AgentActivitySnapshot snapshot)
     {
+        var compact = snapshot.CompactItems;
+        if (_appliedCompactActivity is not null
+            && _activitySnapshot.Items.SequenceEqual(snapshot.Items)
+            && _appliedCompactActivity.SequenceEqual(compact))
+            return;
         _activitySnapshot = snapshot;
+        _appliedCompactActivity = compact;
         ApplyActivityToControl();
         foreach (var tile in _tiles)
             tile?.SetAgentActivity(snapshot);

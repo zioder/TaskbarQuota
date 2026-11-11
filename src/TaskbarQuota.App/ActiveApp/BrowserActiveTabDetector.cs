@@ -39,6 +39,9 @@ namespace TaskbarQuota.ActiveApp
         private IntPtr _cachedHwnd;
         private string? _cachedUrl;
         private DateTime _cachedAtUtc = DateTime.MinValue;
+        private string? _cachedWindowTitle;
+        private IUIAutomationElement? _addressField;
+        private IntPtr _addressHwnd;
 
         internal static bool IsBrowserProcessName(string? processName)
             => !string.IsNullOrWhiteSpace(processName)
@@ -70,7 +73,7 @@ namespace TaskbarQuota.ActiveApp
             if (!IsBrowserProcessName(processName))
                 return null;
 
-            var url = TryReadActiveTabUrl(hwnd);
+            var url = TryReadActiveTabUrl(hwnd, windowTitle);
             var provider = TryResolveProviderFromUrl(url)
                 ?? TryResolveProviderFromUrl(FirefoxSessionStoreReader.TryReadSelectedTabUrl(processName))
                 ?? TryResolveProviderFromTitle(windowTitle);
@@ -80,7 +83,7 @@ namespace TaskbarQuota.ActiveApp
                 : null;
         }
 
-        internal string? TryReadActiveTabUrl(IntPtr hwnd)
+        internal string? TryReadActiveTabUrl(IntPtr hwnd, string? windowTitle = null)
         {
             if (hwnd == IntPtr.Zero)
                 return null;
@@ -88,7 +91,9 @@ namespace TaskbarQuota.ActiveApp
             lock (_cacheGate)
             {
                 var now = DateTime.UtcNow;
-                if (hwnd == _cachedHwnd && now - _cachedAtUtc < CacheTtl)
+                if (hwnd == _cachedHwnd
+                    && windowTitle == _cachedWindowTitle
+                    && now - _cachedAtUtc < CacheTtl)
                     return _cachedUrl;
             }
 
@@ -97,6 +102,7 @@ namespace TaskbarQuota.ActiveApp
             {
                 _cachedHwnd = hwnd;
                 _cachedUrl = url;
+                _cachedWindowTitle = windowTitle;
                 _cachedAtUtc = DateTime.UtcNow;
             }
             return url;
@@ -160,6 +166,16 @@ namespace TaskbarQuota.ActiveApp
                 try
                 {
                     _automation ??= new CUIAutomation();
+                    if (_addressHwnd == hwnd && _addressField is not null)
+                    {
+                        var value = TryReadValue(_addressField);
+                        if (!string.IsNullOrWhiteSpace(value) && LooksLikeUrl(value))
+                            return value;
+                        _addressField = null;
+                    }
+
+                    _addressField = null;
+                    _addressHwnd = hwnd;
                     var root = _automation.ElementFromHandle(hwnd);
                     if (root is null)
                         return null;
@@ -208,7 +224,10 @@ namespace TaskbarQuota.ActiveApp
                     continue;
 
                 if (LooksLikeUrl(value) && LooksLikeAddressField(name, value))
+                {
+                    _addressField = el;
                     return value;
+                }
             }
 
             return null;

@@ -559,6 +559,8 @@ namespace TaskbarQuota.Taskbar
                     if (recreated || NeedsFloatingResync())
                         SyncFloatingState();
 
+                    _floatingWindow?.SetActivitySnapshot(AgentActivityService.Instance.Snapshot);
+
                     RefreshPinnedTiles();
                     Services.PinBudgetService.EnforceBudget();
                     return;
@@ -587,7 +589,12 @@ namespace TaskbarQuota.Taskbar
                 foreach (var widget in _widgetBuffer)
                 {
                     if (widget.IsAlive)
+                    {
+                        var sourceActivity = AgentActivityService.Instance.Snapshot;
+                        widget.SetActivitySnapshot(ActivityForWidget(widget, sourceActivity),
+                            allowEmptyGrace: sourceActivity.Primary is null);
                         widget.RefreshLayout();
+                    }
                 }
             };
             _widgetHealthTimer.Start();
