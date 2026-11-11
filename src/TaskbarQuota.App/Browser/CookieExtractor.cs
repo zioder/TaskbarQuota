@@ -465,6 +465,27 @@ namespace TaskbarQuota.Browser
             return ProtectedData.Unprotect(withoutPrefix, null, DataProtectionScope.CurrentUser);
         }
 
+        /// <summary>
+        /// Decrypts an Electron/Chromium <c>v10</c> (or legacy DPAPI) blob using the
+        /// <c>os_crypt</c> key from a browser or Cursor <c>Local State</c> file.
+        /// </summary>
+        internal static string? TryDecryptFromLocalState(string localStatePath, byte[] encrypted)
+        {
+            if (encrypted.Length == 0)
+                return string.Empty;
+            try
+            {
+                if (!File.Exists(localStatePath))
+                    return null;
+                return DecryptCookie(encrypted, GetEncryptionKey(localStatePath));
+            }
+            catch (Exception ex)
+            {
+                Log.Debug($"Local State decrypt failed ({localStatePath}): {ex.Message}");
+                return null;
+            }
+        }
+
         private static string? DecryptCookie(byte[] enc, byte[] key)
         {
             if (enc.Length == 0) return string.Empty;
