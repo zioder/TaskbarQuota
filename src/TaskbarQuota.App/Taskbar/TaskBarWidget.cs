@@ -128,6 +128,7 @@ namespace TaskbarQuota.Taskbar
         private readonly int[] layoutSlots = new int[UsageCoordinator.MaxWidgetTiles];
         private readonly int[] layoutWidths = new int[UsageCoordinator.MaxWidgetTiles];
         private ProviderId? activeTileProvider;
+        private IReadOnlyList<AgentActivityItem>? appliedCompactActivity;
         // Where each shown provider sat in the last layout, so the next one can animate the difference.
         // Double-buffered and swapped each pass so a layout allocates no dictionary.
         private Dictionary<ProviderId, int> lastTilePositions = new();
@@ -870,6 +871,8 @@ namespace TaskbarQuota.Taskbar
 
         private void ApplyActivitySnapshot(AgentActivitySnapshot snapshot)
         {
+            var compact = snapshot.CompactItems;
+            bool unchanged = IsActivitySnapshotUnchanged(activitySnapshot, snapshot, appliedCompactActivity, compact);
             activitySnapshot = snapshot;
             // Transcript discovery publishes about once per second. Rebuilding and resizing the separate
             // activity island while its pointer is captured makes the native drag visibly stutter and can
@@ -877,11 +880,23 @@ namespace TaskbarQuota.Taskbar
             // as the drag settles instead.
             if (IsUserRepositioning)
                 return;
+            if (unchanged)
+                return;
+            appliedCompactActivity = compact;
             activitySummary?.Apply(snapshot, activeTileProvider);
             foreach (var tile in tiles)
                 tile?.SetAgentActivity(snapshot);
-            RecomputeLayout(forceReposition: true);
+            RecomputeLayout();
         }
+
+        internal static bool IsActivitySnapshotUnchanged(
+            AgentActivitySnapshot current,
+            AgentActivitySnapshot next,
+            IReadOnlyList<AgentActivityItem>? appliedCompact,
+            IReadOnlyList<AgentActivityItem> nextCompact)
+            => appliedCompact is not null
+                && current.Items.SequenceEqual(next.Items)
+                && appliedCompact.SequenceEqual(nextCompact);
 
         /// <summary>
         /// Binds the tile slots to <paramref name="providers"/> in order (leftmost first) and re-lays out.
@@ -904,6 +919,11 @@ namespace TaskbarQuota.Taskbar
                 pendingActiveProvider = activeProvider;
                 return;
             }
+
+            if (activeTileProvider == activeProvider
+                && tileProviders.Where(provider => provider.HasValue).Select(provider => provider!.Value)
+                    .SequenceEqual(providers))
+                return;
 
             activeTileProvider = activeProvider;
             activitySummary?.Apply(activitySnapshot, activeTileProvider);
@@ -2718,7 +2738,7 @@ namespace TaskbarQuota.Taskbar
                 lastWidgetsButtonClientRect = ToTaskbarClientRect(wb, taskbarScreenRect);
             }
 
-            if (await taskbarWatcher.GetTaskbarButtonRectsAsync() is { } taskButtonRects)
+            if (await taskbarWatcher.GetTaskbarButtonRectsAsync(force: true) is { } taskButtonRects)
             {
                 var converted = new List<RECT>(taskButtonRects.Count);
                 foreach (var r in taskButtonRects)

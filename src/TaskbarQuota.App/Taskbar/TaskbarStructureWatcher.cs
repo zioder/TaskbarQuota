@@ -24,6 +24,7 @@ namespace TaskbarQuota.Taskbar
         private List<RECT>? _lastTaskButtonRects;
         private DateTime _lastTaskButtonRectsAt = DateTime.MinValue;
         private static readonly TimeSpan TaskButtonRectsMaxAge = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan GeometryCacheTtl = TimeSpan.FromSeconds(1);
 
         private bool widgetsButtonEnabled;
         private bool taskbarCentered;
@@ -60,6 +61,9 @@ namespace TaskbarQuota.Taskbar
                     isHidden);
                 if (reason == TaskbarChangeReason.None)
                     return;
+
+                _lastWidgetsButtonRectAt = DateTime.MinValue;
+                _lastTaskButtonRectsAt = DateTime.MinValue;
 
                 // Commit one coherent snapshot. If several shell properties changed together, the priority
                 // reason still describes the refresh while the next poll sees the complete new baseline.
@@ -106,6 +110,10 @@ namespace TaskbarQuota.Taskbar
         {
             if (hwndTaskbar == IntPtr.Zero || !SystemInfos.IsTaskBarWidgetsEnabled())
                 return null;
+
+            if (_lastWidgetsButtonRect is { } widgetsCached
+                && DateTime.UtcNow - _lastWidgetsButtonRectAt < GeometryCacheTtl)
+                return widgetsCached;
 
             try
             {
@@ -157,12 +165,17 @@ namespace TaskbarQuota.Taskbar
         /// keeps the widget from ever landing on top of the app cluster (issue #17). Falls back to the last
         /// good set on transient UIA failure.
         /// </summary>
-        public Task<List<RECT>?> GetTaskbarButtonRectsAsync() => Task.Run(TryGetTaskbarButtonRects);
+        public Task<List<RECT>?> GetTaskbarButtonRectsAsync(bool force = false)
+            => Task.Run(() => TryGetTaskbarButtonRects(force));
 
-        private List<RECT>? TryGetTaskbarButtonRects()
+        private List<RECT>? TryGetTaskbarButtonRects(bool force)
         {
             if (hwndTaskbar == IntPtr.Zero)
                 return CachedTaskButtonRects();
+
+            if (!force && _lastTaskButtonRects is { } cached
+                && DateTime.UtcNow - _lastTaskButtonRectsAt < GeometryCacheTtl)
+                return cached;
 
             try
             {

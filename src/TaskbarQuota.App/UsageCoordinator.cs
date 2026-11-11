@@ -20,6 +20,8 @@ namespace TaskbarQuota
         public static UsageCoordinator Instance { get; } = new();
 
         private readonly ActiveAppDetector _detector = new();
+        private readonly UsagePublicationCache _publications = new();
+        private readonly SemaphoreSlim _tickGate = new(1, 1);
         // Persist last-good snapshots so the taskbar widget renders real numbers right after a reboot.
         private readonly UsageService _service = new(
             UsageSnapshotStore.DefaultDirectory, ProviderDiscoveryService.RecordFetchResult);
@@ -41,9 +43,16 @@ namespace TaskbarQuota
         // poll re-reads Synara's selection while it is the foreground app, so a switch reflects within
         // one interval of the data actually landing on disk regardless of FS-event timing.
         private Timer? _synaraPollTimer;
+        private bool _synaraPollArmed;
         // Synara's composer store writes through a 300 ms debounce. Filesystem events still publish as
         // soon as Chromium flushes, while this poll is only a fallback for missed/coalesced events.
         private static readonly TimeSpan SynaraPollInterval = TimeSpan.FromMilliseconds(100);
+        private static readonly TimeSpan DetectTickIntervalFast = TimeSpan.FromMilliseconds(500);
+        private static readonly TimeSpan DetectTickIntervalRelaxed = TimeSpan.FromMilliseconds(1500);
+        private readonly object _timerGate = new();
+        private int _detectPeriodRelaxed;
+        private IntPtr _adaptiveLastForegroundHwnd;
+        private int _adaptiveLastForegroundPid;
         // Wait-for-stable retry budget. The first read after an FS event may see a partially-written
         // log tail — we re-read a few times with ~8 ms gaps and publish the first value that repeats,
         // which is the strongest "Chromium is done" signal we can get without modifying Synara.
@@ -222,6 +231,19 @@ namespace TaskbarQuota
         /// </summary>
         public void NotifyForegroundChanged()
         {
+            SignalForegroundChanged();
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    SyncSynaraPollArmState();
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.Log.Debug($"[synara] poll arm failed: {ex.Message}");
+                }
+            });
+
             if (!WidgetSettingsService.HideWhenProviderUnfocused)
                 return;
 
@@ -357,19 +379,21 @@ namespace TaskbarQuota
             _detector.SynaraStateChanged += OnSynaraStateChanged;
             _detector.StartSynaraStateWatcher();
             // Fast tick for snappy active-app switching; usage fetches respect per-result cache TTL (60s ok, 5m on 429).
-            _timer = new Timer(_ => _ = TickAsync(), null, TimeSpan.FromMilliseconds(250), TimeSpan.FromMilliseconds(500));
-            // Steady low-latency Synara poll. Cheap when Synara is not foreground / unchanged: the fast
-            // detect short-circuits on the foreground process name and the LevelDB reader serves cached
-            // state until the log grows, so this only does real work the instant a switch hits disk.
-            _synaraPollTimer = new Timer(_ => PollSynaraSwitch(), null, SynaraPollInterval, SynaraPollInterval);
+            _timer = new Timer(_ => _ = TickAsync(), null, TimeSpan.FromMilliseconds(250), DetectTickIntervalFast);
+            // Low-latency Synara poll while Synara/T3 is foreground (file watcher stays primary). Disarmed at
+            // idle so GetForegroundWindow/OpenProcess is not hammered ~10/s when another app has focus.
+            _synaraPollTimer = new Timer(_ => PollSynaraSwitch(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         }
 
         private void OnOpenCodeModelStateChanged() => _ = HandleOpenCodeModelSwitchAsync();
 
         // Synara fires this the instant its localStorage LevelDB changes (provider switch / thread
-        // navigation). Resolve and publish immediately; the steady poll then covers any slower or
-        // partially-written follow-up flush from Chromium.
-        private void OnSynaraStateChanged() => TryHandleSynaraSwitch(waitForStable: true);
+        // navigation). Resolve and publish immediately; arm the foreground poll for any slower flush.
+        private void OnSynaraStateChanged()
+        {
+            SyncSynaraPollArmState();
+            TryHandleSynaraSwitch(waitForStable: true);
+        }
 
         // Steady-cadence companion to the file watcher. Each tick first tries the instant UI read: on
         // labelled Synara builds the composer button's accessible name carries the authoritative HOST
@@ -378,15 +402,27 @@ namespace TaskbarQuota
         // ambiguous model, or Synara not foreground) the disk path resolves the authoritative provider.
         private void PollSynaraSwitch()
         {
+            if (!ShouldArmSynaraPollTimer(_detector.TryGetForegroundSynaraWindow() != IntPtr.Zero))
+                return;
+
+            if (Interlocked.Exchange(ref _synaraSwitchHandling, 1) == 1)
+                return;
+
             try
             {
-                if (TryHandleSynaraUiaSwitch())
+                // One UIA read per pass, shared by the instant and disk paths.
+                var onScreenModel = _detector.TryReadForegroundSynaraModel();
+                if (TryHandleSynaraUiaSwitch(onScreenModel))
                     return;
-                TryHandleSynaraSwitch(waitForStable: false);
+                HandleSynaraSelection(waitForStable: false, onScreenModel);
             }
             catch (Exception ex)
             {
                 Diagnostics.Log.Debug($"[synara] poll failed: {ex.Message}");
+            }
+            finally
+            {
+                Volatile.Write(ref _synaraSwitchHandling, 0);
             }
         }
 
@@ -399,9 +435,8 @@ namespace TaskbarQuota
         /// Unlabelled builds expose only the model name, so they return false and the authoritative state
         /// reader resolves the provider without guessing.
         /// </summary>
-        private bool TryHandleSynaraUiaSwitch()
+        private bool TryHandleSynaraUiaSwitch(string? buttonName)
         {
-            var buttonName = _detector.TryReadForegroundSynaraModel();
             if (string.IsNullOrEmpty(buttonName))
             {
                 _lastUiaModelName = null;
@@ -423,28 +458,19 @@ namespace TaskbarQuota
             if (SynaraModelClassifier.Classify(buttonName) is not { } classification)
                 return false; // Bare model on an unlabelled build; state reader is authoritative.
 
-            if (Interlocked.Exchange(ref _synaraSwitchHandling, 1) == 1)
-                return false;
-            try
-            {
-                var sw = Stopwatch.StartNew();
-                var resolved = classification.Provider;
-                var host = new SynaraStateReader.SynaraSelection(
-                    resolved, SynaraProviderLiteral(resolved), classification.ModelDisplayName, ThreadTitle: null,
-                    Host: _detector.TryGetForegroundHost() ?? HostApp.Synara);
+            var sw = Stopwatch.StartNew();
+            var resolved = classification.Provider;
+            var host = new SynaraStateReader.SynaraSelection(
+                resolved, SynaraProviderLiteral(resolved), classification.ModelDisplayName, ThreadTitle: null,
+                Host: _detector.TryGetForegroundHost() ?? HostApp.Synara);
 
-                // Hold the authoritative UIA provider so the still-lagging disk read can't flicker it
-                // back before localStorage catches up. The disk path only enriches (model id / thread
-                // title) when it agrees with this provider; a disagreeing disk read is treated as stale.
-                _uiaProvider = resolved;
-                _uiaHoldUntilUtc = DateTime.UtcNow + UiaReconcileWindow;
+            // Hold the authoritative UIA provider so the still-lagging disk read can't flicker it
+            // back before localStorage catches up. The disk path only enriches (model id / thread
+            // title) when it agrees with this provider; a disagreeing disk read is treated as stale.
+            _uiaProvider = resolved;
+            _uiaHoldUntilUtc = DateTime.UtcNow + UiaReconcileWindow;
 
-                return PublishSynaraSelection(host, sw, "uia", attempts: 1);
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _synaraSwitchHandling, 0);
-            }
+            return PublishSynaraSelection(host, sw, "uia", attempts: 1);
         }
 
         private void TryHandleSynaraSwitch(bool waitForStable)
@@ -452,43 +478,36 @@ namespace TaskbarQuota
             if (Interlocked.Exchange(ref _synaraSwitchHandling, 1) == 1)
                 return;
 
-            var sw = Stopwatch.StartNew();
             try
             {
-                // The live on-screen model (read via UI Automation when Synara is foreground) is only used
-                // to disambiguate WHICH stored selection is active — so a stale focused-thread draft can't
-                // mis-resolve the provider (e.g. report OpenCode while the composer is on Cursor). The
-                // provider itself always comes from Synara's authoritative localStorage selection.
                 var onScreenModel = _detector.TryReadForegroundSynaraModel();
-
-                // Detection runs outside the coordinator gate (and outside the detector's full Detect lock)
-                // so this path is never queued behind TickAsync's WMI scan or a thread-pool hop.
-                // Filesystem events can arrive while Chromium is still appending a record, so only that
-                // path does a short stable-read retry. The steady poll is a fallback and reads once.
-                var host = waitForStable
-                    ? DetectSynaraSelectionStable(onScreenModel, out var stableAttempts)
-                    : DetectSynaraSelectionOnce(onScreenModel, out stableAttempts);
-                if (host is null)
-                    return;
-
-                // While an instant UIA read is held, the disk read can still be lagging on the
-                // PRE-SWITCH provider. Accept it only when it agrees with the held provider (it's the
-                // truth catching up and can enrich the model id / thread title); ignore it when it
-                // differs (stale, would flicker back). After the window the disk is authoritative again.
-                if (_uiaProvider is ProviderId held
-                    && DateTime.UtcNow < _uiaHoldUntilUtc
-                    && host.Provider != held)
-                {
-                    return;
-                }
-                ClearUiaHold();
-
-                PublishSynaraSelection(host, sw, "disk", stableAttempts);
+                HandleSynaraSelection(waitForStable, onScreenModel);
             }
             finally
             {
-                Interlocked.Exchange(ref _synaraSwitchHandling, 0);
+                Volatile.Write(ref _synaraSwitchHandling, 0);
             }
+        }
+
+        private void HandleSynaraSelection(bool waitForStable, string? onScreenModel)
+        {
+            var sw = Stopwatch.StartNew();
+
+            var host = waitForStable
+                ? DetectSynaraSelectionStable(onScreenModel, out var stableAttempts)
+                : DetectSynaraSelectionOnce(onScreenModel, out stableAttempts);
+            if (host is null)
+                return;
+
+            if (_uiaProvider is ProviderId held
+                && DateTime.UtcNow < _uiaHoldUntilUtc
+                && host.Provider != held)
+            {
+                return;
+            }
+            ClearUiaHold();
+
+            PublishSynaraSelection(host, sw, "disk", stableAttempts);
         }
 
         /// <summary>
@@ -618,7 +637,7 @@ namespace TaskbarQuota
                         return;
 
                     LastState = fresh;
-                    StateChanged?.Invoke(fresh);
+                    PublishState(fresh);
                 }
                 finally
                 {
@@ -751,7 +770,7 @@ namespace TaskbarQuota
                     }
 
                     LastState = fresh;
-                    StateChanged?.Invoke(fresh);
+                    PublishState(fresh);
                 }
                 finally
                 {
@@ -876,7 +895,7 @@ namespace TaskbarQuota
                         return;
 
                     LastState = fresh;
-                    StateChanged?.Invoke(fresh);
+                    PublishState(fresh);
                 }
                 finally
                 {
@@ -916,7 +935,7 @@ namespace TaskbarQuota
                 return;
 
             LastState = snapshot;
-            StateChanged?.Invoke(snapshot);
+            PublishState(snapshot);
         }
 
         /// <summary>
@@ -941,7 +960,7 @@ namespace TaskbarQuota
             try
             {
                 var result = (await _service.FetchAsync(id).ConfigureAwait(false)).WithSource(SourceFor(id));
-                StateChanged?.Invoke(result);
+                PublishState(result);
             }
             catch (Exception ex)
             {
@@ -1028,6 +1047,11 @@ namespace TaskbarQuota
 
         public async Task TickAsync(bool force = false)
         {
+            if (force)
+                await _tickGate.WaitAsync().ConfigureAwait(false);
+            else if (!await _tickGate.WaitAsync(0).ConfigureAwait(false))
+                return;
+
             // Phase 1 — detection. Run the slow foreground/WMI scan outside the gate so Synara's
             // file-watcher path can publish provider switches while a tick is mid-detect.
             ProviderId target;
@@ -1036,14 +1060,23 @@ namespace TaskbarQuota
             SynaraStateReader.SynaraSelection? detectedSynaraHost;
             try
             {
-                detected = _detector.Detect();
-                detectedSource = _detector.ActiveSource;
-                detectedSynaraHost = _detector.ActiveSynaraHost;
+                try
+                {
+                    detected = _detector.Detect(out var avoidedHeavyTerminalScan);
+                    detectedSource = _detector.ActiveSource;
+                    detectedSynaraHost = _detector.ActiveSynaraHost;
+                    ApplyAdaptiveDetectTickAfterDetect(avoidedHeavyTerminalScan);
+                    SyncSynaraPollArmState();
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.Log.Error(ex, "Coordinator detect failed");
+                    return;
+                }
             }
-            catch (Exception ex)
+            finally
             {
-                Diagnostics.Log.Error(ex, "Coordinator detect failed");
-                return;
+                _tickGate.Release();
             }
 
             if (!await _detectGate.WaitAsync(0).ConfigureAwait(false)) return;
@@ -1176,7 +1209,7 @@ namespace TaskbarQuota
                             Diagnostics.Log.Warning($"Switched to {target} (detected={detected}) FAILED: {result.Error}");
                     }
                     LastState = result;
-                    StateChanged?.Invoke(result);
+                    PublishState(result, force);
                 }
 
                 await PublishWidgetProviderStateAsync(target, force).ConfigureAwait(false);
@@ -1204,7 +1237,13 @@ namespace TaskbarQuota
                 return;
 
             var widgetResult = await _service.FetchAsync(widgetTarget, force).ConfigureAwait(false);
-            StateChanged?.Invoke(widgetResult.WithSource(SourceFor(widgetTarget)));
+            PublishState(widgetResult.WithSource(SourceFor(widgetTarget)), force);
+        }
+
+        private void PublishState(UsageResult result, bool force = false)
+        {
+            if (_publications.ShouldPublish(result, force))
+                StateChanged?.Invoke(result);
         }
 
         private void PromoteRecentProvider(ProviderId provider)
@@ -1316,6 +1355,70 @@ namespace TaskbarQuota
         {
             _lastPresenceProbeAt = DateTime.UtcNow;
             return _detector.HasAnyKnownToolRunning();
+        }
+
+        private void SignalForegroundChanged()
+        {
+            lock (_timerGate)
+            {
+                _adaptiveLastForegroundHwnd = IntPtr.Zero;
+                _adaptiveLastForegroundPid = 0;
+                if (_detectPeriodRelaxed == 0 || _timer is null)
+                    return;
+
+                _detectPeriodRelaxed = 0;
+                _timer.Change(TimeSpan.Zero, DetectTickIntervalFast);
+            }
+        }
+
+        private void ApplyAdaptiveDetectTickAfterDetect(bool avoidedHeavyTerminalScan)
+        {
+            var hwnd = User32.GetForegroundWindow();
+            User32.GetWindowThreadProcessId(hwnd, out uint pid);
+            var foregroundPid = (int)pid;
+
+            lock (_timerGate)
+            {
+                bool sameForeground = hwnd == _adaptiveLastForegroundHwnd
+                    && foregroundPid == _adaptiveLastForegroundPid;
+                if (!sameForeground)
+                {
+                    _adaptiveLastForegroundHwnd = hwnd;
+                    _adaptiveLastForegroundPid = foregroundPid;
+                }
+
+                var interval = ResolveDetectTickInterval(sameForeground, avoidedHeavyTerminalScan);
+                int relaxed = interval == DetectTickIntervalRelaxed ? 1 : 0;
+                if (relaxed == _detectPeriodRelaxed)
+                    return;
+
+                _detectPeriodRelaxed = relaxed;
+                _timer?.Change(interval, interval);
+            }
+        }
+
+        /// <summary>Testable policy for the main detect timer cadence.</summary>
+        internal static TimeSpan ResolveDetectTickInterval(bool sameForeground, bool avoidedHeavyTerminalScan)
+            => sameForeground && avoidedHeavyTerminalScan
+                ? DetectTickIntervalRelaxed
+                : DetectTickIntervalFast;
+
+        /// <summary>Testable policy for the Synara low-latency poll timer.</summary>
+        internal static bool ShouldArmSynaraPollTimer(bool synaraForeground) => synaraForeground;
+
+        private void SyncSynaraPollArmState()
+        {
+            bool shouldArm = ShouldArmSynaraPollTimer(_detector.TryGetForegroundSynaraWindow() != IntPtr.Zero);
+            lock (_timerGate)
+            {
+                if (shouldArm == _synaraPollArmed || _synaraPollTimer is null)
+                    return;
+
+                _synaraPollArmed = shouldArm;
+                _synaraPollTimer.Change(
+                    shouldArm ? SynaraPollInterval : Timeout.InfiniteTimeSpan,
+                    shouldArm ? SynaraPollInterval : Timeout.InfiniteTimeSpan);
+            }
         }
 
         internal static IReadOnlyList<UsageResult> SortByRecentActivity(
