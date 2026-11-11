@@ -12,6 +12,7 @@ public class UsagePublicationCacheTests
         var result = UsageResult.Failure(ProviderId.Codex, "test");
 
         Assert.True(cache.ShouldPublish(result, force: false));
+        cache.RecordPublished(result);
         Assert.False(cache.ShouldPublish(result, force: false));
         Assert.True(cache.ShouldPublish(result, force: true));
     }

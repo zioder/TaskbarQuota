@@ -25,6 +25,9 @@ namespace TaskbarQuota.Taskbar
         private DateTime _lastTaskButtonRectsAt = DateTime.MinValue;
         private static readonly TimeSpan TaskButtonRectsMaxAge = TimeSpan.FromSeconds(30);
         private static readonly TimeSpan GeometryCacheTtl = TimeSpan.FromSeconds(1);
+        private int _geometryGeneration;
+        private int _widgetsRectCommittedGeneration = -1;
+        private int _taskRectsCommittedGeneration = -1;
 
         private bool widgetsButtonEnabled;
         private bool taskbarCentered;
@@ -62,8 +65,7 @@ namespace TaskbarQuota.Taskbar
                 if (reason == TaskbarChangeReason.None)
                     return;
 
-                _lastWidgetsButtonRectAt = DateTime.MinValue;
-                _lastTaskButtonRectsAt = DateTime.MinValue;
+                _geometryGeneration++;
 
                 // Commit one coherent snapshot. If several shell properties changed together, the priority
                 // reason still describes the refresh while the next poll sees the complete new baseline.
@@ -112,9 +114,11 @@ namespace TaskbarQuota.Taskbar
                 return null;
 
             if (_lastWidgetsButtonRect is { } widgetsCached
-                && DateTime.UtcNow - _lastWidgetsButtonRectAt < GeometryCacheTtl)
+                && DateTime.UtcNow - _lastWidgetsButtonRectAt < GeometryCacheTtl
+                && _widgetsRectCommittedGeneration == _geometryGeneration)
                 return widgetsCached;
 
+            int generation = _geometryGeneration;
             try
             {
                 _automation ??= new CUIAutomation();
@@ -138,8 +142,12 @@ namespace TaskbarQuota.Taskbar
                 if (!IsOnTaskbarBand(rect))
                     return CachedWidgetsButtonRect();
 
+                if (generation != _geometryGeneration)
+                    return CachedWidgetsButtonRect();
+
                 _lastWidgetsButtonRect = rect;
                 _lastWidgetsButtonRectAt = DateTime.UtcNow;
+                _widgetsRectCommittedGeneration = generation;
                 return rect;
             }
             catch (Exception ex)
@@ -174,9 +182,11 @@ namespace TaskbarQuota.Taskbar
                 return CachedTaskButtonRects();
 
             if (!force && _lastTaskButtonRects is { } cached
-                && DateTime.UtcNow - _lastTaskButtonRectsAt < GeometryCacheTtl)
+                && DateTime.UtcNow - _lastTaskButtonRectsAt < GeometryCacheTtl
+                && _taskRectsCommittedGeneration == _geometryGeneration)
                 return cached;
 
+            int generation = _geometryGeneration;
             try
             {
                 _automation ??= new CUIAutomation();
@@ -210,8 +220,12 @@ namespace TaskbarQuota.Taskbar
                     rects.Add(rect);
                 }
 
+                if (generation != _geometryGeneration)
+                    return CachedTaskButtonRects();
+
                 _lastTaskButtonRects = rects;
                 _lastTaskButtonRectsAt = DateTime.UtcNow;
+                _taskRectsCommittedGeneration = generation;
                 return rects;
             }
             catch (Exception ex)

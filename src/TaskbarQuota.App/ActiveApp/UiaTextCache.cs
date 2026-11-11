@@ -16,6 +16,7 @@ internal sealed class UiaTextCache
     private string? _discriminator;
     private string? _cached;
     private long _atTicks;
+    private int _readGeneration;
 
     internal UiaTextCache(int minIntervalMs, int maxStaleMs)
     {
@@ -25,18 +26,26 @@ internal sealed class UiaTextCache
 
     internal string? Read(IntPtr hwnd, string? discriminator, Func<string?> read)
     {
-        var now = Environment.TickCount64;
+        int generation;
         lock (_gate)
         {
+            var now = Environment.TickCount64;
             if (_hwnd == hwnd
                 && string.Equals(_discriminator, discriminator, StringComparison.Ordinal)
                 && now - _atTicks < _minIntervalMs)
                 return _cached;
+
+            generation = ++_readGeneration;
         }
 
         var value = read();
+
         lock (_gate)
         {
+            if (generation != _readGeneration)
+                return _cached;
+
+            var now = Environment.TickCount64;
             if (value is null
                 && _hwnd == hwnd
                 && string.Equals(_discriminator, discriminator, StringComparison.Ordinal)
@@ -56,6 +65,7 @@ internal sealed class UiaTextCache
     {
         lock (_gate)
         {
+            _readGeneration++;
             _hwnd = IntPtr.Zero;
             _discriminator = null;
             _cached = null;

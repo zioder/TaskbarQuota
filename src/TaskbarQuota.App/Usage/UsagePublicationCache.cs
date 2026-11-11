@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace TaskbarQuota.Usage;
@@ -19,6 +20,8 @@ internal sealed class UsagePublicationCache
         bool Pending,
         bool Stale,
         long ObservationSequence,
+        DateTimeOffset? ObservedAt,
+        DateTimeOffset? FetchedAt,
         ProviderSourceKind SourceKind,
         string? SourceName);
 
@@ -29,13 +32,13 @@ internal sealed class UsagePublicationCache
 
         var fingerprint = Fingerprint(result);
         lock (_gate)
-        {
-            if (_last.TryGetValue(result.Id, out var prev) && prev == fingerprint)
-                return false;
+            return !_last.TryGetValue(result.Id, out var prev) || prev != fingerprint;
+    }
 
-            _last[result.Id] = fingerprint;
-            return true;
-        }
+    internal void RecordPublished(UsageResult result)
+    {
+        lock (_gate)
+            _last[result.Id] = Fingerprint(result);
     }
 
     private static UsageFingerprint Fingerprint(UsageResult result)
@@ -50,6 +53,8 @@ internal sealed class UsagePublicationCache
             result.IsPending,
             result.IsStale,
             result.ObservationSequence,
+            result.ObservedAt,
+            result.Fetch?.FetchedAt,
             result.Source.Kind,
             result.Source.Name);
     }

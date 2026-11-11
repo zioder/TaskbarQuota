@@ -22,6 +22,7 @@ namespace TaskbarQuota
         private readonly ActiveAppDetector _detector = new();
         private readonly UsagePublicationCache _publications = new();
         private readonly SemaphoreSlim _tickGate = new(1, 1);
+        private readonly object _publishGate = new();
         // Persist last-good snapshots so the taskbar widget renders real numbers right after a reboot.
         private readonly UsageService _service = new(
             UsageSnapshotStore.DefaultDirectory, ProviderDiscoveryService.RecordFetchResult);
@@ -1052,14 +1053,14 @@ namespace TaskbarQuota
             else if (!await _tickGate.WaitAsync(0).ConfigureAwait(false))
                 return;
 
-            // Phase 1 — detection. Run the slow foreground/WMI scan outside the gate so Synara's
-            // file-watcher path can publish provider switches while a tick is mid-detect.
-            ProviderId target;
-            ProviderId? detected;
-            ProviderSource detectedSource;
-            SynaraStateReader.SynaraSelection? detectedSynaraHost;
             try
             {
+                // Phase 1 — detection. Run the slow foreground/WMI scan outside the gate so Synara's
+                // file-watcher path can publish provider switches while a tick is mid-detect.
+                ProviderId target;
+                ProviderId? detected;
+                ProviderSource detectedSource;
+                SynaraStateReader.SynaraSelection? detectedSynaraHost;
                 try
                 {
                     detected = _detector.Detect(out var avoidedHeavyTerminalScan);
@@ -1073,15 +1074,10 @@ namespace TaskbarQuota
                     Diagnostics.Log.Error(ex, "Coordinator detect failed");
                     return;
                 }
-            }
-            finally
-            {
-                _tickGate.Release();
-            }
 
-            if (!await _detectGate.WaitAsync(0).ConfigureAwait(false)) return;
-            try
-            {
+                if (!await _detectGate.WaitAsync(0).ConfigureAwait(false)) return;
+                try
+                {
                 // Mirror the Synara switch path's guard: while an instant UIA read is held, a still-lagging
                 // Synara disk detect can show the pre-switch provider. Only suppress a DISAGREEING Synara
                 // disk read (keep the held UIA provider so it doesn't flicker back); when the disk agrees
@@ -1171,17 +1167,17 @@ namespace TaskbarQuota
 
                 // Last-active fallback: nothing detected and never had one -> show the first enabled
                 // provider (never a hidden default), but do not make the fallback sticky as the active one.
-                target = _lastActive ?? WidgetDisplayProvider ?? ProviderId.Codex;
-            }
-            catch (Exception ex)
-            {
-                Diagnostics.Log.Error(ex, "Coordinator detect failed");
-                return;
-            }
-            finally
-            {
-                _detectGate.Release();
-            }
+                    target = _lastActive ?? WidgetDisplayProvider ?? ProviderId.Codex;
+                }
+                catch (Exception ex)
+                {
+                    Diagnostics.Log.Error(ex, "Coordinator detect failed");
+                    return;
+                }
+                finally
+                {
+                    _detectGate.Release();
+                }
 
             // Phase 2 — usage fetch (may hit the network). Gated separately and skipped if a fetch is
             // already running, so a slow fetch can never stall detection of the next provider switch.
@@ -1222,6 +1218,11 @@ namespace TaskbarQuota
             {
                 _gate.Release();
             }
+            }
+            finally
+            {
+                _tickGate.Release();
+            }
         }
 
         /// <summary>
@@ -1242,8 +1243,14 @@ namespace TaskbarQuota
 
         private void PublishState(UsageResult result, bool force = false)
         {
-            if (_publications.ShouldPublish(result, force))
+            lock (_publishGate)
+            {
+                if (!_publications.ShouldPublish(result, force))
+                    return;
+
                 StateChanged?.Invoke(result);
+                _publications.RecordPublished(result);
+            }
         }
 
         private void PromoteRecentProvider(ProviderId provider)
