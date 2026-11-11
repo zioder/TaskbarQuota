@@ -36,6 +36,8 @@ namespace TaskbarQuota
         public App()
         {
             InitializeComponent();
+            if (string.Equals(Environment.GetEnvironmentVariable("TASKBARQUOTA_LAYOUT_TRACE"), "1", StringComparison.Ordinal))
+                DebugSettings.LayoutCycleTracingLevel = LayoutCycleTracingLevel.High;
             UnhandledException += (_, e) =>
             {
                 Log.Error(e.Exception, "Unhandled exception");
