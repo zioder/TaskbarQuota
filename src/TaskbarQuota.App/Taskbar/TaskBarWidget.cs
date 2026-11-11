@@ -219,6 +219,7 @@ namespace TaskbarQuota.Taskbar
         private bool positionRunnerActive;
         private bool positionUpdatePending;
         private TaskbarChangeReason pendingPositionReason;
+        private bool pendingFreshObstacleScan;
         private bool pendingTaskbarCentered;
         private bool pendingTaskbarWidgetsEnabled;
 
@@ -869,10 +870,11 @@ namespace TaskbarQuota.Taskbar
             ApplyActivitySnapshot(snapshot);
         }
 
-        private void ApplyActivitySnapshot(AgentActivitySnapshot snapshot)
+        private void ApplyActivitySnapshot(AgentActivitySnapshot snapshot, bool forceRender = false)
         {
             var compact = snapshot.CompactItems;
-            bool unchanged = IsActivitySnapshotUnchanged(activitySnapshot, snapshot, appliedCompactActivity, compact);
+            bool unchanged = !forceRender
+                && IsActivitySnapshotUnchanged(activitySnapshot, snapshot, appliedCompactActivity, compact);
             activitySnapshot = snapshot;
             // Transcript discovery publishes about once per second. Rebuilding and resizing the separate
             // activity island while its pointer is captured makes the native drag visibly stutter and can
@@ -883,6 +885,7 @@ namespace TaskbarQuota.Taskbar
             if (unchanged)
                 return;
             appliedCompactActivity = compact;
+            pendingFreshObstacleScan = true;
             activitySummary?.Apply(snapshot, activeTileProvider);
             foreach (var tile in tiles)
                 tile?.SetAgentActivity(snapshot);
@@ -1607,7 +1610,9 @@ namespace TaskbarQuota.Taskbar
 
                 // UIA scan of the taskbar's buttons — the only way to see the Win11 XAML app icons. Cache the
                 // client rects so the synchronous drag path can reuse them without an async read.
-                var taskButtonRects = await taskbarWatcher.GetTaskbarButtonRectsAsync();
+                bool forceObstacles = pendingFreshObstacleScan;
+                pendingFreshObstacleScan = false;
+                var taskButtonRects = await taskbarWatcher.GetTaskbarButtonRectsAsync(force: forceObstacles);
                 cancellationToken.ThrowIfCancellationRequested();
                 if (taskButtonRects is not null)
                 {
@@ -2718,13 +2723,11 @@ namespace TaskbarQuota.Taskbar
             {
                 pendingEmptyActivitySnapshot = null;
                 activityEmptySnapshotTimer.Stop();
-                activitySnapshot = pending;
+                ApplyActivitySnapshot(pending, forceRender: true);
+                return;
             }
-            appliedCompactActivity = activitySnapshot.CompactItems;
-            activitySummary.Apply(activitySnapshot, activeTileProvider);
-            foreach (var tile in tiles)
-                tile?.SetAgentActivity(activitySnapshot);
-            RecomputeLayout(forceReposition: true);
+
+            ApplyActivitySnapshot(activitySnapshot, forceRender: true);
         }
 
         /// <summary>
