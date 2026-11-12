@@ -17,6 +17,7 @@ namespace TaskbarQuota.ViewModels
     {
         private readonly DispatcherQueue _dispatcher;
         private IReadOnlyList<UsageResult> _lastResults = Array.Empty<UsageResult>();
+        private IReadOnlyList<UsageResult> _lastHistoryResults = Array.Empty<UsageResult>();
         private ProviderId? _lastActive;
         private ProviderId? _lastTopProvider;
         private volatile CancellationTokenSource? _loadCts;
@@ -51,6 +52,7 @@ namespace TaskbarQuota.ViewModels
                 ? Visibility.Collapsed
                 : Visibility.Visible;
             WidgetSettingsService.PercentageModeChanged += OnPercentageModeChanged;
+            WidgetSettingsService.UsageBarColorModeChanged += OnPercentageModeChanged;
             WidgetSettingsService.Changed += OnWidgetSettingsChanged;
             WidgetSettingsService.DashboardCompositionChanged += OnDashboardCompositionChanged;
             UsageCoordinator.Instance.StateChanged += OnCoordinatorStateChanged;
@@ -175,18 +177,23 @@ namespace TaskbarQuota.ViewModels
             var cts = new CancellationTokenSource();
             _loadCts = cts;
             var ct = cts.Token;
+            var stages = new DashboardLoadStageGate();
+            long initialStage = stages.Reserve();
 
             var active = UsageCoordinator.Instance.ActiveProvider;
             var results = await Task.Run(() => BuildDashboardResults(active)).ConfigureAwait(false);
+            // The progressive fetch below mutates results off-thread. Never give a queued UI callback
+            // that live list: it can still be enumerating when the next provider completes.
+            var initialResults = results.ToArray();
             _dispatcher.TryEnqueue(() =>
             {
                 // A newer load may have superseded this one while we were off-thread; only the
                 // newest load may touch shared state, or a cancelled load can flip IsLoading off
                 // mid-fetch and flash the "No local usage history found" empty state (spinner →
                 // empty → data).
-                if (!ReferenceEquals(_loadCts, cts))
+                if (!ReferenceEquals(_loadCts, cts) || !stages.TryAccept(initialStage))
                     return;
-                UpdateCards(results, active);
+                UpdateCards(initialResults, active);
                 StatusText = force ? "Refreshing..." : "Loading...";
             });
 
@@ -207,12 +214,13 @@ namespace TaskbarQuota.ViewModels
 
                         var current = UsageCoordinator.Instance.ActiveProvider;
                         var snapshot = results.ToList();
+                        long stage = stages.Reserve();
                         _ = Task.Run(() =>
                         {
                             var merged = BuildDashboardResults(current, snapshot);
                             _dispatcher.TryEnqueue(() =>
                             {
-                                if (!ReferenceEquals(_loadCts, cts))
+                                if (!ReferenceEquals(_loadCts, cts) || !stages.TryAccept(stage))
                                     return;
                                 UpdateCards(merged, current);
                             });
@@ -224,6 +232,7 @@ namespace TaskbarQuota.ViewModels
                 {
                     var finalActive = UsageCoordinator.Instance.ActiveProvider;
                     var finalResults = results.ToList();
+                    long finalStage = stages.Reserve();
                     var completed = await Task.Run(() =>
                     {
                         var merged = BuildDashboardResults(finalActive, finalResults);
@@ -231,7 +240,7 @@ namespace TaskbarQuota.ViewModels
                     }).ConfigureAwait(false);
                     _dispatcher.TryEnqueue(() =>
                     {
-                        if (!ReferenceEquals(_loadCts, cts))
+                        if (!ReferenceEquals(_loadCts, cts) || !stages.TryAccept(finalStage))
                             return;
                         UpdateCards(
                             completed.Results,
@@ -288,7 +297,14 @@ namespace TaskbarQuota.ViewModels
         {
             var selectedProviderId = SelectedCard?.ProviderId;
 
-            results = BuildDashboardResults(active, results);
+            // Coordinator refreshes can complete while a dashboard pass is still merging. Its
+            // snapshot mustn't put an earlier provider observation back over the newer UI result.
+            results = DashboardResultMerge.KeepNewerObservations(BuildDashboardResults(active, results), _lastResults);
+            var previousHistoryResults = _lastHistoryResults;
+            _lastHistoryResults = DashboardResultMerge.KeepNewerHistorySnapshots(
+                usageResults ?? _lastHistoryResults, results);
+            bool historyAccountChanged = previousHistoryResults.Any(previous => !_lastHistoryResults.Any(current =>
+                current.Id == previous.Id && current.CacheIdentity == previous.CacheIdentity));
             _lastResults = results.ToArray();
             _lastActive = active;
 
@@ -299,17 +315,17 @@ namespace TaskbarQuota.ViewModels
                 .Where(r => ProviderDiscoveryService.ShouldShowInAvailable(r, active))
                 .ToList();
 
-            var historyOverrides = (usageResults ?? Array.Empty<UsageResult>())
+            var historyOverrides = _lastHistoryResults
                 .Where(result => result.Fetch?.Usage.UsageHistory is not null)
                 .ToDictionary(result => result.Id, result => result.Fetch!.Usage.UsageHistory!);
-            bool refreshProviderHistory = refreshUsageSnapshot && historyOverrides.Count > 0;
+            bool refreshProviderHistory = refreshUsageSnapshot && usageResults is not null;
             SyncCardCollection(Cards, dashboardResults, active, force || refreshProviderHistory, historyOverrides);
             SyncCardCollection(AvailableCards, availableResults, active: null, force: force || refreshProviderHistory, historyOverrides);
             // Populate the spend snapshot only from a complete usage-history pass. Progressive quota
             // updates and per-provider callbacks would otherwise flip HasSpendData early and flash a
             // partially-populated Cost surface before the full history is ready.
-            if (refreshUsageSnapshot && usageResults is not null)
-                TotalSpend.UpdateResults(usageResults, force: true);
+            if ((refreshUsageSnapshot && usageResults is not null) || historyAccountChanged)
+                TotalSpend.UpdateResults(_lastHistoryResults, force: true);
 
             AvailableCardsVisibility = AvailableCards.Count > 0
                 ? Visibility.Visible
@@ -514,7 +530,9 @@ namespace TaskbarQuota.ViewModels
                 combined[provider.Id] = UsageResult.Success(
                     provider.Id,
                     provider,
-                    new ProviderFetchResult(usage, "Local usage history"));
+                    // Local transcripts remain provider-wide. Fence the scan's UI lifetime to the
+                    // credentials present at capture; this doesn't account-filter the source files.
+                    new ProviderFetchResult(usage, "Local usage history", cacheIdentity: UsageCacheIdentity.CurrentFor(provider)));
             }
             return combined.Values.OrderBy(result => result.Id).ToArray();
         }
@@ -530,9 +548,10 @@ namespace TaskbarQuota.ViewModels
             return -1;
         }
 
-        private static string BuildCardSignature(UsageResult r, bool isActive)
+        internal static string BuildCardSignature(UsageResult r, bool isActive)
         {
             var sb = new StringBuilder()
+                .Append(r.CacheIdentity).Append('|')
                 .Append(r.Id).Append('|')
                 .Append(isActive).Append('|')
                 .Append(r.Error).Append('|')
@@ -544,6 +563,7 @@ namespace TaskbarQuota.ViewModels
                 return sb.ToString();
 
             var usage = fetch.Usage;
+            sb.Append('|').Append(usage.HasPrimaryWindow);
             AppendRateWindow(sb, usage.Primary);
             AppendRateWindow(sb, usage.Secondary);
             AppendRateWindow(sb, usage.ModelSpecific);
@@ -558,6 +578,10 @@ namespace TaskbarQuota.ViewModels
               .Append('|').Append(usage.Email)
               .Append('|').Append(usage.Cost?.Label)
               .Append('|').Append(usage.Cost?.Display)
+              .Append('|').Append(usage.Cost?.ResetsAt)
+              .Append('|').Append(usage.Pricing?.Period)
+              .Append('|').Append(usage.Pricing?.Multiplier)
+              .Append('|').Append(usage.UsageDashboardUrl)
               .Append('|').Append(fetch.SourceLabel);
 
             if (usage.AdditionalUsage is { } additional)
@@ -570,7 +594,7 @@ namespace TaskbarQuota.ViewModels
 
             if (usage.ResetCredits is { } resetCredits)
             {
-                sb.Append('|').Append(resetCredits.AvailableCount);
+                sb.Append('|').Append(resetCredits.AvailableCount).Append('|').Append(resetCredits.CachedAt);
                 foreach (var credit in resetCredits.Credits)
                 {
                     sb.Append('|').Append(credit.Status)
@@ -620,6 +644,7 @@ namespace TaskbarQuota.ViewModels
 
             sb.Append('|').Append(window.UsedPercent)
               .Append('|').Append(window.IsIncluded)
+              .Append('|').Append(window.Label)
               .Append('|').Append(window.ResetDescription)
               .Append('|').Append(window.WindowMinutes)
               .Append('|').Append(window.ResetAt);
@@ -628,6 +653,7 @@ namespace TaskbarQuota.ViewModels
         public void Dispose()
         {
             WidgetSettingsService.PercentageModeChanged -= OnPercentageModeChanged;
+            WidgetSettingsService.UsageBarColorModeChanged -= OnPercentageModeChanged;
             WidgetSettingsService.Changed -= OnWidgetSettingsChanged;
             WidgetSettingsService.DashboardCompositionChanged -= OnDashboardCompositionChanged;
             UsageCoordinator.Instance.StateChanged -= OnCoordinatorStateChanged;

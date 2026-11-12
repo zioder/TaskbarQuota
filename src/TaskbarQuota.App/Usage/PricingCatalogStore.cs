@@ -26,14 +26,19 @@ internal sealed class PricingCatalogStore
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(30) };
     private Catalog _catalog;
     private bool _refreshStarted;
+    private readonly bool _bundledOnly;
 
-    public PricingCatalogStore() => _catalog = LoadCatalog();
+    public PricingCatalogStore(bool bundledOnly = false)
+    {
+        _bundledOnly = bundledOnly;
+        _catalog = LoadCatalog();
+    }
 
     public Catalog Current()
     {
         lock (_gate)
         {
-            if (!_refreshStarted && RefreshDue())
+            if (!_bundledOnly && !_refreshStarted && RefreshDue())
             {
                 _refreshStarted = true;
                 _ = Task.Run(RefreshAsync);
@@ -93,10 +98,10 @@ internal sealed class PricingCatalogStore
     private Catalog LoadCatalog()
     {
         var baseDir = Path.Combine(AppContext.BaseDirectory, "Resources", "Pricing");
-        var cacheDir = Path.Combine(AppStorage.AppDataDirectory, "pricing");
+        var cacheDir = _bundledOnly ? null : Path.Combine(AppStorage.AppDataDirectory, "pricing");
         var supplement = ReadSupplement(Path.Combine(baseDir, "pricing_supplement.json"));
-        var primary = ReadCatalog(File.Exists(Path.Combine(cacheDir, "litellm.json")) ? Path.Combine(cacheDir, "litellm.json") : Path.Combine(baseDir, "pricing_litellm_snapshot.json"));
-        var secondary = ReadCatalog(File.Exists(Path.Combine(cacheDir, "modelsdev.json")) ? Path.Combine(cacheDir, "modelsdev.json") : Path.Combine(baseDir, "pricing_models_dev_snapshot.json"));
+        var primary = ReadCatalog(cacheDir is not null && File.Exists(Path.Combine(cacheDir, "litellm.json")) ? Path.Combine(cacheDir, "litellm.json") : Path.Combine(baseDir, "pricing_litellm_snapshot.json"));
+        var secondary = ReadCatalog(cacheDir is not null && File.Exists(Path.Combine(cacheDir, "modelsdev.json")) ? Path.Combine(cacheDir, "modelsdev.json") : Path.Combine(baseDir, "pricing_models_dev_snapshot.json"));
         return new Catalog(supplement, primary, secondary);
     }
 

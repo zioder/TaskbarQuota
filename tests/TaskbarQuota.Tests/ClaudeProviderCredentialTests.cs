@@ -88,9 +88,12 @@ public class ClaudeProviderCredentialTests
         Assert.Null(ClaudeProvider.BuildResultForTesting(missing.RootElement, credentials).Usage.ResetCredits);
     }
 
-    [Fact]
-    public void BuildResult_ClaudeNewUsageFields_AreDisplayed()
+    [Theory]
+    [InlineData("en-US", "$5.00 / $10.00")]
+    [InlineData("ru-RU", "$5,00 / $10,00")]
+    public void BuildResult_ClaudeNewUsageFields_AreDisplayed(string culture, string expectedCost)
     {
+        using var scope = new CultureScope(culture);
         using var doc = JsonDocument.Parse("""
         {
           "five_hour": { "utilization": 9, "resets_at": "2026-06-02T12:00:00.000Z" },
@@ -116,7 +119,7 @@ public class ClaudeProviderCredentialTests
         Assert.Contains(result.Usage.ExtraRateWindows, w => w.Id == "claude-oauth-apps" && w.Window.UsedPercent == 42);
         Assert.Contains(result.Usage.ExtraRateWindows, w => w.Id == "claude-design" && w.Window.UsedPercent == 26);
         Assert.Contains(result.Usage.ExtraRateWindows, w => w.Id == "claude-routines" && w.Window.UsedPercent == 11);
-        Assert.Equal("$5.00 / $10.00", result.Usage.Cost?.Display);
+        Assert.Equal(expectedCost, result.Usage.Cost?.Display);
         Assert.Equal(5.0, result.Usage.AdditionalUsage?.SpentUsd);
         Assert.Equal(10.0, result.Usage.AdditionalUsage?.BudgetUsd);
     }
@@ -211,9 +214,12 @@ public class ClaudeProviderCredentialTests
         }
     }
 
-    [Fact]
-    public void BuildResult_UncappedExtraUsage_DoesNotCreateFakePrimaryWindow()
+    [Theory]
+    [InlineData("en-US", "$9.27")]
+    [InlineData("ru-RU", "$9,27")]
+    public void BuildResult_UncappedExtraUsage_DoesNotCreateFakePrimaryWindow(string culture, string expectedCost)
     {
+        using var scope = new CultureScope(culture);
         using var doc = JsonDocument.Parse("""
         {
           "extra_usage": {
@@ -230,7 +236,7 @@ public class ClaudeProviderCredentialTests
 
         Assert.False(result.Usage.HasPrimaryWindow);
         Assert.Equal("Spend limit", result.Usage.Cost?.Label);
-        Assert.Equal("$9.27", result.Usage.Cost?.Display);
+        Assert.Equal(expectedCost, result.Usage.Cost?.Display);
     }
 
     [Fact]

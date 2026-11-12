@@ -99,6 +99,7 @@ namespace TaskbarQuota.Controls
         private List<WidgetUsageRow> _rows = new();
         private bool _forcePercentagesOnly;
         private UsageResult? _lastResult;
+        private readonly UsageObservationSequenceGate _observationSequenceGate = new();
         private ProviderId? _lastAppliedProvider;
         private AgentActivityStatus? _agentStatus;
         private AgentActivitySnapshot _lastActivitySnapshot = new(Array.Empty<AgentActivityItem>());
@@ -230,10 +231,17 @@ namespace TaskbarQuota.Controls
                 SetActiveToolVisible(false);
                 return;
             }
+            if (!_observationSequenceGate.TryAccept(result))
+                return;
 
             var signature = BuildRenderSignature(result);
             if (!force && _lastRenderSignature == signature)
+            {
+                // Identical values can still be a newer confirmation. Keep metadata current even
+                // when no redraw is needed, so an older queued observation can't win afterward.
+                _lastResult = result;
                 return;
+            }
 
             var isFirstReveal = !_hasRevealed;
             var providerChanged = _lastAppliedProvider != result.Id;
@@ -569,7 +577,7 @@ namespace TaskbarQuota.Controls
                     rows.Add(new WidgetUsageRow(
                         "Resets",
                         0,
-                        resetCredits.AvailableCount.ToString("N0", CultureInfo.InvariantCulture),
+                        resetCredits.AvailableCount.ToString("N0", CultureInfo.InvariantCulture) + (resetCredits.IsCached ? "*" : string.Empty),
                         expiresIn,
                         HasBar: false));
                 }
@@ -978,6 +986,8 @@ namespace TaskbarQuota.Controls
             {
                 $"Reset Credits: {resetCredits.AvailableCount.ToString("N0", CultureInfo.InvariantCulture)} available",
             };
+            if (resetCredits.CachedAt is { } cachedAt)
+                lines.Add($"Couldn't refresh reset credits. Last confirmed at {cachedAt.ToLocalTime():g}.");
 
             int shown = 0;
             for (int i = 0; i < resetCredits.Credits.Count && shown < 3; i++)
@@ -1452,7 +1462,7 @@ namespace TaskbarQuota.Controls
                 double iconWidth = row.GlyphData != null ? RowLabelGlyphReserve : 0;
                 widestLabel = Math.Max(widestLabel, MeasureTextWidth(BaseLabelText(row, mode), labelFont) + iconWidth);
                 if (!string.IsNullOrWhiteSpace(row.ResetDescription))
-                    widestReset = Math.Max(widestReset, MeasureTextWidth($"({CompactResetDescription(row.ResetDescription)})", labelFont));
+                    widestReset = Math.Max(widestReset, MeasureTextWidth($"({row.ResetDescription})", labelFont));
             }
 
             double widestValue = 0;
@@ -1693,7 +1703,7 @@ namespace TaskbarQuota.Controls
             if (string.IsNullOrWhiteSpace(row.ResetDescription))
                 return CreateText("", 0.9, TextAlignment.Left, fontSize);
 
-            var reset = CreateText($"({CompactResetDescription(row.ResetDescription)})", 0.9, TextAlignment.Left, fontSize);
+            var reset = CreateText($"({row.ResetDescription})", 0.9, TextAlignment.Left, fontSize);
             reset.Foreground = ResetBrush(row.ResetDescription);
             reset.TextTrimming = TextTrimming.None;
             return reset;
@@ -1724,7 +1734,8 @@ namespace TaskbarQuota.Controls
                 ? percent <= 25
                 : percent >= 75;
             border.Background = UsageBarBrush(percent, pace);
-            border.Opacity = emphasized || pace is PaceSeverity.RunningOut or PaceSeverity.Spent ? 0.95 : 0.78;
+            border.Opacity = emphasized || (WidgetSettingsService.CurrentUsageBarColorMode == UsageBarColorMode.UsageForecast
+                && pace is PaceSeverity.RunningOut or PaceSeverity.Spent) ? 0.95 : 0.78;
         }
 
         private Brush UsageBarBrush(double displayPercent, PaceSeverity? pace = null)
@@ -1732,25 +1743,10 @@ namespace TaskbarQuota.Controls
             bool light = UseApplicationChromeColors
                 ? ThemeService.IsLightChrome(this)
                 : Interop.SystemInfos.IsSystemLightThemeUsed() == true;
-            // Pace verdict wins over the raw level: blue on course, amber near the limit, red when it
-            // will run out before reset. Windows that cannot be forecast fall through to level colors.
-            if (pace is { } verdict)
-            {
-                return verdict switch
-                {
-                    PaceSeverity.Close => new SolidColorBrush(light ? Color.FromArgb(255, 157, 93, 0) : Color.FromArgb(255, 255, 185, 0)),
-                    PaceSeverity.RunningOut or PaceSeverity.Spent => new SolidColorBrush(light ? Color.FromArgb(255, 196, 43, 28) : Color.FromArgb(255, 255, 99, 71)),
-                    _ => new SolidColorBrush(light ? Color.FromArgb(255, 0, 103, 192) : Color.FromArgb(255, 96, 205, 255)),
-                };
-            }
-            // Thresholds match WidgetSettingsService usage colors (critical / caution / normal).
-            displayPercent = Math.Clamp(displayPercent, 0, 100);
-            bool remaining = WidgetSettingsService.CurrentPercentageMode == PercentageDisplayMode.Remaining;
-            bool critical = remaining ? displayPercent <= 10 : displayPercent >= 90;
-            bool caution = remaining ? displayPercent <= 25 : displayPercent >= 75;
-            if (critical)
+            string key = WidgetSettingsService.GetUsageBarBrushResourceKey(displayPercent, pace);
+            if (key == "SystemFillColorCriticalBrush")
                 return new SolidColorBrush(light ? Color.FromArgb(255, 196, 43, 28) : Color.FromArgb(255, 255, 99, 71));
-            if (caution)
+            if (key == "SystemFillColorCautionBrush")
                 return new SolidColorBrush(light ? Color.FromArgb(255, 157, 93, 0) : Color.FromArgb(255, 255, 185, 0));
             return new SolidColorBrush(light ? Color.FromArgb(255, 0, 103, 192) : Color.FromArgb(255, 96, 205, 255));
         }
@@ -1764,7 +1760,7 @@ namespace TaskbarQuota.Controls
                 ? $"\nLast updated {fetch.FetchedAt.ToLocalTime():t} — refreshing…"
                 : string.Empty;
 
-        private static string BuildRenderSignature(UsageResult result)
+        internal static string BuildRenderSignature(UsageResult result)
         {
             var parts = new List<string>
             {
@@ -1782,6 +1778,7 @@ namespace TaskbarQuota.Controls
 
             var usage = fetch.Usage;
             parts.Add(fetch.SourceLabel);
+            parts.Add(usage.HasPrimaryWindow ? "primary" : "no-primary");
             parts.Add(usage.LoginMethod ?? string.Empty);
             parts.Add(usage.Email ?? string.Empty);
             parts.Add(usage.Cost?.Display ?? string.Empty);
@@ -1795,6 +1792,7 @@ namespace TaskbarQuota.Controls
             if (usage.ResetCredits is { } resetCredits)
             {
                 parts.Add(resetCredits.AvailableCount.ToString(CultureInfo.InvariantCulture));
+                parts.Add(resetCredits.CachedAt?.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty);
                 foreach (var credit in resetCredits.Credits)
                 {
                     parts.Add(credit.Status);
@@ -1826,6 +1824,10 @@ namespace TaskbarQuota.Controls
 
             parts.Add(window.UsedPercent.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture));
             parts.Add(window.IsIncluded ? "included" : "not-included");
+            parts.Add(window.Label ?? string.Empty);
+            parts.Add(window.ShowCostValue ? "cost" : "percent");
+            parts.Add(window.WindowMinutes?.ToString(CultureInfo.InvariantCulture) ?? string.Empty);
+            parts.Add(window.ResetAt?.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty);
             parts.Add(window.ResetDescription ?? string.Empty);
         }
 
@@ -1871,9 +1873,6 @@ namespace TaskbarQuota.Controls
             textBlock.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             return Math.Ceiling(textBlock.DesiredSize.Width);
         }
-
-        private static string CompactResetDescription(string resetDescription)
-            => resetDescription == "now" ? "now" : resetDescription.Replace(" ", "", StringComparison.Ordinal);
 
         private static string FormatLocalDateTime(DateTimeOffset? timestamp)
         {
@@ -1990,7 +1989,8 @@ namespace TaskbarQuota.Controls
             var pace = QuotaPacing.Evaluate(window, now, isSessionWindow: window.WindowMinutes is <= 360);
             if (pace.Severity == PaceSeverity.Untracked)
                 return (null, null, null);
-            double? tick = pace.Severity is PaceSeverity.Close or PaceSeverity.RunningOut && pace.IdealPacePercent is { } ideal
+            double? tick = WidgetSettingsService.CurrentUsageBarColorMode == UsageBarColorMode.UsageForecast
+                && pace.Severity is PaceSeverity.Close or PaceSeverity.RunningOut && pace.IdealPacePercent is { } ideal
                 ? WidgetSettingsService.DisplayPercent(ideal)
                 : null;
             return (pace.Severity, QuotaPacing.Tooltip(pace, now), tick);

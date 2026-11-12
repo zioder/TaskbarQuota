@@ -22,10 +22,14 @@ namespace TaskbarQuota
         /// AppInstance keys are scoped to the session, so different users get their own widget.</summary>
         private const string SingleInstanceKey = "TaskbarQuota.MainInstance";
         internal static ExtendedActivationKind InitialActivationKind { get; private set; }
+        internal static int RecoveryAttempt { get; private set; }
 
         [STAThread]
         private static int Main(string[] args)
         {
+            if (!RecoveryStartup.WaitForParent(args))
+                return 1;
+            RecoveryAttempt = RecoveryStartup.ReadContext(args)?.Attempt ?? 0;
             WinRT.ComWrappersSupport.InitializeComWrappers();
 
             if (RedirectToExistingInstance())

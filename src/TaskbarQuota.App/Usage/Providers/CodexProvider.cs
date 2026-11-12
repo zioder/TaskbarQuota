@@ -4,6 +4,8 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Threading;
@@ -17,12 +19,22 @@ namespace TaskbarQuota.Usage.Providers
     /// Codex (ChatGPT) usage via the OAuth token stored by the Codex CLI in ~/.codex/auth.json.
     /// Ported from Win-CodexBar rust/src/providers/codex/api.rs.
     /// </summary>
-    public sealed class CodexProvider : IUsageProvider
+    public sealed class CodexProvider : IUsageProvider, IUsageCacheIdentityProvider
     {
         private const string DefaultBaseUrl = "https://chatgpt.com/backend-api";
         private const string UsagePath = "/wham/usage";
         private const string ResetCreditsPath = "/wham/rate-limit-reset-credits";
         private static readonly TimeSpan ResetCreditsTimeout = TimeSpan.FromSeconds(3);
+        private readonly object _resetCreditsLock = new();
+        private ResetCreditsSnapshot? _lastResetCredits;
+        private DateTimeOffset _lastResetCreditsAt;
+        private string? _resetCreditsIdentity;
+        private long _nextRequestSequence;
+        private long _startedResetCreditsIdentitySequence;
+        private long _completedResetCreditsSequence;
+        private readonly HttpClient _http;
+        private readonly Func<Credentials> _credentialsSource;
+        private readonly Func<string> _baseUrlSource;
         private static readonly Regex CodexModelPrefix = new(@"^GPT-[\d.]+-Codex-", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         private static readonly HttpClient Http = new(new HttpClientHandler())
@@ -36,12 +48,43 @@ namespace TaskbarQuota.Usage.Providers
         public string WeeklyLabel => "Weekly";
         public BillingKind Billing => BillingKind.Subscription;
 
-        public async Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
-        {
-            var creds = LoadCredentials();
+        public CodexProvider() : this(Http) { }
 
-            using var request = CreateRequest(creds, UsagePath);
-            using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
+        internal CodexProvider(HttpClient http, Func<Credentials>? credentialsSource = null, Func<string>? baseUrlSource = null)
+        {
+            _http = http;
+            _credentialsSource = credentialsSource ?? LoadCredentials;
+            _baseUrlSource = baseUrlSource ?? ResolveBaseUrl;
+        }
+
+        public Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
+            => FetchUsageAsync(_credentialsSource(), _baseUrlSource(), ct);
+
+        string IUsageCacheIdentityProvider.GetCurrentCacheIdentity()
+            => CacheIdentityFor(_credentialsSource(), _baseUrlSource());
+
+        private static string CacheIdentityFor(Credentials credentials, string baseUrl)
+            => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+                $"{baseUrl}\n{credentials.AccountId}\n{credentials.AccessToken}")));
+
+        internal async Task<ProviderFetchResult> FetchUsageAsync(Credentials creds, string baseUrl, CancellationToken ct = default)
+        {
+            long sequence = Interlocked.Increment(ref _nextRequestSequence);
+            var identity = CacheIdentityFor(creds, baseUrl);
+            lock (_resetCreditsLock)
+            {
+                if (sequence >= _startedResetCreditsIdentitySequence)
+                {
+                    _startedResetCreditsIdentitySequence = sequence;
+                    if (!string.Equals(_resetCreditsIdentity, identity, StringComparison.Ordinal))
+                    {
+                        _lastResetCredits = null;
+                        _resetCreditsIdentity = identity;
+                    }
+                }
+            }
+            using var request = CreateRequest(creds, UsagePath, baseUrl);
+            using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
 
             if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
                 throw new ProviderException(ProviderErrorKind.AuthRequired, "Codex token expired. Run `codex login`.");
@@ -55,9 +98,48 @@ namespace TaskbarQuota.Usage.Providers
 
             using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
             using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
-            using var resetCreditsDoc = await FetchResetCreditsAsync(creds, ct).ConfigureAwait(false);
+            using var resetCreditsDoc = await FetchResetCreditsAsync(creds, baseUrl, ct).ConfigureAwait(false);
 
-            return BuildResult(doc.RootElement, headerPrimary, headerSecondary, headerCredits, resetCreditsDoc?.RootElement);
+            var result = BuildResult(doc.RootElement, headerPrimary, headerSecondary, headerCredits, resetCreditsDoc?.RootElement);
+            // Exact credential matching is deliberately conservative: a token rotation drops the fallback
+            // rather than risk carrying another account's credits across an ambiguous identity change.
+            result.Usage.ResetCredits = ResolveResetCredits(
+                result.Usage.ResetCredits, resetCreditsDoc is not null, identity, DateTimeOffset.UtcNow, sequence);
+            return new ProviderFetchResult(result.Usage, result.SourceLabel, result.FetchedAt, identity);
+        }
+
+        internal ResetCreditsSnapshot? ResolveResetCredits(
+            ResetCreditsSnapshot? fetched, bool requestSucceeded, string identity, DateTimeOffset now, long sequence = 0)
+        {
+            if (sequence == 0)
+                sequence = Interlocked.Increment(ref _nextRequestSequence);
+            lock (_resetCreditsLock)
+            {
+                // A delayed old response must never replace a newer explicit zero or account switch.
+                if (sequence < _completedResetCreditsSequence
+                    || (sequence < _startedResetCreditsIdentitySequence
+                        && !string.Equals(_resetCreditsIdentity, identity, StringComparison.Ordinal)))
+                    return requestSucceeded ? fetched?.WithConfirmation(now).CurrentAt(now) : null;
+                _completedResetCreditsSequence = sequence;
+                if (!string.Equals(_resetCreditsIdentity, identity, StringComparison.Ordinal))
+                {
+                    _lastResetCredits = null;
+                    _resetCreditsIdentity = identity;
+                }
+
+                if (requestSucceeded)
+                {
+                    // A successful zero or missing credit block is authoritative; don't resurrect it.
+                    _lastResetCredits = fetched?.WithConfirmation(now).CurrentAt(now);
+                    _lastResetCreditsAt = now;
+                    return _lastResetCredits;
+                }
+
+                if (_lastResetCredits is not { } previous)
+                    return null;
+
+                return new ResetCreditsSnapshot(previous.AvailableCount, previous.Credits, _lastResetCreditsAt).CurrentAt(now);
+            }
         }
 
         internal static ProviderFetchResult BuildResult(
@@ -125,22 +207,22 @@ namespace TaskbarQuota.Usage.Providers
             return new ProviderFetchResult(usage, "oauth");
         }
 
-        private static async Task<JsonDocument?> FetchResetCreditsAsync(Credentials creds, CancellationToken ct)
+        private async Task<JsonDocument?> FetchResetCreditsAsync(Credentials creds, string baseUrl, CancellationToken ct)
         {
             try
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 timeout.CancelAfter(ResetCreditsTimeout);
-                using var request = CreateRequest(creds, ResetCreditsPath);
+                using var request = CreateRequest(creds, ResetCreditsPath, baseUrl);
                 request.Headers.TryAddWithoutValidation("OpenAI-Beta", "codex-1");
                 request.Headers.TryAddWithoutValidation("originator", "Codex Desktop");
 
-                using var response = await Http.SendAsync(request, timeout.Token).ConfigureAwait(false);
+                using var response = await _http.SendAsync(request, timeout.Token).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
                     return null;
 
-                using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-                return await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+                using var stream = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
+                return await JsonDocument.ParseAsync(stream, cancellationToken: timeout.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -152,9 +234,9 @@ namespace TaskbarQuota.Usage.Providers
             }
         }
 
-        private static HttpRequestMessage CreateRequest(Credentials creds, string path)
+        private static HttpRequestMessage CreateRequest(Credentials creds, string path, string baseUrl)
         {
-            var request = new HttpRequestMessage(HttpMethod.Get, ResolveBaseUrl() + path);
+            var request = new HttpRequestMessage(HttpMethod.Get, baseUrl + path);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", creds.AccessToken);
             request.Headers.UserAgent.ParseAdd("TaskbarQuota");
             request.Headers.Accept.ParseAdd("application/json");
@@ -462,7 +544,7 @@ namespace TaskbarQuota.Usage.Providers
 
         private static string Capitalize(string s) => string.IsNullOrEmpty(s) ? s : char.ToUpperInvariant(s[0]) + s[1..];
 
-        private sealed record Credentials(string AccessToken, string? AccountId);
+        internal sealed record Credentials(string AccessToken, string? AccountId);
 
         private static Credentials LoadCredentials()
         {

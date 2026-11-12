@@ -63,6 +63,18 @@
                 </ComboBox>
             </tk:SettingsCard>
 
+            <tk:SettingsCard Header="Usage bar colors" Description="Color bars by the current quota level or the projected usage at reset. Forecast details remain available in tooltips.">
+                <tk:SettingsCard.HeaderIcon>
+                    <FontIcon Glyph="&#xE790;"/>
+                </tk:SettingsCard.HeaderIcon>
+                <ComboBox x:Name="UsageBarColorModeCombo" SelectionChanged="OnUsageBarColorModeChanged" MinWidth="180"
+                          AutomationProperties.Name="Usage bar colors"
+                          AutomationProperties.AutomationId="UsageBarColorModeCombo">
+                    <ComboBoxItem Content="Quota level" Tag="QuotaLevel"/>
+                    <ComboBoxItem Content="Usage forecast" Tag="UsageForecast"/>
+                </ComboBox>
+            </tk:SettingsCard>
+
             <tk:SettingsCard Header="Hide widget when no AI app is focused"
                              Description="Fade the active provider's tile out when you switch to a browser or any other app, and bring it back when you return. Pinned providers always stay visible.">
                 <tk:SettingsCard.HeaderIcon>
@@ -191,6 +203,9 @@
                                 <StackPanel Orientation="Horizontal" Spacing="12" Padding="8">
                                     <FontIcon Glyph="&#xE700;" FontSize="14" Opacity="0.6"
                                               IsHitTestVisible="False"/>
+                                    <controls:ProviderAvatar ProviderId="{x:Bind Id}"
+                                                             ForegroundBrush="{ThemeResource TextFillColorPrimaryBrush}"
+                                                             Width="20" Height="20" IsHitTestVisible="False"/>
                                     <TextBlock Text="{x:Bind DisplayName}" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </DataTemplate>

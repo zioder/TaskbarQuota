@@ -65,42 +65,70 @@ public class ProcessScanEquivalenceTests
     [Fact]
     public void CommandLines_MatchWmiForTerminalScanProcesses()
     {
-        var wanted = ProcessSnapshot.Capture()
-            .Where(e => AgentActivityScanner.TerminalScanProcessNames.Contains(e.ExeName))
-            .ToList();
-
-        var fresh = ProcessSnapshot.GetCommandLines(wanted.Select(e => (e.Pid, e.ParentPid)));
-        // Second call must be served from the cache and still be identical.
-        var cached = ProcessSnapshot.GetCommandLines(wanted.Select(e => (e.Pid, e.ParentPid)));
-
-        var old = new Dictionary<int, (string Name, string CommandLine)>();
-        using (var searcher = new ManagementObjectSearcher(
-            "SELECT ProcessId, Name, CommandLine FROM Win32_Process WHERE " + Quote(AgentActivityScanner.TerminalScanProcessNames)))
-        using (var results = searcher.Get())
+        using var child = Process.Start(new ProcessStartInfo(
+            Path.Combine(Environment.SystemDirectory, "cmd.exe"), "/d /c set /p TASKBARQUOTA_PROCESS_SCAN_TEST=")
         {
-            foreach (ManagementObject mo in results)
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
+            RedirectStandardInput = true,
+        })!;
+        try
+        {
+            var wanted = ProcessSnapshot.Capture()
+                .Where(e => AgentActivityScanner.TerminalScanProcessNames.Contains(e.ExeName))
+                .ToList();
+            // Capture shares a 200 ms cache with other scans, so a just-created child may not be listed
+            // yet. Seed its known identity to guarantee a non-vacuous command-line/cache comparison.
+            if (wanted.All(e => e.Pid != child.Id))
+                wanted.Add(new ProcessEntry(child.Id, Environment.ProcessId, "cmd.exe", child.StartTime.ToFileTimeUtc()));
+
+            var fresh = ProcessSnapshot.GetCommandLines(wanted.Select(e => (e.Pid, e.ParentPid)));
+            // Second call must be served from the cache and still be identical.
+            var cached = ProcessSnapshot.GetCommandLines(wanted.Select(e => (e.Pid, e.ParentPid)));
+
+            var old = new Dictionary<int, (int Parent, long Created, string Name, string CommandLine)>();
+            using (var searcher = new ManagementObjectSearcher(
+                "SELECT ProcessId, ParentProcessId, CreationDate, Name, CommandLine FROM Win32_Process WHERE " + Quote(AgentActivityScanner.TerminalScanProcessNames)))
+            using (var results = searcher.Get())
             {
-                using (mo)
-                    old[Convert.ToInt32(mo["ProcessId"])] = ((string)mo["Name"], mo["CommandLine"] as string ?? "");
+                foreach (ManagementObject mo in results)
+                {
+                    using (mo)
+                    {
+                        var created = ManagementDateTimeConverter.ToDateTime((string)mo["CreationDate"]).ToFileTimeUtc();
+                        old[Convert.ToInt32(mo["ProcessId"])] = (Convert.ToInt32(mo["ParentProcessId"]), created,
+                            (string)mo["Name"], mo["CommandLine"] as string ?? "");
+                    }
+                }
+            }
+
+            // Only compare identities alive across both observations. WMI timestamps have microsecond
+            // precision while the NT snapshot uses 100 ns ticks. PID alone can't exclude PID reuse.
+            var stable = wanted.Where(e => old.TryGetValue(e.Pid, out var final)
+                && e.ParentPid == final.Parent && e.CreateFileTime > 0
+                && Math.Abs(e.CreateFileTime - final.Created) <= 10).ToArray();
+            Assert.Contains(stable, e => e.Pid == child.Id);
+            foreach (var e in stable)
+            {
+                var expected = old[e.Pid];
+                Assert.True(fresh.TryGetValue(e.Pid, out var actual), $"stable pid {e.Pid} missing from fresh command lines");
+                Assert.True(cached.TryGetValue(e.Pid, out var again), $"stable pid {e.Pid} missing from cached command lines");
+                // Don't put command-line contents in assertion output: they may contain credentials.
+                Assert.True(string.Equals(expected.Name, actual.Name, StringComparison.OrdinalIgnoreCase)
+                    && expected.CommandLine == actual.CommandLine, $"stable pid {e.Pid} command line differs from WMI");
+                Assert.True(again == actual, $"stable pid {e.Pid} cached command line differs");
             }
         }
-
-        var mismatches = new List<string>();
-        foreach (var e in wanted)
+        finally
         {
-            if (!old.TryGetValue(e.Pid, out var expected) || !fresh.TryGetValue(e.Pid, out var actual))
-                continue; // raced (started/exited between reads)
-            if (!string.Equals(expected.Name, actual.Name, StringComparison.OrdinalIgnoreCase)
-                || expected.CommandLine != actual.CommandLine)
-                mismatches.Add($"{e.Pid} {e.ExeName}");
-            if (cached.TryGetValue(e.Pid, out var again) && again != actual)
-                mismatches.Add($"{e.Pid} cache-differs");
+            child.StandardInput.Close();
+            if (!child.WaitForExit(5000))
+            {
+                child.Kill(entireProcessTree: true);
+                Assert.True(child.WaitForExit(5000), "owned command-line fixture didn't exit");
+            }
         }
-
-        Assert.True(wanted.Count > 0, "no terminal-scan processes running; test is vacuous");
-        Assert.True(mismatches.Count == 0, "command line mismatches: " + string.Join("; ", mismatches));
-        Assert.True(wanted.Count - fresh.Count <= RaceTolerance,
-            $"snapshot saw {wanted.Count} processes but only {fresh.Count} command lines came back");
     }
 
     [Fact]

@@ -67,9 +67,12 @@ public class GrokProviderTests
         Assert.Equal(DateTimeOffset.Parse("2026-07-01T00:00:00+00:00"), snapshot.ResetAt);
     }
 
-    [Fact]
-    public void AdditionalUsage_InCreditsMode_FormatsAsCredits()
+    [Theory]
+    [InlineData("en-US", "$1.50 / $5.00 budget")]
+    [InlineData("ru-RU", "$1,50 / $5,00 budget")]
+    public void AdditionalUsage_InCreditsMode_FormatsAsCredits(string culture, string expectedUsdSpend)
     {
+        using var scope = new CultureScope(culture);
         var enabled = new AdditionalUsageSnapshot { Enabled = true, SpentUsd = 200, BudgetUsd = 5000, IsCredits = true };
         Assert.Equal("Enabled", enabled.StatusText);
         Assert.Equal("200 / 5000 credits", enabled.SpendText);
@@ -80,7 +83,7 @@ public class GrokProviderTests
 
         // USD (Copilot) formatting is unchanged.
         var usd = new AdditionalUsageSnapshot { Enabled = true, SpentUsd = 1.5, BudgetUsd = 5 };
-        Assert.Equal("$1.50 / $5.00 budget", usd.SpendText);
+        Assert.Equal(expectedUsdSpend, usd.SpendText);
     }
 
     [Fact]

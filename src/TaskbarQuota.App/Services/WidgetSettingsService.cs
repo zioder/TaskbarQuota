@@ -21,6 +21,12 @@ public enum PercentageDisplayMode
     Remaining = 1,
 }
 
+public enum UsageBarColorMode
+{
+    QuotaLevel = 0,
+    UsageForecast = 1,
+}
+
 /// <summary>
 /// Where the compact usage UI is hosted: injected into each taskbar, or a single always-on-top
 /// floating window. Modes are mutually exclusive.
@@ -84,8 +90,11 @@ public static class WidgetSettingsService
     private static string PinnedProviderDisplaysPath =>
         Path.Combine(AppStorage.AppDataDirectory, "pinned-provider-displays.json");
 
-    private static readonly string PercentageDisplayModePath =
+    private static string PercentageDisplayModePath =>
         Path.Combine(AppStorage.AppDataDirectory, "percentage-display-mode.txt");
+
+    private static string UsageBarColorModePath =>
+        Path.Combine(AppStorage.AppDataDirectory, "usage-bar-color-mode.txt");
 
     private static readonly string WidgetRowsPath =
         Path.Combine(AppStorage.AppDataDirectory, "widget-rows.json");
@@ -149,6 +158,7 @@ public static class WidgetSettingsService
     /// </summary>
     public static bool FloatingClickThrough { get; private set; } = LoadFloatingClickThrough();
     public static PercentageDisplayMode CurrentPercentageMode { get; private set; } = LoadPercentageDisplayMode();
+    public static UsageBarColorMode CurrentUsageBarColorMode { get; private set; } = LoadUsageBarColorMode();
     public static bool AutoHideUnavailable { get; private set; } = LoadAutoHideUnavailable();
     /// <summary>
     /// Opt-in: the active provider's tile only stays on the taskbar while that provider's app is the
@@ -164,6 +174,7 @@ public static class WidgetSettingsService
     public static event EventHandler? Changed;
     public static event EventHandler? DashboardCompositionChanged;
     public static event EventHandler? PercentageModeChanged;
+    public static event EventHandler? UsageBarColorModeChanged;
 
     private static readonly string ProviderIconColorsPath =
         Path.Combine(AppStorage.AppDataDirectory, "provider-icon-colors.json");
@@ -499,6 +510,20 @@ public static class WidgetSettingsService
         double used = Math.Clamp(usedPercent, 0, 100);
         return CurrentPercentageMode == PercentageDisplayMode.Remaining ? 100 - used : used;
     }
+
+    public static void Apply(UsageBarColorMode mode)
+    {
+        if (!Enum.IsDefined(mode) || CurrentUsageBarColorMode == mode)
+            return;
+
+        CurrentUsageBarColorMode = mode;
+        Save(UsageBarColorModePath, (int)mode);
+        UsageBarColorModeChanged?.Invoke(null, EventArgs.Empty);
+        Changed?.Invoke(null, EventArgs.Empty);
+    }
+
+    internal static void ReloadUsageBarColorModeForTesting()
+        => CurrentUsageBarColorMode = LoadUsageBarColorMode();
 
     public static string FormatDisplayPercent(double usedPercent)
         => $"{DisplayPercent(usedPercent):0}%";
@@ -863,6 +888,18 @@ public static class WidgetSettingsService
     public static string GetUsageBrushResourceKey(double usedPercent)
         => GetUsageBrushResourceKeyForDisplayPercent(DisplayPercent(usedPercent));
 
+    /// <summary>Bar palette selection. Forecast details remain available in either mode.</summary>
+    public static string GetUsageBarBrushResourceKey(double displayPercent, PaceSeverity? pace)
+        => CurrentUsageBarColorMode == UsageBarColorMode.UsageForecast
+            && pace is not null and not PaceSeverity.Untracked
+                ? pace switch
+                {
+                    PaceSeverity.Close => "SystemFillColorCautionBrush",
+                    PaceSeverity.RunningOut or PaceSeverity.Spent => "SystemFillColorCriticalBrush",
+                    _ => "AccentFillColorDefaultBrush",
+                }
+                : GetUsageBrushResourceKeyForDisplayPercent(displayPercent);
+
     /// <summary>Brush key for consumed-only meters (credits) regardless of display mode.</summary>
     public static string GetConsumedUsageBrushResourceKey(double consumedPercent)
     {
@@ -1027,6 +1064,22 @@ public static class WidgetSettingsService
         {
             return PercentageDisplayMode.Consumed;
         }
+    }
+
+    private static UsageBarColorMode LoadUsageBarColorMode()
+    {
+        try
+        {
+            if (File.Exists(UsageBarColorModePath)
+                && int.TryParse(File.ReadAllText(UsageBarColorModePath), NumberStyles.Integer, CultureInfo.InvariantCulture, out int value)
+                && Enum.IsDefined(typeof(UsageBarColorMode), value))
+                return (UsageBarColorMode)value;
+        }
+        catch
+        {
+            // Preserve existing forecast colors when the setting cannot be read.
+        }
+        return UsageBarColorMode.UsageForecast;
     }
 
     private static void Save(string path, int value)
