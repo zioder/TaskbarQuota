@@ -108,32 +108,7 @@ jobs:
               throw "Publish output not found for $($target.Arch)."
             }
 
-            $priPath = @('TaskbarQuota.pri', 'resources.pri') |
-              ForEach-Object { Join-Path $publishDirRel $_ } |
-              Where-Object { Test-Path $_ } |
-              Select-Object -First 1
-            if (-not $priPath) {
-              throw "Publish output is missing the WinUI PRI resource file. Installer would crash on launch."
-            }
-
-            $publishDir = (Resolve-Path -LiteralPath $publishDirRel).Path
-            # The project copies loose .xbf files into the publish directory after publishing.
-
-            $requiredXbf = @(
-              'MainWindow.xbf',
-              'FlyoutWindow.xbf',
-              'FloatingUsageWindow.xbf',
-              'Views\DashboardPage.xbf',
-              'Controls\WidgetSummary.xbf',
-              'Controls\QuotaWidgetContent.xbf'
-            )
-            foreach ($rel in $requiredXbf) {
-              if (-not (Test-Path (Join-Path $publishDir $rel))) {
-                throw "Publish output is missing $rel — installer would crash on launch."
-              }
-            }
-
-            Write-Host "Verified loose XBF files in publish directory."
+            $publishDir = & ./tools/Assert-PublishArtifacts.ps1 -PublishDirectory $publishDirRel
             $outputDir = (Resolve-Path -LiteralPath artifacts).Path
 
             Write-Host "Publish directory: $publishDir"

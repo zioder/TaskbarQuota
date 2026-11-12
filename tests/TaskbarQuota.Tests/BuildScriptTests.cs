@@ -5,6 +5,8 @@ namespace TaskbarQuota.Tests;
 
 public class BuildScriptTests
 {
+    private static readonly string[] PublishArtifacts = ["TaskbarQuota.exe", "resources.pri", "MainWindow.xbf",
+        "FlyoutWindow.xbf", "FloatingUsageWindow.xbf", "Views/DashboardPage.xbf", "Controls/WidgetSummary.xbf", "Controls/QuotaWidgetContent.xbf"];
     [Theory]
     [InlineData("1.0.5", "1.0.5.0", 5)]
     [InlineData("2026.11.11-manual", "2026.11.11.0", 11)]
@@ -46,6 +48,7 @@ public class BuildScriptTests
         File.WriteAllText(Path.Combine(external, "TaskbarQuota.exe"), "sentinel");
         var copiedScript = Path.Combine(repository, "tools", "Build-Local.ps1");
         File.Copy(Path.Combine(RepositoryRoot(), "tools", "Build-Local.ps1"), copiedScript);
+        File.Copy(Path.Combine(RepositoryRoot(), "tools", "Assert-PublishArtifacts.ps1"), Path.Combine(repository, "tools", "Assert-PublishArtifacts.ps1"));
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(link)!);
@@ -74,6 +77,10 @@ public class BuildScriptTests
     [InlineData("local", true, 1)]
     [InlineData("exited", true, 0)]
     [InlineData("foreign", false, 0)]
+    [InlineData("handle-exit", true, 0)]
+    [InlineData("handle-denied", false, 0)]
+    [InlineData("missing-resource", false, 0)]
+    [InlineData("publish-failure", false, 0)]
     public async Task LocalBuildRetainsValidatedProcessIdentity(string mode, bool succeeds, int kills)
     {
         var fixture = Directory.CreateTempSubdirectory("TaskbarQuota-build-process-").FullName;
@@ -83,9 +90,14 @@ public class BuildScriptTests
             Directory.CreateDirectory(tools);
             var script = Path.Combine(tools, "Build-Local.ps1");
             File.Copy(Path.Combine(RepositoryRoot(), "tools", "Build-Local.ps1"), script);
+            File.Copy(Path.Combine(RepositoryRoot(), "tools", "Assert-PublishArtifacts.ps1"), Path.Combine(tools, "Assert-PublishArtifacts.ps1"));
             var result = await RunScript("""
-                param($Script, $Mode)
+                param($Script, $Mode, $ArtifactListJson)
                 $ErrorActionPreference = 'Stop'
+                $global:requiredArtifacts=ConvertFrom-Json $ArtifactListJson
+                $global:fixtureMode=$Mode
+                $global:processQueries=0
+                if($Mode -eq 'missing-resource'){$global:requiredArtifacts=@('TaskbarQuota.exe')}
                 $root = Split-Path (Split-Path $Script)
                 $local = Join-Path $root 'artifacts/local'
                 $previous = Join-Path $root 'artifacts/local.previous'
@@ -96,7 +108,9 @@ public class BuildScriptTests
                     Pinned=$false; Exited=$false; Disposed=$false; Kills=0; Mode=$Mode
                     Executable=if($Mode -eq 'foreign'){'C:/another-copy/TaskbarQuota.exe'}else{Join-Path $local 'TaskbarQuota.exe'}
                 }
-                $fixtureProcess | Add-Member ScriptProperty Handle {
+                $fixtureProcess | Add-Member ScriptMethod get_Handle {
+                    if($this.Mode -eq 'handle-exit'){$this.Exited=$true; throw 'Process exited before handle acquisition'}
+                    if($this.Mode -eq 'handle-denied'){throw 'Access denied fixture'}
                     $this.Pinned=$true
                     if($this.Mode -eq 'exited'){$this.Exited=$true}
                     return 42
@@ -113,32 +127,48 @@ public class BuildScriptTests
                 }
                 $fixtureProcess | Add-Member ScriptMethod WaitForExit {param($Timeout) $this.Exited}
                 $fixtureProcess | Add-Member ScriptMethod Dispose {$this.Disposed=$true}
-                function global:Get-Process {$global:fixtureProcess}
+                function global:Get-Process {$global:processQueries++; $global:fixtureProcess}
                 function global:Stop-Process {throw 'PID-based termination must not be used'}
                 function global:dotnet {
                     $destination=$args[[Array]::IndexOf($args,'-o')+1]
-                    New-Item -ItemType Directory -Path $destination -Force | Out-Null
-                    Set-Content (Join-Path $destination 'TaskbarQuota.exe') 'new'
-                    $global:LASTEXITCODE=0
+                    foreach($relative in $global:requiredArtifacts){
+                        $file=Join-Path $destination $relative
+                        New-Item -ItemType Directory -Path (Split-Path $file) -Force | Out-Null
+                        Set-Content $file 'new'
+                    }
+                    $global:LASTEXITCODE=if($global:fixtureMode -eq 'publish-failure'){1}else{0}
                 }
                 $succeeded=$false; $failure=''
                 try {& $Script -NoStart; $succeeded=$true} catch {$failure=$_.Exception.Message}
                 'fixture-result:'+(@{
                     succeeded=$succeeded; failure=$failure; pinned=$fixtureProcess.Pinned
                     disposed=$fixtureProcess.Disposed; kills=$fixtureProcess.Kills
+                    processQueries=$global:processQueries
+                    stagingCount=@(Get-ChildItem (Join-Path $root 'artifacts') -Directory -Filter 'local-staging-*').Count
+                    localContent=(Get-Content (Join-Path $local 'TaskbarQuota.exe')).Trim()
                     backup=if(Test-Path (Join-Path $previous 'TaskbarQuota.exe')){(Get-Content (Join-Path $previous 'TaskbarQuota.exe')).Trim()}else{''}
                 } | ConvertTo-Json -Compress)
-                """, script, mode);
+                """, script, mode, JsonSerializer.Serialize(PublishArtifacts));
             Assert.True(result.ExitCode == 0, result.Error);
             var output = Assert.Single(result.Output.Split('\n'), line => line.StartsWith("fixture-result:", StringComparison.Ordinal));
             using var json = JsonDocument.Parse(output["fixture-result:".Length..]);
             Assert.Equal(succeeds, json.RootElement.GetProperty("succeeded").GetBoolean());
             Assert.Equal(kills, json.RootElement.GetProperty("kills").GetInt32());
-            Assert.True(json.RootElement.GetProperty("pinned").GetBoolean());
-            Assert.True(json.RootElement.GetProperty("disposed").GetBoolean());
+            bool beforeProcessSelection = mode is "missing-resource" or "publish-failure";
+            Assert.Equal(!beforeProcessSelection && mode is not ("handle-exit" or "handle-denied"), json.RootElement.GetProperty("pinned").GetBoolean());
+            Assert.Equal(!beforeProcessSelection, json.RootElement.GetProperty("disposed").GetBoolean());
+            Assert.Equal(beforeProcessSelection ? 0 : 1, json.RootElement.GetProperty("processQueries").GetInt32());
+            Assert.Equal(0, json.RootElement.GetProperty("stagingCount").GetInt32());
+            Assert.Equal(succeeds ? "new" : "old", json.RootElement.GetProperty("localContent").GetString());
             if (!succeeds)
             {
-                Assert.Contains("A different TaskbarQuota copy is running", json.RootElement.GetProperty("failure").GetString());
+                Assert.Contains(mode switch
+                {
+                    "foreign" => "A different TaskbarQuota copy is running",
+                    "handle-denied" => "Access denied fixture",
+                    "publish-failure" => "Build failed",
+                    _ => "missing required artifact",
+                }, json.RootElement.GetProperty("failure").GetString());
                 Assert.Equal("backup", json.RootElement.GetProperty("backup").GetString());
             }
             else
@@ -149,6 +179,54 @@ public class BuildScriptTests
             Assert.Equal(Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar), Path.GetDirectoryName(fixture));
             Directory.Delete(fixture, recursive: true);
         }
+    }
+
+    [Theory]
+    [InlineData("TaskbarQuota.exe")]
+    [InlineData("resources.pri")]
+    [InlineData("MainWindow.xbf")]
+    [InlineData("FlyoutWindow.xbf")]
+    [InlineData("FloatingUsageWindow.xbf")]
+    [InlineData("Views/DashboardPage.xbf")]
+    [InlineData("Controls/WidgetSummary.xbf")]
+    [InlineData("Controls/QuotaWidgetContent.xbf")]
+    public async Task PublishValidationRejectsEachMissingResource(string missing)
+    {
+        var fixture = Directory.CreateTempSubdirectory("TaskbarQuota-publish-").FullName;
+        try
+        {
+            foreach (var relative in PublishArtifacts)
+            {
+                var file = Path.Combine(fixture, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+                File.WriteAllText(file, "fixture");
+            }
+            File.Delete(Path.Combine(fixture, missing));
+            var result = await RunPowerShell("-File", Path.Combine(RepositoryRoot(), "tools", "Assert-PublishArtifacts.ps1"), "-PublishDirectory", fixture);
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Contains(missing.EndsWith(".pri", StringComparison.Ordinal) ? "WinUI PRI" : Path.GetFileName(missing), result.Error);
+        }
+        finally { Directory.Delete(fixture, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData("resources.pri")]
+    [InlineData("TaskbarQuota.pri")]
+    public async Task PublishValidationAcceptsEitherPriResourceName(string priName)
+    {
+        var fixture = Directory.CreateTempSubdirectory("TaskbarQuota-publish-").FullName;
+        try
+        {
+            foreach (var relative in PublishArtifacts)
+            {
+                var file = Path.Combine(fixture, relative == "resources.pri" ? priName : relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+                File.WriteAllText(file, "fixture");
+            }
+            var result = await RunPowerShell("-File", Path.Combine(RepositoryRoot(), "tools", "Assert-PublishArtifacts.ps1"), "-PublishDirectory", fixture);
+            Assert.True(result.ExitCode == 0, result.Error);
+        }
+        finally { Directory.Delete(fixture, recursive: true); }
     }
 
     private static string RepositoryRoot()

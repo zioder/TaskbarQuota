@@ -66,9 +66,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw 'Build failed. The current local build has been left untouched.'
     }
-    if (!(Test-Path -LiteralPath (Join-Path $stagingDirectory 'TaskbarQuota.exe') -PathType Leaf)) {
-        throw 'Publish did not produce TaskbarQuota.exe.'
-    }
+    $null = & (Join-Path $PSScriptRoot 'Assert-PublishArtifacts.ps1') -PublishDirectory $stagingDirectory
 
     Assert-ArtifactDirectory $stagingDirectory
     Assert-ArtifactDirectory $localDirectory
@@ -78,9 +76,14 @@ try {
     foreach ($instance in $instances) {
         # Keep the process identity alive before validating its executable. Termination below
         # must use this same handle, even if the process exits while output is being staged.
-        [void]$instance.Handle
         if ($instance.HasExited) {
             continue
+        }
+        # Invoke the CLR getter as a method: PowerShell suppresses exceptions from property access.
+        try { [void]$instance.get_Handle() }
+        catch {
+            if ($instance.HasExited) { continue }
+            throw
         }
         if ($instance.Path -ne $localExecutable) {
             throw "A different TaskbarQuota copy is running. Close it first: $($instance.Path)"
@@ -128,8 +131,16 @@ try {
     Write-Host "Local build: $localExecutable"
 }
 finally {
-    foreach ($instance in $instances) {
-        $instance.Dispose()
+    try {
+        if (Test-Path -LiteralPath $stagingDirectory) {
+            Assert-ArtifactDirectory $stagingDirectory
+            Remove-Item -LiteralPath $stagingDirectory -Recurse -Force
+        }
     }
-    $buildLock.Dispose()
+    finally {
+        try {
+            foreach ($instance in $instances) { $instance.Dispose() }
+        }
+        finally { $buildLock.Dispose() }
+    }
 }
