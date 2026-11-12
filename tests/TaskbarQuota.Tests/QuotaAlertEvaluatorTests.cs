@@ -289,6 +289,21 @@ public class QuotaAlertEvaluatorTests
             .AsLiveObservation(1, Now());
     }
 
+    [Theory]
+    [InlineData(-9, true)]
+    [InlineData(-10, false)]
+    [InlineData(-11, false)]
+    [InlineData(1, false)]
+    public void CachedCreditExpiryWarningUsesTheOriginalConfirmationTime(int minutes, bool expected)
+    {
+        var result = CodexResetCreditResult(Now().AddDays(4));
+        var credits = result.Fetch!.Usage.ResetCredits!;
+        result.Fetch.Usage.ResetCredits = new ResetCreditsSnapshot(credits.AvailableCount, credits.Credits, Now().AddMinutes(minutes));
+        var alerts = QuotaAlertEvaluator.Evaluate(result, Settings(), new QuotaAlertState(), Now()).ToArray();
+        Assert.Equal(expected ? 1 : 0, alerts.Length);
+        Assert.Empty(QuotaAlertEvaluator.Evaluate(result.AsMemoryCache(), Settings(), new QuotaAlertState(), Now()));
+    }
+
     private static UsageResult CodexResetCreditResult(DateTimeOffset expiresAt)
     {
         var provider = new CodexAlertTestProvider();

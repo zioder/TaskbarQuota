@@ -377,6 +377,60 @@ public class CodexResetCreditsFallbackTests
             => provider.FetchUsageAsync(new("test-token", "test-account"), "https://example.test/backend-api", ct);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FailedNewerMainRequestCannotResurrectCreditsOrUndoAnIdentitySwitch(bool switchAccount)
+    {
+        using var handler = new NewerMainFailureHandler();
+        using var http = new HttpClient(handler);
+        var provider = new CodexProvider(http);
+        const string baseUrl = "https://example.test/backend-api";
+        var firstIdentity = new CodexProvider.Credentials("token-a", "account-a");
+        var nextIdentity = switchAccount ? new CodexProvider.Credentials("token-b", "account-b") : firstIdentity;
+        await provider.FetchUsageAsync(firstIdentity, baseUrl);
+        var older = provider.FetchUsageAsync(firstIdentity, baseUrl);
+        try
+        {
+            await handler.ResetStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await Assert.ThrowsAsync<ProviderException>(() => provider.FetchUsageAsync(nextIdentity, baseUrl));
+        }
+        finally { handler.ReleaseReset.TrySetResult(); }
+        Assert.Equal(0, (await older.WaitAsync(TimeSpan.FromSeconds(10))).Usage.ResetCredits!.AvailableCount);
+        var fallback = await provider.FetchUsageAsync(nextIdentity, baseUrl);
+        if (switchAccount) Assert.Null(fallback.Usage.ResetCredits);
+        else
+        {
+            Assert.Equal(0, fallback.Usage.ResetCredits!.AvailableCount);
+            Assert.True(fallback.Usage.ResetCredits.IsCached);
+        }
+    }
+
+    private sealed class NewerMainFailureHandler : HttpMessageHandler
+    {
+        public TaskCompletionSource ResetStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseReset { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _mainRequests;
+        private int _resetRequests;
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal))
+                return Interlocked.Increment(ref _mainRequests) == 3
+                    ? new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+                    : Json("""{"rate_limit":{"primary_window":{"used_percent":34}}}""");
+            switch (Interlocked.Increment(ref _resetRequests))
+            {
+                case 1: return Json("""{"available_count":2,"credits":[]}""");
+                case 2:
+                    ResetStarted.TrySetResult();
+                    await ReleaseReset.Task.WaitAsync(ct);
+                    return Json("""{"available_count":0,"credits":[]}""");
+                default: return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+            }
+        }
+    }
+
     private sealed class OverlappingHandler : HttpMessageHandler
     {
         public TaskCompletionSource OlderStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

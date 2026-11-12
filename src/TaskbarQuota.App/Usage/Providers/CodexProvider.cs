@@ -30,6 +30,7 @@ namespace TaskbarQuota.Usage.Providers
         private DateTimeOffset _lastResetCreditsAt;
         private string? _resetCreditsIdentity;
         private long _nextRequestSequence;
+        private long _startedResetCreditsIdentitySequence;
         private long _completedResetCreditsSequence;
         private readonly HttpClient _http;
         private readonly Func<Credentials> _credentialsSource;
@@ -72,9 +73,9 @@ namespace TaskbarQuota.Usage.Providers
             var identity = CacheIdentityFor(creds, baseUrl);
             lock (_resetCreditsLock)
             {
-                if (sequence >= _completedResetCreditsSequence)
+                if (sequence >= _startedResetCreditsIdentitySequence)
                 {
-                    _completedResetCreditsSequence = sequence;
+                    _startedResetCreditsIdentitySequence = sequence;
                     if (!string.Equals(_resetCreditsIdentity, identity, StringComparison.Ordinal))
                     {
                         _lastResetCredits = null;
@@ -115,7 +116,9 @@ namespace TaskbarQuota.Usage.Providers
             lock (_resetCreditsLock)
             {
                 // A delayed old response must never replace a newer explicit zero or account switch.
-                if (sequence < _completedResetCreditsSequence)
+                if (sequence < _completedResetCreditsSequence
+                    || (sequence < _startedResetCreditsIdentitySequence
+                        && !string.Equals(_resetCreditsIdentity, identity, StringComparison.Ordinal)))
                     return requestSucceeded ? fetched?.WithConfirmation(now).CurrentAt(now) : null;
                 _completedResetCreditsSequence = sequence;
                 if (!string.Equals(_resetCreditsIdentity, identity, StringComparison.Ordinal))
