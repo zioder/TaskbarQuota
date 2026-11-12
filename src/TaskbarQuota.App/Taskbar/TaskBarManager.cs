@@ -71,9 +71,19 @@ namespace TaskbarQuota.Taskbar
         private static int _uiWatchdogStopping;
         private static int _uiWatchdogRestartRequested;
         private static int _layoutFailurePending;
+        private static readonly RecoveryRestartBudget RecoveryBudget;
+        private static readonly Stopwatch RecoveryHealthClock;
         private const int UiWatchdogMissLimit = 3;
 
         private static bool IsFloatingSurface => _activeSurface == WidgetSurfaceMode.Floating;
+
+        static TaskBarManager()
+        {
+            // An explicit constructor prevents eager beforefieldinit from reading Program's
+            // recovery attempt before startup has parsed it.
+            RecoveryBudget = new(Program.RecoveryAttempt);
+            RecoveryHealthClock = Stopwatch.StartNew();
+        }
 
         /// <summary>
         /// Background heartbeat for the dispatcher thread (issue #70). Every 5 s a thread-pool timer
@@ -167,13 +177,22 @@ namespace TaskbarQuota.Taskbar
         /// Best-effort recovery for a dead dispatcher. <see cref="AppInstance.Restart"/> needs a foreground
         /// window and will not return on success, so a tray-only widget with a wedged UI thread has to
         /// start a replacement that waits for this process to exit before registering its key.
-        /// Returns true when a new process was started (this process should then exit).
+        /// Returns true when the request was accepted or its retry budget was exhausted.
         /// </summary>
         private static bool RequestUiRestart(string recoveryReason)
         {
+            if (!RecoveryBudget.TryGetNextAttempt(out int attempt))
+            {
+                Log.Error("Automatic UI recovery limit reached. Restart the application manually to try again.");
+                // Leave the request guard set, so the watchdog cannot repeatedly spawn or log.
+                return true;
+            }
+            using var predecessor = Process.GetCurrentProcess();
+            var arguments = RecoveryStartup.CreateArguments(StartupSettingsService.StartupArgument,
+                new RecoveryStartup.Context(Environment.ProcessId, predecessor.StartTime.ToUniversalTime().Ticks, attempt));
             try
             {
-                var reason = AppInstance.Restart(StartupSettingsService.StartupArgument);
+                var reason = AppInstance.Restart(arguments);
                 Log.Error($"{recoveryReason}: AppInstance.Restart returned {reason}; falling back to a new process");
             }
             catch (Exception ex)
@@ -181,7 +200,7 @@ namespace TaskbarQuota.Taskbar
                 Log.Error(ex, $"{recoveryReason}: AppInstance.Restart threw; falling back to a new process");
             }
 
-            if (!TrySpawnReplacementProcess(recoveryReason))
+            if (!TrySpawnReplacementProcess(recoveryReason, arguments))
             {
                 Log.Error($"{recoveryReason}: could not start a replacement process; the background watchdog will retry");
                 return false;
@@ -191,7 +210,7 @@ namespace TaskbarQuota.Taskbar
             return true;
         }
 
-        private static bool TrySpawnReplacementProcess(string recoveryReason)
+        private static bool TrySpawnReplacementProcess(string recoveryReason, string arguments)
         {
             var path = Environment.ProcessPath;
             if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
@@ -205,7 +224,7 @@ namespace TaskbarQuota.Taskbar
                 var started = Process.Start(new ProcessStartInfo
                 {
                     FileName = path,
-                    Arguments = $"{StartupSettingsService.StartupArgument} {RecoveryStartup.ParentArgument} {Environment.ProcessId}",
+                    Arguments = arguments,
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     WindowStyle = ProcessWindowStyle.Hidden,
@@ -547,6 +566,11 @@ namespace TaskbarQuota.Taskbar
             _widgetHealthTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
             _widgetHealthTimer.Tick += (_, _) =>
             {
+                if (Volatile.Read(ref _layoutFailurePending) == 0
+                    && RecoveryBudget.ReportHealthyTick(RecoveryHealthClock.Elapsed))
+                {
+                    Interlocked.Exchange(ref _uiWatchdogRestartRequested, 0);
+                }
                 if (IsFloatingSurface)
                 {
                     bool recreated = false;
