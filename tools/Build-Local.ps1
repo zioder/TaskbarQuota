@@ -55,6 +55,7 @@ $buildLock = [System.IO.File]::Open(
     [System.IO.FileMode]::OpenOrCreate,
     [System.IO.FileAccess]::ReadWrite,
     [System.IO.FileShare]::None)
+$instances = @()
 
 try {
     Assert-ArtifactDirectory $stagingDirectory
@@ -75,6 +76,12 @@ try {
 
     $instances = @(Get-Process -Name TaskbarQuota -ErrorAction SilentlyContinue)
     foreach ($instance in $instances) {
+        # Keep the process identity alive before validating its executable. Termination below
+        # must use this same handle, even if the process exits while output is being staged.
+        [void]$instance.Handle
+        if ($instance.HasExited) {
+            continue
+        }
         if ($instance.Path -ne $localExecutable) {
             throw "A different TaskbarQuota copy is running. Close it first: $($instance.Path)"
         }
@@ -88,7 +95,10 @@ try {
         Remove-Item -LiteralPath $previousDirectory -Recurse -Force
     }
     foreach ($instance in $instances) {
-        Stop-Process -Id $instance.Id -ErrorAction Stop
+        if ($instance.HasExited) {
+            continue
+        }
+        $instance.Kill()
         if (!$instance.WaitForExit(10000)) {
             throw 'The running local copy did not exit within 10 seconds.'
         }
@@ -118,5 +128,8 @@ try {
     Write-Host "Local build: $localExecutable"
 }
 finally {
+    foreach ($instance in $instances) {
+        $instance.Dispose()
+    }
     $buildLock.Dispose()
 }

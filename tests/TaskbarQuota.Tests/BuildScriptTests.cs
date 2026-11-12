@@ -70,6 +70,87 @@ public class BuildScriptTests
         }
     }
 
+    [Theory]
+    [InlineData("local", true, 1)]
+    [InlineData("exited", true, 0)]
+    [InlineData("foreign", false, 0)]
+    public async Task LocalBuildRetainsValidatedProcessIdentity(string mode, bool succeeds, int kills)
+    {
+        var fixture = Directory.CreateTempSubdirectory("TaskbarQuota-build-process-").FullName;
+        try
+        {
+            var tools = Path.Combine(fixture, "tools");
+            Directory.CreateDirectory(tools);
+            var script = Path.Combine(tools, "Build-Local.ps1");
+            File.Copy(Path.Combine(RepositoryRoot(), "tools", "Build-Local.ps1"), script);
+            var result = await RunScript("""
+                param($Script, $Mode)
+                $ErrorActionPreference = 'Stop'
+                $root = Split-Path (Split-Path $Script)
+                $local = Join-Path $root 'artifacts/local'
+                $previous = Join-Path $root 'artifacts/local.previous'
+                New-Item -ItemType Directory -Path $local,$previous -Force | Out-Null
+                Set-Content (Join-Path $local 'TaskbarQuota.exe') 'old'
+                Set-Content (Join-Path $previous 'TaskbarQuota.exe') 'backup'
+                $global:fixtureProcess = [pscustomobject]@{
+                    Pinned=$false; Exited=$false; Disposed=$false; Kills=0; Mode=$Mode
+                    Executable=if($Mode -eq 'foreign'){'C:/another-copy/TaskbarQuota.exe'}else{Join-Path $local 'TaskbarQuota.exe'}
+                }
+                $fixtureProcess | Add-Member ScriptProperty Handle {
+                    $this.Pinned=$true
+                    if($this.Mode -eq 'exited'){$this.Exited=$true}
+                    return 42
+                }
+                $fixtureProcess | Add-Member ScriptProperty HasExited {$this.Exited}
+                $fixtureProcess | Add-Member ScriptProperty Path {
+                    if(!$this.Pinned){throw 'Executable was inspected before retaining the process handle'}
+                    $this.Executable
+                }
+                $fixtureProcess | Add-Member ScriptProperty Id {throw 'PID must not be reopened after validation'}
+                $fixtureProcess | Add-Member ScriptMethod Kill {
+                    if(!$this.Pinned){throw 'Process identity was not retained'}
+                    $this.Kills++; $this.Exited=$true
+                }
+                $fixtureProcess | Add-Member ScriptMethod WaitForExit {param($Timeout) $this.Exited}
+                $fixtureProcess | Add-Member ScriptMethod Dispose {$this.Disposed=$true}
+                function global:Get-Process {$global:fixtureProcess}
+                function global:Stop-Process {throw 'PID-based termination must not be used'}
+                function global:dotnet {
+                    $destination=$args[[Array]::IndexOf($args,'-o')+1]
+                    New-Item -ItemType Directory -Path $destination -Force | Out-Null
+                    Set-Content (Join-Path $destination 'TaskbarQuota.exe') 'new'
+                    $global:LASTEXITCODE=0
+                }
+                $succeeded=$false; $failure=''
+                try {& $Script -NoStart; $succeeded=$true} catch {$failure=$_.Exception.Message}
+                'fixture-result:'+(@{
+                    succeeded=$succeeded; failure=$failure; pinned=$fixtureProcess.Pinned
+                    disposed=$fixtureProcess.Disposed; kills=$fixtureProcess.Kills
+                    backup=if(Test-Path (Join-Path $previous 'TaskbarQuota.exe')){(Get-Content (Join-Path $previous 'TaskbarQuota.exe')).Trim()}else{''}
+                } | ConvertTo-Json -Compress)
+                """, script, mode);
+            Assert.True(result.ExitCode == 0, result.Error);
+            var output = Assert.Single(result.Output.Split('\n'), line => line.StartsWith("fixture-result:", StringComparison.Ordinal));
+            using var json = JsonDocument.Parse(output["fixture-result:".Length..]);
+            Assert.Equal(succeeds, json.RootElement.GetProperty("succeeded").GetBoolean());
+            Assert.Equal(kills, json.RootElement.GetProperty("kills").GetInt32());
+            Assert.True(json.RootElement.GetProperty("pinned").GetBoolean());
+            Assert.True(json.RootElement.GetProperty("disposed").GetBoolean());
+            if (!succeeds)
+            {
+                Assert.Contains("A different TaskbarQuota copy is running", json.RootElement.GetProperty("failure").GetString());
+                Assert.Equal("backup", json.RootElement.GetProperty("backup").GetString());
+            }
+            else
+                Assert.Equal("old", json.RootElement.GetProperty("backup").GetString());
+        }
+        finally
+        {
+            Assert.Equal(Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar), Path.GetDirectoryName(fixture));
+            Directory.Delete(fixture, recursive: true);
+        }
+    }
+
     private static string RepositoryRoot()
     {
         for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
