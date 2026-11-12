@@ -72,11 +72,12 @@ public static class LayoutTraceCollector
         if (maximumSeconds < 1 || maximumSeconds > 1800) throw new ArgumentOutOfRangeException(nameof(maximumSeconds));
         if (!Environment.Is64BitProcess) throw new PlatformNotSupportedException("The capture ABI requires x64 PowerShell.");
         using var target = Process.GetProcessById(targetId);
+        // Retain identity before inspecting modules: MainModule itself queries by PID.
+        var readHandle = target.Handle;
         if (!string.Equals(target.MainModule.FileName, Path.GetFullPath(expectedExecutable), StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("The target isn't the explicitly selected executable.");
         // Acquire our independent read handle before attaching. Debug-event thread/process handles are
         // owned by ContinueDebugEvent and mustn't be closed or confused with this Process handle.
-        var readHandle = target.Handle;
         using var stream = new FileStream(outputFile, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
         using var writer = new StreamWriter(stream, new UTF8Encoding(false));
         writer.NewLine = "\n";
@@ -107,7 +108,9 @@ public static class LayoutTraceCollector
                 if (stopFile != null && File.Exists(stopFile)) { result = "stopped"; break; }
                 if (!WaitForDebugEventEx(out var e, 100))
                 {
+                    int waitError = Marshal.GetLastWin32Error();
                     if (target.HasExited) { result = "process-exited"; break; }
+                    if (waitError != 121) { result = "wait-error"; throw new Win32Exception(waitError); }
                     if (firstTrace is { } first && watch.Elapsed.TotalSeconds - first > 10) { result = "layout-trace-captured"; break; }
                     continue;
                 }
