@@ -300,8 +300,11 @@ namespace TaskbarQuota.ViewModels
             // Coordinator refreshes can complete while a dashboard pass is still merging. Its
             // snapshot mustn't put an earlier provider observation back over the newer UI result.
             results = DashboardResultMerge.KeepNewerObservations(BuildDashboardResults(active, results), _lastResults);
+            var previousHistoryResults = _lastHistoryResults;
             _lastHistoryResults = DashboardResultMerge.KeepNewerHistorySnapshots(
                 usageResults ?? _lastHistoryResults, results);
+            bool historyAccountChanged = previousHistoryResults.Any(previous => !_lastHistoryResults.Any(current =>
+                current.Id == previous.Id && current.CacheIdentity == previous.CacheIdentity));
             _lastResults = results.ToArray();
             _lastActive = active;
 
@@ -321,7 +324,7 @@ namespace TaskbarQuota.ViewModels
             // Populate the spend snapshot only from a complete usage-history pass. Progressive quota
             // updates and per-provider callbacks would otherwise flip HasSpendData early and flash a
             // partially-populated Cost surface before the full history is ready.
-            if (refreshUsageSnapshot && usageResults is not null)
+            if ((refreshUsageSnapshot && usageResults is not null) || historyAccountChanged)
                 TotalSpend.UpdateResults(_lastHistoryResults, force: true);
 
             AvailableCardsVisibility = AvailableCards.Count > 0
@@ -527,7 +530,9 @@ namespace TaskbarQuota.ViewModels
                 combined[provider.Id] = UsageResult.Success(
                     provider.Id,
                     provider,
-                    new ProviderFetchResult(usage, "Local usage history"));
+                    // Local transcripts remain provider-wide. Fence the scan's UI lifetime to the
+                    // credentials present at capture; this doesn't account-filter the source files.
+                    new ProviderFetchResult(usage, "Local usage history", cacheIdentity: UsageCacheIdentity.CurrentFor(provider)));
             }
             return combined.Values.OrderBy(result => result.Id).ToArray();
         }
@@ -546,6 +551,7 @@ namespace TaskbarQuota.ViewModels
         internal static string BuildCardSignature(UsageResult r, bool isActive)
         {
             var sb = new StringBuilder()
+                .Append(r.CacheIdentity).Append('|')
                 .Append(r.Id).Append('|')
                 .Append(isActive).Append('|')
                 .Append(r.Error).Append('|')
