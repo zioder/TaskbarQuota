@@ -543,6 +543,9 @@ namespace TaskbarQuota.Controls
 
         private static List<WidgetUsageRow> BuildRows(UsageResult result, UsageSnapshot usage)
         {
+            if (result.Id == ProviderId.Antigravity)
+                return BuildAntigravityRows(usage);
+
             if (result.Id == ProviderId.Codex)
             {
                 var rows = BuildBaseRows(result, usage);
@@ -697,10 +700,37 @@ namespace TaskbarQuota.Controls
         }
 
         private static int CountAntigravityRows(UsageSnapshot usage)
-            => (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowPrimary) ? 1 : 0)
-            + (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowModelSpecific) ? 1 : 0)
-            + (usage.Secondary != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowSecondary) ? 1 : 0)
-            + (usage.Monthly != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowMonthly) ? 1 : 0);
+            => BuildAntigravityRows(usage).Count;
+
+        private static List<WidgetUsageRow> BuildAntigravityRows(UsageSnapshot usage)
+        {
+            var rows = new List<WidgetUsageRow>();
+            // Icon already conveys the model family (Gemini vs Non-Gemini), so the widget row only needs the window.
+            if (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowPrimary))
+            {
+                rows.Add(WindowRow("Weekly", usage.Primary, ProviderGlyphs.Gemini));
+            }
+            if (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowModelSpecific))
+            {
+                rows.Add(WindowRow("5h", usage.ModelSpecific, ProviderGlyphs.Gemini));
+            }
+            if (usage.Secondary != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowSecondary))
+            {
+                rows.Add(WindowRow("Weekly", usage.Secondary, ProviderGlyphs.GeminiBarred));
+            }
+            if (usage.Monthly != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowMonthly))
+            {
+                rows.Add(WindowRow("5h", usage.Monthly, ProviderGlyphs.GeminiBarred));
+            }
+            if (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowExtra))
+            {
+                foreach (var extra in usage.ExtraRateWindows.Where(AntigravityProvider.IsSummaryExtraWindow))
+                {
+                    rows.Add(WindowRow(extra.Title, extra.Window, ProviderGlyphs.Gemini));
+                }
+            }
+            return rows;
+        }
 
         private static int CountCreditRows(ProviderId id, UsageSnapshot usage)
             => (WidgetSettingsService.IsRowVisible(id, WidgetSettingsService.RowCredits) ? 1 : 0)
@@ -997,25 +1027,7 @@ namespace TaskbarQuota.Controls
 
         private void ApplyAntigravityDisplay(UsageResult result, UsageSnapshot usage, bool providerChanged = false)
         {
-            var rows = new List<WidgetUsageRow>();
-            // Icon already conveys the model family (Gemini vs Non-Gemini), so the widget row only needs the window.
-            if (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowPrimary))
-            {
-                rows.Add(WindowRow("Weekly", usage.Primary, ProviderGlyphs.Gemini));
-            }
-            if (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowModelSpecific))
-            {
-                rows.Add(WindowRow("5h", usage.ModelSpecific, ProviderGlyphs.Gemini));
-            }
-            if (usage.Secondary != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowSecondary))
-            {
-                rows.Add(WindowRow("Weekly", usage.Secondary, ProviderGlyphs.GeminiBarred));
-            }
-            if (usage.Monthly != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowMonthly))
-            {
-                rows.Add(WindowRow("5h", usage.Monthly, ProviderGlyphs.GeminiBarred));
-            }
-            _rows = rows;
+            _rows = BuildAntigravityRows(usage);
             if (_rows.Count == 0)
             {
                 SetActiveToolVisible(false);
@@ -1034,6 +1046,14 @@ namespace TaskbarQuota.Controls
                 (usage.Primary.IsIncluded && usage.Primary.ResetDescription is { } r1 ? $" (resets {r1})" : "") + "\n" +
                 $"Non-Gemini: {(usage.Secondary is { } secondary ? WindowDisplayValue(secondary) : "Not included")}" +
                 (usage.Secondary is { IsIncluded: true, ResetDescription: { } r2 } ? $" (resets {r2})" : "");
+            if (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowExtra))
+            {
+                foreach (var extra in usage.ExtraRateWindows.Where(AntigravityProvider.IsSummaryExtraWindow))
+                {
+                    body += $"\n{extra.Title}: {WindowDisplayValue(extra.Window)}" +
+                        (extra.Window.IsIncluded && extra.Window.ResetDescription is { } rx ? $" (resets {rx})" : "");
+                }
+            }
             ToolTipService.SetToolTip(
                 this,
                 header + body + WidgetUsageHistoryTooltipLine(usage.UsageHistory) + StaleTooltipLine(result));

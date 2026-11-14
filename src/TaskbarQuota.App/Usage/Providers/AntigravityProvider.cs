@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Management;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -54,7 +55,10 @@ namespace TaskbarQuota.Usage.Providers
             // plan-aware quota groups (weekly, plus a 5-hour limit on Plus/Pro/Ultra tiers).
             var statusJson = await CallWithCsrf($"{baseUrl}/GetUserStatus", meta, info, ct).ConfigureAwait(false);
             if (statusJson == null)
+            {
+                Diagnostics.Log.Warning($"[antigravity] GetUserStatus returned null from {endpoint.Scheme} port {endpoint.Port} (cli={info.IsCli})");
                 throw new ProviderException(ProviderErrorKind.Other, "Antigravity API request failed.");
+            }
 
             var summaryJson = await CallWithCsrf($"{baseUrl}/RetrieveUserQuotaSummary", "{}", info, ct).ConfigureAwait(false);
 
@@ -63,6 +67,7 @@ namespace TaskbarQuota.Usage.Providers
                 ? fromSummary
                 : ParseUserStatus(statusDoc.RootElement); // legacy per-model fallback
             ApplyPlanInfo(statusDoc.RootElement, snapshot);
+            Diagnostics.Log.Debug($"[antigravity] fetch ok via {endpoint.Scheme}:{endpoint.Port} cli={info.IsCli} summary={summaryJson != null} extra={snapshot.ExtraRateWindows.Count}");
             return new ProviderFetchResult(snapshot, info.IsCli ? "local-cli" : "local");
         }
 
@@ -109,26 +114,24 @@ namespace TaskbarQuota.Usage.Providers
                 }
             }
 
-            // Aggregate into Gemini and Non-Gemini groups (max used-percent in each).
-            RateWindow? gemini = null, nonGemini = null;
-            DateTimeOffset? geminiReset = null, nonGeminiReset = null;
+            // Aggregate into Gemini, Non-Gemini, and standalone Argon groups (max used-percent in each).
+            RateWindow? gemini = null, nonGemini = null, argon = null;
             foreach (var (label, window) in configs)
             {
-                if (IsGemini(label))
+                if (IsArgon(label))
+                {
+                    if (argon == null || window.UsedPercent > argon.UsedPercent)
+                        argon = window;
+                }
+                else if (IsGemini(label))
                 {
                     if (gemini == null || window.UsedPercent > gemini.UsedPercent)
-                    {
                         gemini = window;
-                        geminiReset = window.ResetAt;
-                    }
                 }
                 else
                 {
                     if (nonGemini == null || window.UsedPercent > nonGemini.UsedPercent)
-                    {
                         nonGemini = window;
-                        nonGeminiReset = window.ResetAt;
-                    }
                 }
             }
 
@@ -136,8 +139,10 @@ namespace TaskbarQuota.Usage.Providers
             nonGemini ??= new RateWindow(0);
 
             var snapshot = new UsageSnapshot(gemini) { Secondary = nonGemini };
+            if (argon != null)
+                snapshot.ExtraRateWindows.Add(new NamedRateWindow("argon-weekly", "Argon Weekly", argon));
 
-            // Keep individual models as extra rate windows for the flyout.
+            // Keep individual models as extra rate windows for alerts/inspection.
             int idx = 0;
             foreach (var (label, window) in configs)
             {
@@ -149,8 +154,12 @@ namespace TaskbarQuota.Usage.Providers
             return snapshot;
         }
 
+        internal static bool IsSummaryExtraWindow(NamedRateWindow window)
+            => !window.Id.StartsWith("model-", StringComparison.Ordinal);
+
         /// <summary>
-        /// Parse RetrieveUserQuotaSummary into Gemini / non-Gemini weekly (+ 5-hour) windows.
+        /// Parse RetrieveUserQuotaSummary into Gemini / non-Gemini weekly (+ 5-hour) windows
+        /// and any standalone model-group buckets (e.g. Gemini 4 Argon).
         /// Free / starter tiers expose only a weekly bucket per group; Plus/Pro/Ultra add a 5-hour bucket.
         /// </summary>
         internal static bool TryParseQuotaSummary(string json, out UsageSnapshot snapshot)
@@ -162,24 +171,38 @@ namespace TaskbarQuota.Usage.Providers
                 return false;
 
             RateWindow? geminiWeekly = null, geminiFiveHour = null, otherWeekly = null, otherFiveHour = null;
+            var extraWindows = new List<NamedRateWindow>();
             bool any = false;
+            int extraIdx = 0;
             foreach (var g in groups.EnumerateArray())
             {
                 string name = g.TryGetProperty("displayName", out var dn) ? dn.GetString() ?? "" : "";
-                bool isGemini = name.Contains("Gemini", StringComparison.OrdinalIgnoreCase);
                 if (!g.TryGetProperty("buckets", out var buckets) || buckets.ValueKind != JsonValueKind.Array) continue;
+
+                var groupKind = ClassifySummaryGroup(name, buckets);
                 foreach (var b in buckets.EnumerateArray())
                 {
                     bool fiveHour = IsFiveHourBucket(b);
                     var window = RateWindowFromQuota(b, fiveHour ? QuotaWindowLength.FiveHours : QuotaWindowLength.Weekly); // buckets carry remainingFraction + resetTime like quotaInfo
                     any = true;
-                    if (fiveHour)
+                    switch (groupKind)
                     {
-                        if (isGemini) geminiFiveHour = window; else otherFiveHour = window;
-                    }
-                    else
-                    {
-                        if (isGemini) geminiWeekly = window; else otherWeekly = window;
+                        case SummaryGroupKind.Gemini:
+                            if (fiveHour) geminiFiveHour ??= window;
+                            else geminiWeekly ??= window;
+                            break;
+                        case SummaryGroupKind.Other:
+                            if (fiveHour) otherFiveHour ??= window;
+                            else otherWeekly ??= window;
+                            break;
+                        case SummaryGroupKind.Extra:
+                            string bucketId = b.TryGetProperty("bucketId", out var bi) ? bi.GetString() ?? "" : "";
+                            string bucketDisplay = b.TryGetProperty("displayName", out var bd) ? bd.GetString() ?? "" : "";
+                            string id = !string.IsNullOrWhiteSpace(bucketId) ? bucketId : $"extra-{extraIdx}";
+                            string title = FormatExtraBucketTitle(name, bucketDisplay, fiveHour);
+                            extraWindows.Add(new NamedRateWindow(id, title, window));
+                            extraIdx++;
+                            break;
                     }
                 }
             }
@@ -192,7 +215,56 @@ namespace TaskbarQuota.Usage.Providers
                 Secondary = otherWeekly,
                 Monthly = otherFiveHour,
             };
+            snapshot.ExtraRateWindows.AddRange(extraWindows);
             return true;
+        }
+
+        private enum SummaryGroupKind { Gemini, Other, Extra }
+
+        private static SummaryGroupKind ClassifySummaryGroup(string groupName, JsonElement buckets)
+        {
+            if (IsArgon(groupName))
+                return SummaryGroupKind.Extra;
+
+            bool hasMainGeminiBucket = false;
+            bool hasThirdPartyBucket = false;
+            foreach (var b in buckets.EnumerateArray())
+            {
+                string bucketId = b.TryGetProperty("bucketId", out var bi) ? bi.GetString() ?? "" : "";
+                if (IsArgon(bucketId))
+                    return SummaryGroupKind.Extra;
+                if (bucketId.Equals("gemini-weekly", StringComparison.OrdinalIgnoreCase) ||
+                    bucketId.Equals("gemini-5h", StringComparison.OrdinalIgnoreCase))
+                    hasMainGeminiBucket = true;
+                else if (bucketId.StartsWith("3p-", StringComparison.OrdinalIgnoreCase))
+                    hasThirdPartyBucket = true;
+            }
+
+            if (hasMainGeminiBucket ||
+                groupName.Equals("Gemini Models", StringComparison.OrdinalIgnoreCase) ||
+                groupName.Equals("Gemini", StringComparison.OrdinalIgnoreCase))
+                return SummaryGroupKind.Gemini;
+
+            if (hasThirdPartyBucket || !groupName.Contains("Gemini", StringComparison.OrdinalIgnoreCase))
+                return SummaryGroupKind.Other;
+
+            // Any other standalone Gemini sub-group (e.g. a future model-specific bucket) stays separate
+            // instead of overwriting the primary Gemini group.
+            return SummaryGroupKind.Extra;
+        }
+
+        private static string FormatExtraBucketTitle(string groupName, string bucketDisplay, bool fiveHour)
+        {
+            var baseName = Regex.Replace(groupName.Trim(), @"^Gemini(?:\s+\d+(?:\.\d+)?)?\s+", "", RegexOptions.IgnoreCase);
+            baseName = Regex.Replace(baseName, @"\s+models?$", "", RegexOptions.IgnoreCase).Trim();
+            if (string.IsNullOrEmpty(baseName))
+            {
+                baseName = Regex.Replace(bucketDisplay.Trim(), @"\s+(?:Weekly|Five\s+Hour)\s+Limit(?:\s+Remaining)?$", "", RegexOptions.IgnoreCase).Trim();
+            }
+            if (string.IsNullOrEmpty(baseName))
+                baseName = "Extra";
+
+            return $"{baseName} {(fiveHour ? "5h" : "Weekly")}";
         }
 
         private static bool IsFiveHourBucket(JsonElement bucket)
@@ -227,6 +299,15 @@ namespace TaskbarQuota.Usage.Providers
             if (!string.IsNullOrEmpty(plan)) snapshot.LoginMethod = plan;
         }
 
+        internal static UsageSnapshot ParseUserStatusForTesting(string json)
+        {
+            using var doc = JsonDocument.Parse(json);
+            return ParseUserStatus(doc.RootElement);
+        }
+
+        private static bool IsArgon(string label)
+            => label.Contains("argon", StringComparison.OrdinalIgnoreCase);
+
         private static bool IsGemini(string label)
         {
             var s = label.ToLowerInvariant();
@@ -258,6 +339,8 @@ namespace TaskbarQuota.Usage.Providers
             try
             {
                 ProcessInfo? tokenlessIde = null;
+                ProcessInfo? tokenizedCli = null;
+                ProcessInfo? tokenlessCli = null;
                 // Match the IDE language server and the terminal-only agy CLI server.
                 using var searcher = new ManagementObjectSearcher(
                     "SELECT ProcessId, Name, CommandLine FROM Win32_Process WHERE Name LIKE '%language_server%' OR Name = 'agy.exe' OR Name = 'antigravity-cli.exe' OR Name = 'antigravity_cli.exe'");
@@ -281,14 +364,26 @@ namespace TaskbarQuota.Usage.Providers
                     int extPort = port.Success ? int.Parse(port.Groups[1].Value) : 0;
 
                     var extCsrf = ExtCsrfRe.Match(cmd);
-                    return new ProcessInfo(
+                    var candidate = new ProcessInfo(
                         csrf.Success ? csrf.Groups[1].Value : "",
                         extCsrf.Success ? extCsrf.Groups[1].Value : null,
                         extPort,
                         TryReadPid(mo),
                         kind == ProcessKind.Cli);
+
+                    if (kind == ProcessKind.Ide)
+                        return candidate;
+
+                    if (csrf.Success)
+                        tokenizedCli ??= candidate;
+                    else
+                        tokenlessCli ??= candidate;
                 }
 
+                if (tokenizedCli != null)
+                    return tokenizedCli;
+                if (tokenlessCli != null)
+                    return tokenlessCli;
                 if (tokenlessIde != null)
                     throw new ProviderException(ProviderErrorKind.NotRunning, "Antigravity language server is missing its CSRF token. Restart Antigravity and retry.");
             }
@@ -403,7 +498,85 @@ namespace TaskbarQuota.Usage.Providers
 
         private static List<int> ListeningPortsForPid(int pid)
         {
-            // IP Helper would be cleaner, but matching the original's Get-NetTCPConnection keeps parity.
+            var ports = TryGetListeningTcpPortsNative(pid);
+            if (ports.Count > 0)
+                return ports;
+
+            return TryGetListeningTcpPortsPowerShell(pid);
+        }
+
+        [DllImport("iphlpapi.dll", SetLastError = true)]
+        private static extern uint GetExtendedTcpTable(
+            IntPtr pTcpTable,
+            ref int dwOutBufLen,
+            bool sort,
+            int ipVersion,
+            int tblClass,
+            uint reserved);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MibTcpRowOwnerPid
+        {
+            public uint State;
+            public uint LocalAddr;
+            public uint LocalPort;
+            public uint RemoteAddr;
+            public uint RemotePort;
+            public uint OwningPid;
+        }
+
+        private static List<int> TryGetListeningTcpPortsNative(int pid)
+        {
+            const int AfInet = 2;
+            const int TcpTableOwnerPidListener = 3;
+            const uint ErrorInsufficientBuffer = 122;
+            const uint NoError = 0;
+
+            var ports = new List<int>();
+            int length = 0;
+            uint status = GetExtendedTcpTable(IntPtr.Zero, ref length, sort: false, AfInet, TcpTableOwnerPidListener, 0);
+            if (status != ErrorInsufficientBuffer && status != NoError)
+                return ports;
+            if (length <= sizeof(int))
+                return ports;
+
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                IntPtr buffer = Marshal.AllocHGlobal(length);
+                try
+                {
+                    status = GetExtendedTcpTable(buffer, ref length, sort: false, AfInet, TcpTableOwnerPidListener, 0);
+                    if (status == ErrorInsufficientBuffer)
+                        continue;
+                    if (status != NoError)
+                        return ports;
+
+                    int count = Marshal.ReadInt32(buffer);
+                    int rowSize = Marshal.SizeOf<MibTcpRowOwnerPid>();
+                    IntPtr rowPtr = buffer + sizeof(int);
+                    for (int i = 0; i < count; i++, rowPtr += rowSize)
+                    {
+                        var row = Marshal.PtrToStructure<MibTcpRowOwnerPid>(rowPtr);
+                        if (row.OwningPid != (uint)pid)
+                            continue;
+
+                        int port = (int)(((row.LocalPort & 0xFF) << 8) | ((row.LocalPort >> 8) & 0xFF));
+                        if (port > 0)
+                            ports.Add(port);
+                    }
+                    return ports;
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
+            }
+
+            return ports;
+        }
+
+        private static List<int> TryGetListeningTcpPortsPowerShell(int pid)
+        {
             var ports = new List<int>();
             try
             {
