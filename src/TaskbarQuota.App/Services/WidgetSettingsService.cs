@@ -780,6 +780,7 @@ public static class WidgetSettingsService
                 new(RowModelSpecific, "Gemini 5h"),
                 new(RowSecondary, "Non-Gemini Weekly"),
                 new(RowMonthly, "Non-Gemini 5h"),
+                new(RowExtra, "Argon / extra rows"),
             ],
             ProviderId.OpenCode =>
             [
