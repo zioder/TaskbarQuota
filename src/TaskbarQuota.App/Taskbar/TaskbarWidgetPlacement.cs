@@ -25,6 +25,57 @@ internal readonly record struct AdaptiveWidgetPairPlacement(
 
 internal static class TaskbarWidgetPlacement
 {
+    internal static AdaptiveWidgetPairPlacement? PlaceActivityBesideQuota(
+        int quotaX, int quotaWidth, int manualActivityX, double scale, TaskbarWidgetOrder order,
+        IReadOnlyList<(int start, int end)> gaps)
+    {
+        int minimumActivityWidth = (int)Math.Ceiling(Controls.AgentActivitySummary.MinimumLogicalWidth * scale);
+        int maximumActivityWidth = (int)Math.Ceiling(Controls.AgentActivitySummary.DesiredLogicalWidth * scale);
+        int separation = (int)Math.Ceiling(TaskBarWidget.ActivitySummaryMarginLogicalPx * scale);
+        if (manualActivityX != int.MinValue && OccupyDifferentGaps(
+                quotaX, quotaWidth, manualActivityX, minimumActivityWidth, gaps))
+        {
+            var activity = PlaceAdaptive(manualActivityX, minimumActivityWidth, minimumActivityWidth,
+                maximumActivityWidth, anchorRight: false, gaps);
+            if (activity is { } detached)
+                return new(quotaX, detached.X, detached.Width, quotaWidth + detached.Width);
+        }
+
+        return PlaceAdaptivePair(quotaX, quotaWidth, minimumActivityWidth, maximumActivityWidth,
+            separation, order, gaps, manualActivityX);
+    }
+
+    internal static bool ShouldHideCodexResetCredits(int fullRow, int compactRow, bool wasHidden,
+        double scale, int quotaX, int manualActivityX, bool showActivity, TaskbarWidgetOrder order,
+        IReadOnlyList<(int start, int end)> gaps)
+    {
+        if (compactRow >= fullRow)
+            return false;
+
+        // Khi đã ẩn, cần dư thêm 8 DIP để sai số đo hoặc biến động nhỏ của dock không làm hàng nhấp nháy.
+        int fullWidth = (int)Math.Ceiling((fullRow + (wasHidden ? 8 : 0)) * scale);
+        int compactWidth = (int)Math.Ceiling(compactRow * scale);
+        bool CompactKeepsCloserLane(int fullX, int compactX) =>
+            Math.Abs((long)compactX - quotaX) < Math.Abs((long)fullX - quotaX)
+            && OccupyDifferentGaps(fullX, fullWidth, compactX, compactWidth, gaps);
+        if (!showActivity)
+        {
+            int? fullX = TaskBarWidget.PlaceInFittingGap(quotaX, gaps, fullWidth);
+            return fullX is null || (TaskBarWidget.PlaceInFittingGap(quotaX, gaps, compactWidth) is { } x
+                && CompactKeepsCloserLane(fullX.Value, x));
+        }
+
+        AdaptiveWidgetPairPlacement? Place(int width) => PlaceActivityBesideQuota(quotaX, width,
+            manualActivityX, scale, order, gaps);
+        var full = Place(fullWidth);
+        if (full is null)
+            return true;
+
+        var compact = Place(compactWidth);
+        return compact is { } fit && (fit.ActivityWidth > full.Value.ActivityWidth
+            || CompactKeepsCloserLane(full.Value.QuotaX, fit.QuotaX));
+    }
+
     internal static WidgetPairPlacement? PlacePair(
         int preferredAnchor,
         int quotaWidth,

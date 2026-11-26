@@ -180,7 +180,11 @@ namespace TaskbarQuota.Taskbar
                 var rects = new List<RECT>(buttons.Length);
                 for (int i = 0; i < buttons.Length; i++)
                 {
-                    var r = buttons.GetElement(i).CurrentBoundingRectangle;
+                    var button = buttons.GetElement(i);
+                    // Nút trong cửa sổ Agent Activity cũng nằm dưới cây UIA của taskbar.
+                    if (button.CurrentProcessId == Environment.ProcessId)
+                        continue;
+                    var r = button.CurrentBoundingRectangle;
                     if (r.right <= r.left || r.bottom <= r.top)
                         continue;
 

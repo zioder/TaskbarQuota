@@ -8,6 +8,24 @@ public class TaskBarWidgetGapTests
 {
     private static RECT R(int left, int right) => new() { left = left, top = 0, right = right, bottom = 40 };
 
+    [Theory]
+    [InlineData(1.0, 477, 16)]
+    [InlineData(1.25, 591, 20)]
+    [InlineData(1.5, 831, 24)]
+    [InlineData(1.3333, 702, 22)]
+    public void DockClearance_ReservesScaledSpaceForThePlacedPair(double scale, int dockStart, int clearance)
+    {
+        var buttons = new List<RECT> { R(0, 32), R(dockStart, dockStart + 41), R(1700, 1800) };
+        TaskBarWidget.ApplyDockClearance(buttons, scale, pill: R(0, 32), tray: R(1690, 1800));
+        var gaps = TaskBarWidget.ComputeFreeGaps(0, 1690, buttons);
+        Assert.Equal((32, dockStart - clearance), gaps[0]);
+        Assert.Equal((dockStart + 41, 1690), gaps[1]);
+        var fit = TaskbarWidgetPlacement.PlaceAdaptivePair(32, 200, 120, 1000, 8,
+            TaskbarWidgetOrder.QuotaFirst, gaps);
+        Assert.NotNull(fit);
+        Assert.Equal(clearance, dockStart - (fit.Value.ActivityX + fit.Value.ActivityWidth));
+    }
+
     [Fact]
     public void ShouldReposition_BeforeFirstPlacement_IsTrueWithoutOverflowing()
     {
