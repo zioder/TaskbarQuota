@@ -19,7 +19,7 @@ public static class QuotaPacing
     public static PaceProjection Evaluate(RateWindow window, DateTimeOffset now, bool isSessionWindow = false)
     {
         var used = Math.Clamp(window.UsedPercent, 0, 100);
-        if (Math.Round(100 - used) <= 0)
+        if (used >= 100)
             return new(PaceSeverity.Spent, 100, null, now, null);
         if (window.ResetAt is not { } reset || window.WindowMinutes is not > 0 || reset <= now)
             return Untracked();
@@ -60,7 +60,7 @@ public static class QuotaPacing
             PaceSeverity.Healthy when projection.ProjectedUsedPercent is { } p
                 => $"~{Math.Max(0, Math.Round(100 - p)):0}% left at reset" + FormatDelta(projection),
             PaceSeverity.Close when projection.ProjectedUsedPercent is { } p
-                => $"~{Math.Round(p):0}% used at reset ({Math.Max(1, Math.Round(100 - p)):0}% spare)",
+                => $"~{Math.Round(p):0}% used at reset ({FormatSpare(p)})",
             PaceSeverity.RunningOut when projection.RunOutAt is { } at
                 => $"At your current rate, runs out {FormatRelative(at, now)}, {FormatAbsolute(at, now)} (~{Math.Round(projection.ProjectedUsedPercent ?? 100):0}% used by reset). A forecast, not a certainty.",
             PaceSeverity.RunningOut
@@ -81,7 +81,7 @@ public static class QuotaPacing
         {
             PaceSeverity.Healthy => "On pace",
             PaceSeverity.Close when projection.ProjectedUsedPercent is { } p
-                => $"~{Math.Max(1, Math.Round(100 - p)):0}% spare",
+                => FormatSpare(p),
             PaceSeverity.RunningOut when projection.RunOutAt is { } at
                 => $"At this rate, runs out {FormatRelative(at, now)}",
             PaceSeverity.RunningOut => "At this rate, runs out before reset",
@@ -96,8 +96,18 @@ public static class QuotaPacing
         if (projection.Severity == PaceSeverity.RunningOut && projection.RunOutAt is { } at)
             return $"Limit {FormatRelative(at, now)}";
         if (projection.Severity == PaceSeverity.Close && projection.ProjectedUsedPercent is { } p)
-            return $"~{Math.Max(1, Math.Round(100 - p)):0}% spare";
+            return FormatSpare(p);
         return null;
+    }
+
+    private static string FormatSpare(double projectedUsedPercent)
+    {
+        var spare = 100 - projectedUsedPercent;
+        if (spare <= 0)
+            return "0% spare";
+        if (spare < 1)
+            return "<1% spare";
+        return $"~{Math.Round(spare):0}% spare";
     }
 
     private static PaceProjection Untracked() => new(PaceSeverity.Untracked, null, null, null, null);
