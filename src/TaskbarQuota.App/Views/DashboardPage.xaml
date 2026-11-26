@@ -78,6 +78,7 @@
                     <TextBlock Grid.Column="0"
                                Text="{x:Bind ResetText}"
                                Visibility="{x:Bind ResetVisibility}"
+                               TextWrapping="Wrap"
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                Style="{StaticResource CaptionTextBlockStyle}"/>
                     <TextBlock Grid.Column="1"

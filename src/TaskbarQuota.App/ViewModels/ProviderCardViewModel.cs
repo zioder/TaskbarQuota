@@ -55,18 +55,17 @@ namespace TaskbarQuota.ViewModels
             Percent = included ? displayPercent : 0;
             PercentText = included ? WidgetSettingsService.FormatDisplayPercent(w.UsedPercent) : "Not included";
             BarVisibility = included ? Visibility.Visible : Visibility.Collapsed;
-            ResetText = included && w.ResetDescription is { } r ? $"resets in {r}" : string.Empty;
-            ResetVisibility = included && w.ResetDescription is not null ? Visibility.Visible : Visibility.Collapsed;
-            BarBrush = Ui.UsageBrush(displayPercent);
-
+            ResetText = QuotaResetDisplay.WindowCaption(providerId, w);
+            ResetVisibility = ResetText.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
             var now = DateTimeOffset.UtcNow;
             var pace = included
                 ? QuotaPacing.Evaluate(w, now, isSessionWindow: w.WindowMinutes is <= 360)
                 : QuotaPacing.Evaluate(new RateWindow(0), now);
-            if (pace.Severity != PaceSeverity.Untracked)
-                BarBrush = Ui.PaceBrush(pace.Severity);
+            BarBrush = Ui.UsageBarBrush(displayPercent, pace.Severity);
 
-            bool hasTick = included && pace.IdealPacePercent is not null;
+            bool hasTick = included
+                && WidgetSettingsService.CurrentUsageBarColorMode == UsageBarColorMode.UsageForecast
+                && pace.IdealPacePercent is not null;
             double tick = hasTick ? Math.Clamp(WidgetSettingsService.DisplayPercent(pace.IdealPacePercent!.Value), 0, 100) : 0;
             TickVisibility = hasTick ? Visibility.Visible : Visibility.Collapsed;
             TickBeforeWidth = new GridLength(tick, GridUnitType.Star);
@@ -153,16 +152,7 @@ namespace TaskbarQuota.ViewModels
         public ResetCreditViewModel(int index, ResetCreditGrant credit)
         {
             TokenTitle = $"Reset {index}";
-            ExpiresText = FormatNullableLocalDateTime(credit.ExpiresAt);
-        }
-
-        private static string FormatNullableLocalDateTime(DateTimeOffset? timestamp)
-            => timestamp is { } value ? FormatLocalDateTime(value) : "Unknown";
-
-        private static string FormatLocalDateTime(DateTimeOffset timestamp)
-        {
-            var local = timestamp.ToLocalTime();
-            return $"{local:MMM d, yyyy h:mm tt}";
+            ExpiresText = credit.ExpiresAt is { } date ? QuotaResetDisplay.FormatLocalDateTime(date) : "Unknown";
         }
     }
 
@@ -600,14 +590,8 @@ namespace TaskbarQuota.ViewModels
         public static Brush UsageBrushFromUsed(double usedPercent)
             => CopyBrush(Res(WidgetSettingsService.GetUsageBrushResourceKey(usedPercent)));
 
-        /// <summary>Pace verdict color: accent while on course, caution close to the limit, critical when it will run out.</summary>
-        public static Brush PaceBrush(PaceSeverity severity)
-            => CopyBrush(Res(severity switch
-            {
-                PaceSeverity.Close => "SystemFillColorCautionBrush",
-                PaceSeverity.RunningOut or PaceSeverity.Spent => "SystemFillColorCriticalBrush",
-                _ => "AccentFillColorDefaultBrush",
-            }));
+        public static Brush UsageBarBrush(double displayPercent, PaceSeverity? pace)
+            => CopyBrush(Res(WidgetSettingsService.GetUsageBarBrushResourceKey(displayPercent, pace)));
 
         /// <summary>Consumed-meter color (credits), always using consumed thresholds.</summary>
         public static Brush ConsumedUsageBrush(double consumedPercent)

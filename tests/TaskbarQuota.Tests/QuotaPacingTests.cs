@@ -41,6 +41,27 @@ public class QuotaPacingTests
     }
 
     [Fact]
+    public void FractionalQuotaStillAvailableIsNotMarkedSpent()
+    {
+        var result = QuotaPacing.Evaluate(new RateWindow(99.6, 10080, Now.AddMinutes(1)), Now);
+        Assert.Equal(PaceSeverity.Close, result.Severity);
+        Assert.Equal("<1% spare", QuotaPacing.CardText(result, Now));
+    }
+
+    [Theory]
+    [InlineData(48.75, "~2% spare")]
+    [InlineData(49.75, "<1% spare")]
+    [InlineData(50, "0% spare")]
+    public void SpareForecastPreservesRoundingWithoutFakingAMinimum(double used, string expected)
+    {
+        var result = QuotaPacing.Evaluate(new RateWindow(used, 10080, Now.AddDays(3.5)), Now);
+        Assert.Equal(PaceSeverity.Close, result.Severity);
+        Assert.Equal(expected, QuotaPacing.CardText(result, Now));
+        Assert.Equal(expected, QuotaPacing.WarningText(result, Now));
+        Assert.EndsWith($"({expected})", QuotaPacing.Tooltip(result, Now));
+    }
+
+    [Fact]
     public void ClosePaceReportsSpareAndNoRunOut()
     {
         var result = QuotaPacing.Evaluate(new RateWindow(47.5, 10080, Now.AddDays(3.5)), Now);
