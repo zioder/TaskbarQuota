@@ -361,7 +361,7 @@ namespace TaskbarQuota.Usage.Providers
                 }
             }
 
-            return new ResetCreditsSnapshot(grants.Count, grants);
+            return new ResetCreditsSnapshot(grants.Count, grants, confirmedAt: DateTimeOffset.UtcNow);
         }
 
         private static DateTimeOffset? ParseDateTimeOffset(JsonElement parent, string name)

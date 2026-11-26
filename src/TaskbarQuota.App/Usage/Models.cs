@@ -1,9 +1,49 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace TaskbarQuota.Usage
 {
+    internal readonly record struct UsagePublicationOrder(long Sequence, long Revision = 0) : IComparable<UsagePublicationOrder>
+    {
+        public int CompareTo(UsagePublicationOrder other)
+        {
+            int sequence = Sequence.CompareTo(other.Sequence);
+            return sequence != 0 ? sequence : Revision.CompareTo(other.Revision);
+        }
+
+        internal UsagePublicationOrder NextRevision() => new(Sequence, checked(Revision + 1));
+        public static bool operator <(UsagePublicationOrder left, UsagePublicationOrder right) => left.CompareTo(right) < 0;
+        public static bool operator >(UsagePublicationOrder left, UsagePublicationOrder right) => left.CompareTo(right) > 0;
+        public static bool operator <=(UsagePublicationOrder left, UsagePublicationOrder right) => left.CompareTo(right) <= 0;
+        public static bool operator >=(UsagePublicationOrder left, UsagePublicationOrder right) => left.CompareTo(right) >= 0;
+    }
+
+    internal interface IUsageCacheIdentityProvider
+    {
+        string GetCurrentCacheIdentity();
+    }
+
+    internal static class UsageCacheIdentity
+    {
+        internal static bool IsCurrent(IUsageProvider? provider, ProviderFetchResult? fetch, string? resultIdentity = null)
+        {
+            if (provider is not IUsageCacheIdentityProvider identityProvider)
+                return true;
+            var identity = fetch?.CacheIdentity ?? resultIdentity;
+            try { return identity is not null && string.Equals(identity,
+                identityProvider.GetCurrentCacheIdentity(), StringComparison.Ordinal); }
+            catch { return false; } // Missing/unreadable credentials make cached identity unprovable.
+        }
+
+        internal static string? CurrentFor(IUsageProvider provider)
+        {
+            try { return (provider as IUsageCacheIdentityProvider)?.GetCurrentCacheIdentity(); }
+            catch { return null; }
+        }
+    }
+
     public enum ProviderId
     {
         Claude,
@@ -139,13 +179,40 @@ namespace TaskbarQuota.Usage
     /// <summary>Codex rate-limit reset credits granted by the Codex backend.</summary>
     public sealed class ResetCreditsSnapshot
     {
+        internal static readonly TimeSpan MaxCacheAge = TimeSpan.FromMinutes(10);
         public int AvailableCount { get; }
         public IReadOnlyList<ResetCreditGrant> Credits { get; }
+        /// <summary>Last confirmed fetch time when a partial failure requires cached data.</summary>
+        public DateTimeOffset? CachedAt { get; }
+        /// <summary>Time the reset-credit endpoint last confirmed this count, including live results.</summary>
+        public DateTimeOffset? ConfirmedAt { get; }
+        public bool IsCached => CachedAt.HasValue;
 
-        public ResetCreditsSnapshot(int availableCount, IReadOnlyList<ResetCreditGrant> credits)
+        public ResetCreditsSnapshot(int availableCount, IReadOnlyList<ResetCreditGrant> credits,
+            DateTimeOffset? cachedAt = null, DateTimeOffset? confirmedAt = null)
         {
             AvailableCount = Math.Max(0, availableCount);
             Credits = credits;
+            CachedAt = cachedAt;
+            ConfirmedAt = confirmedAt ?? cachedAt;
+        }
+
+        internal ResetCreditsSnapshot WithConfirmation(DateTimeOffset confirmedAt)
+            => new(AvailableCount, Credits, confirmedAt: confirmedAt);
+
+        internal ResetCreditsSnapshot? CurrentAt(DateTimeOffset now, bool asCached = false)
+        {
+            // A legacy live snapshot has no trustworthy credit confirmation time. It may still be
+            // parsed, but mustn't become a fallback or be restored with invented freshness.
+            if (asCached && ConfirmedAt is null)
+                return null;
+            if (ConfirmedAt is { } confirmedAt && (now < confirmedAt || now - confirmedAt >= MaxCacheAge))
+                return null;
+
+            var unexpired = Credits.Where(c => c.ExpiresAt is null || c.ExpiresAt > now).ToArray();
+            var cachedAt = asCached ? ConfirmedAt : CachedAt;
+            return unexpired.Length == Credits.Count && cachedAt == CachedAt ? this : new ResetCreditsSnapshot(
+                Math.Max(0, AvailableCount - (Credits.Count - unexpired.Length)), unexpired, cachedAt, ConfirmedAt);
         }
 
         public DateTimeOffset? EarliestExpiresAt
@@ -204,6 +271,14 @@ namespace TaskbarQuota.Usage
         public UsageHistory? UsageHistory { get; set; }
 
         public UsageSnapshot(RateWindow primary) => Primary = primary;
+
+        // Only this reference is replaced. Keep the original published observation unchanged.
+        internal UsageSnapshot CopyWithResetCredits(ResetCreditsSnapshot? resetCredits)
+        {
+            var copy = (UsageSnapshot)MemberwiseClone();
+            copy.ResetCredits = resetCredits;
+            return copy;
+        }
 
         public UsageSnapshot WithSecondary(RateWindow w) { Secondary = w; return this; }
         public UsageSnapshot WithModelSpecific(RateWindow w) { ModelSpecific = w; return this; }
@@ -375,13 +450,17 @@ namespace TaskbarQuota.Usage
         public UsageSnapshot Usage { get; }
         public string SourceLabel { get; }
         public DateTimeOffset FetchedAt { get; }
+        /// <summary>Opaque account/endpoint partition key. Never contains credentials or account text.</summary>
+        internal string? CacheIdentity { get; }
 
         /// <param name="fetchedAt">Original fetch time; only passed when restoring a persisted snapshot.</param>
-        public ProviderFetchResult(UsageSnapshot usage, string sourceLabel, DateTimeOffset? fetchedAt = null)
+        public ProviderFetchResult(UsageSnapshot usage, string sourceLabel, DateTimeOffset? fetchedAt = null,
+            string? cacheIdentity = null)
         {
             Usage = usage;
             SourceLabel = sourceLabel;
             FetchedAt = fetchedAt ?? DateTimeOffset.Now;
+            CacheIdentity = cacheIdentity;
         }
     }
 
