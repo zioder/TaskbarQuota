@@ -58,6 +58,7 @@ namespace TaskbarQuota.ActiveApp
             if (hostLabel.Equals("Claude", StringComparison.OrdinalIgnoreCase)) return ProviderId.Claude;
             if (hostLabel.Equals("Cursor", StringComparison.OrdinalIgnoreCase)) return ProviderId.Cursor;
             if (hostLabel.Equals("Grok", StringComparison.OrdinalIgnoreCase)) return ProviderId.Grok;
+            if (hostLabel.Equals("Devin", StringComparison.OrdinalIgnoreCase)) return ProviderId.Devin;
             if (hostLabel.Equals("OpenCode Go", StringComparison.OrdinalIgnoreCase)) return ProviderId.OpenCodeGo;
             if (hostLabel.Equals("OpenCode", StringComparison.OrdinalIgnoreCase)) return ProviderId.OpenCode;
             return null;

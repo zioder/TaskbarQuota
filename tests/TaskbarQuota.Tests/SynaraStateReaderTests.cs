@@ -11,6 +11,8 @@ public class SynaraStateReaderTests
     [InlineData("claudeAgent", null, ProviderId.Claude)]
     [InlineData("cursor", null, ProviderId.Cursor)]
     [InlineData("grok", null, ProviderId.Grok)]
+    [InlineData("devin", null, ProviderId.Devin)]
+    [InlineData("acpRegistry_devin", "gemini-4-neon-high", ProviderId.Devin)]
     [InlineData("antigravity", "gemini-3.8-flash", ProviderId.Antigravity)]
     [InlineData("opencode", "openai/gpt-5", ProviderId.OpenCode)]
     [InlineData("opencode", "opencode-go/kimi-k2.6", ProviderId.OpenCodeGo)]
@@ -44,6 +46,7 @@ public class SynaraStateReaderTests
     [InlineData("Cursor · GPT-5.5", ProviderId.Cursor, "GPT-5.5")]
     [InlineData("OpenCode Go · Deepseek V4 Flash", ProviderId.OpenCodeGo, "Deepseek V4 Flash")]
     [InlineData("Codex · GPT-5.5 · Medium", ProviderId.Codex, "GPT-5.5")]
+    [InlineData("Devin · 4 Neon Medium", ProviderId.Devin, "4 Neon Medium")]
     public void SynaraModelClassifier_reads_labelled_provider_names(
         string name,
         ProviderId expectedProvider,
@@ -60,6 +63,7 @@ public class SynaraStateReaderTests
     [InlineData("GPT-5.5")]
     [InlineData("Claude Sonnet 4.6")]
     [InlineData("Grok 4")]
+    [InlineData("4 Neon Medium")]
     public void SynaraModelClassifier_does_not_guess_from_bare_model_names(string name)
     {
         Assert.Null(SynaraModelClassifier.Classify(name));
@@ -100,6 +104,17 @@ public class SynaraStateReaderTests
         Assert.NotNull(selection);
         Assert.Equal(ProviderId.Codex, selection!.Provider);
         Assert.Equal("gpt-5.5", selection.Model);
+    }
+
+    [Fact]
+    public void ParseSelection_reads_t3code_devin_acp_registry_instance()
+    {
+        const string json = """{"instanceId":"acpRegistry_devin","model":"gemini-4-neon-high"}""";
+        var selection = SynaraStateReader.ParseSelection(json, null);
+
+        Assert.NotNull(selection);
+        Assert.Equal(ProviderId.Devin, selection.Provider);
+        Assert.Equal("gemini-4-neon-high", selection.Model);
     }
 
     [Fact]
