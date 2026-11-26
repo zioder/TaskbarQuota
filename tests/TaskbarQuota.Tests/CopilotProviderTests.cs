@@ -52,9 +52,12 @@ public class CopilotProviderTests
         Assert.Equal("Credits", credits.Label);
     }
 
-    [Fact]
-    public void BuildResult_StudentPlan_UsesCreditsAndCopilotStudentPlanName()
+    [Theory]
+    [InlineData("en-US", "$0.00 / $0 budget")]
+    [InlineData("ru-RU", "$0,00 / $0 budget")]
+    public void BuildResult_StudentPlan_UsesCreditsAndCopilotStudentPlanName(string culture, string expectedSpend)
     {
+        using var scope = new CultureScope(culture);
         using var doc = JsonDocument.Parse(StudentTokenBillingJson);
         var result = CopilotProvider.BuildResult(doc.RootElement);
 
@@ -64,12 +67,15 @@ public class CopilotProviderTests
         Assert.Equal(25, result.Usage.Primary.UsedPercent, 1);
         Assert.NotNull(result.Usage.AdditionalUsage);
         Assert.False(result.Usage.AdditionalUsage!.Enabled);
-        Assert.Equal("$0.00 / $0 budget", result.Usage.AdditionalUsage.SpendText);
+        Assert.Equal(expectedSpend, result.Usage.AdditionalUsage.SpendText);
     }
 
-    [Fact]
-    public void TryParseAdditionalUsage_WhenEnabled_UsesCreditPricing()
+    [Theory]
+    [InlineData("en-US", "$2.50 / $10.00 budget")]
+    [InlineData("ru-RU", "$2,50 / $10,00 budget")]
+    public void TryParseAdditionalUsage_WhenEnabled_UsesCreditPricing(string culture, string expectedSpend)
     {
+        using var scope = new CultureScope(culture);
         const string json = """
             {
               "token_based_billing": true,
@@ -89,7 +95,7 @@ public class CopilotProviderTests
         Assert.True(additional!.Enabled);
         Assert.Equal(2.50, additional.SpentUsd, 2);
         Assert.Equal(10, additional.BudgetUsd);
-        Assert.Equal("$2.50 / $10.00 budget", additional.SpendText);
+        Assert.Equal(expectedSpend, additional.SpendText);
     }
 
     [Fact]

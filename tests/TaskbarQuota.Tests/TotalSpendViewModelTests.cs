@@ -75,10 +75,16 @@ namespace TaskbarQuota.Tests
         }
 
         [Theory]
-        [InlineData(1_250, "1.3K")]
-        [InlineData(35_400_000, "35.4M")]
-        [InlineData(1_300_000_000, "1.3B")]
-        public void RingCenterUsesCompactReadableTotals(double value, string expected)
-            => Assert.Equal(expected, TotalSpendViewModel.FormatCompactValue(value));
+        [InlineData("en-US", 1_250, "1.3K")]
+        [InlineData("en-US", 35_400_000, "35.4M")]
+        [InlineData("en-US", 1_300_000_000, "1.3B")]
+        [InlineData("ru-RU", 1_250, "1,3K")]
+        [InlineData("ru-RU", 35_400_000, "35,4M")]
+        [InlineData("ru-RU", 1_300_000_000, "1,3B")]
+        public void RingCenterUsesCompactReadableTotals(string culture, double value, string expected)
+        {
+            using var scope = new CultureScope(culture);
+            Assert.Equal(expected, TotalSpendViewModel.FormatCompactValue(value));
+        }
     }
 }
