@@ -258,7 +258,7 @@ internal static class QuotaAlertEvaluator
         }
 
         if (result.Id == ProviderId.Codex
-            && usage.ResetCredits is { IsCached: false, EarliestExpiresAt: { } oldestExpiry }
+            && usage.ResetCredits?.CurrentAt(now) is { EarliestExpiresAt: { } oldestExpiry }
             && oldestExpiry > now
             && oldestExpiry - now <= ResetCreditExpiryWarningWindow)
         {

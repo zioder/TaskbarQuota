@@ -23,8 +23,12 @@ internal sealed class UsagePublicationCache
         DateTimeOffset? ObservedAt,
         DateTimeOffset? FetchedAt,
         long UsageHistorySignature,
+        ResetCreditsFingerprint? ResetCredits,
         ProviderSourceKind SourceKind,
         string? SourceName);
+
+    private readonly record struct ResetCreditsFingerprint(
+        int AvailableCount, int GrantCount, DateTimeOffset? CachedAt, DateTimeOffset? EarliestExpiry);
 
     internal bool ShouldPublish(UsageResult result, bool force)
     {
@@ -46,6 +50,7 @@ internal sealed class UsagePublicationCache
     {
         double primary = result.Fetch?.Usage.Primary.UsedPercent ?? -1;
         double? secondary = result.Fetch?.Usage.Secondary?.UsedPercent;
+        var credits = result.Fetch?.Usage.ResetCredits;
         return new(
             result.Ok,
             primary,
@@ -57,6 +62,7 @@ internal sealed class UsagePublicationCache
             result.ObservedAt,
             result.Fetch?.FetchedAt,
             HistorySignature(result.Fetch?.Usage.UsageHistory),
+            credits is null ? null : new(credits.AvailableCount, credits.Credits.Count, credits.CachedAt, credits.EarliestExpiresAt),
             result.Source.Kind,
             result.Source.Name);
     }
