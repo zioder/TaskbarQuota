@@ -24,6 +24,12 @@ namespace TaskbarQuota.Taskbar
         private List<RECT>? _lastTaskButtonRects;
         private DateTime _lastTaskButtonRectsAt = DateTime.MinValue;
         private static readonly TimeSpan TaskButtonRectsMaxAge = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan GeometryCacheTtl = TimeSpan.FromSeconds(1);
+        private volatile int _geometryGeneration;
+        private int _widgetsRectCommittedGeneration = -1;
+        private int _taskRectsCommittedGeneration = -1;
+        private int _widgetsScanId;
+        private int _taskRectsScanId;
 
         private bool widgetsButtonEnabled;
         private bool taskbarCentered;
@@ -60,6 +66,8 @@ namespace TaskbarQuota.Taskbar
                     isHidden);
                 if (reason == TaskbarChangeReason.None)
                     return;
+
+                _geometryGeneration++;
 
                 // Commit one coherent snapshot. If several shell properties changed together, the priority
                 // reason still describes the refresh while the next poll sees the complete new baseline.
@@ -107,6 +115,13 @@ namespace TaskbarQuota.Taskbar
             if (hwndTaskbar == IntPtr.Zero || !SystemInfos.IsTaskBarWidgetsEnabled())
                 return null;
 
+            if (_lastWidgetsButtonRect is { } widgetsCached
+                && DateTime.UtcNow - _lastWidgetsButtonRectAt < GeometryCacheTtl
+                && _widgetsRectCommittedGeneration == _geometryGeneration)
+                return widgetsCached;
+
+            int generation = _geometryGeneration;
+            int scanId = Interlocked.Increment(ref _widgetsScanId);
             try
             {
                 _automation ??= new CUIAutomation();
@@ -130,8 +145,9 @@ namespace TaskbarQuota.Taskbar
                 if (!IsOnTaskbarBand(rect))
                     return CachedWidgetsButtonRect();
 
-                _lastWidgetsButtonRect = rect;
-                _lastWidgetsButtonRectAt = DateTime.UtcNow;
+                if (!TryCommitWidgetsRect(scanId, generation, rect))
+                    return CachedWidgetsButtonRect() ?? _lastWidgetsButtonRect;
+
                 return rect;
             }
             catch (Exception ex)
@@ -157,13 +173,21 @@ namespace TaskbarQuota.Taskbar
         /// keeps the widget from ever landing on top of the app cluster (issue #17). Falls back to the last
         /// good set on transient UIA failure.
         /// </summary>
-        public Task<List<RECT>?> GetTaskbarButtonRectsAsync() => Task.Run(TryGetTaskbarButtonRects);
+        public Task<List<RECT>?> GetTaskbarButtonRectsAsync(bool force = false)
+            => Task.Run(() => TryGetTaskbarButtonRects(force));
 
-        private List<RECT>? TryGetTaskbarButtonRects()
+        private List<RECT>? TryGetTaskbarButtonRects(bool force)
         {
             if (hwndTaskbar == IntPtr.Zero)
                 return CachedTaskButtonRects();
 
+            if (!force && _lastTaskButtonRects is { } cached
+                && DateTime.UtcNow - _lastTaskButtonRectsAt < GeometryCacheTtl
+                && _taskRectsCommittedGeneration == _geometryGeneration)
+                return cached;
+
+            int generation = _geometryGeneration;
+            int scanId = Interlocked.Increment(ref _taskRectsScanId);
             try
             {
                 _automation ??= new CUIAutomation();
@@ -197,8 +221,9 @@ namespace TaskbarQuota.Taskbar
                     rects.Add(rect);
                 }
 
-                _lastTaskButtonRects = rects;
-                _lastTaskButtonRectsAt = DateTime.UtcNow;
+                if (!TryCommitTaskRects(scanId, generation, rects))
+                    return CachedTaskButtonRects() ?? _lastTaskButtonRects;
+
                 return rects;
             }
             catch (Exception ex)
@@ -226,6 +251,32 @@ namespace TaskbarQuota.Taskbar
             => _lastTaskButtonRects is { } rects && DateTime.UtcNow - _lastTaskButtonRectsAt < TaskButtonRectsMaxAge
                 ? rects
                 : null;
+
+        private bool TryCommitWidgetsRect(int scanId, int generation, RECT rect)
+        {
+            if (generation != _geometryGeneration)
+                return false;
+            if (scanId != Volatile.Read(ref _widgetsScanId))
+                return false;
+
+            _lastWidgetsButtonRect = rect;
+            _lastWidgetsButtonRectAt = DateTime.UtcNow;
+            _widgetsRectCommittedGeneration = generation;
+            return true;
+        }
+
+        private bool TryCommitTaskRects(int scanId, int generation, List<RECT> rects)
+        {
+            if (generation != _geometryGeneration)
+                return false;
+            if (scanId != Volatile.Read(ref _taskRectsScanId))
+                return false;
+
+            _lastTaskButtonRects = rects;
+            _lastTaskButtonRectsAt = DateTime.UtcNow;
+            _taskRectsCommittedGeneration = generation;
+            return true;
+        }
 
         private bool IsTaskbarHidden()
         {

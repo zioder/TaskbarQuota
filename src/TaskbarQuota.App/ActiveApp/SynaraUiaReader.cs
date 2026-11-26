@@ -34,12 +34,16 @@ namespace TaskbarQuota.ActiveApp
         private IUIAutomation? _automation;
         private IUIAutomationElement? _modelButton;
         private IntPtr _cachedHwnd;
+        private readonly UiaTextCache _reads = new(250, 2000);
 
         /// <summary>
         /// Current model display name from Synara's live composer (e.g. "GPT-5.5"), or null when the
         /// tree is not yet populated / the button can't be located. Never throws.
         /// </summary>
         internal string? TryReadActiveModelName(IntPtr synaraHwnd)
+            => _reads.Read(synaraHwnd, null, () => ReadActiveModelName(synaraHwnd));
+
+        private string? ReadActiveModelName(IntPtr synaraHwnd)
         {
             if (synaraHwnd == IntPtr.Zero)
                 return null;
@@ -91,6 +95,7 @@ namespace TaskbarQuota.ActiveApp
         /// <summary>Drop cached COM handles (e.g. when Synara is no longer foreground).</summary>
         internal void Reset()
         {
+            _reads.Reset();
             _modelButton = null;
             _cachedHwnd = IntPtr.Zero;
         }

@@ -176,7 +176,10 @@ namespace TaskbarQuota.ActiveApp
         private SynaraStateWatcher? _synaraStateWatcher;
         private SynaraStateReader.SynaraSelection? _synaraHost;
         private ProviderSource _activeSource = ProviderSource.Unknown;
+        // Set on every Detect(): false only when this pass ran the WMI terminal CLI scan.
+        private bool _lastDetectAvoidedHeavyTerminalScan = true;
         private readonly SynaraUiaReader _synaraUia = new();
+
         private readonly BrowserActiveTabDetector _browserTabs = new();
 
         /// <summary>Raised when Synara's localStorage changes (provider switch / thread navigation).</summary>
@@ -390,10 +393,16 @@ namespace TaskbarQuota.ActiveApp
         // serialize it — concurrent runs corrupt that state and make the active provider flip-flop.
         private readonly object _detectGate = new();
 
-        public ProviderId? Detect()
+        public ProviderId? Detect() => Detect(out _);
+
+        public ProviderId? Detect(out bool avoidedHeavyTerminalScan)
         {
             lock (_detectGate)
-                return DetectCore();
+            {
+                var result = DetectCore();
+                avoidedHeavyTerminalScan = _lastDetectAvoidedHeavyTerminalScan;
+                return result;
+            }
         }
 
         /// <summary>
@@ -468,6 +477,7 @@ namespace TaskbarQuota.ActiveApp
 
         private ProviderId? DetectCore()
         {
+            _lastDetectAvoidedHeavyTerminalScan = true;
             var hwnd = GetForegroundWindow();
             if (hwnd == IntPtr.Zero) return null;
 
@@ -505,6 +515,9 @@ namespace TaskbarQuota.ActiveApp
 
             bool terminalFocused = IsTerminalRelatedProcess(procName)
                 || IsTerminalRelatedProcess(sessionRootName);
+
+            if (terminalFocused)
+                _lastDetectAvoidedHeavyTerminalScan = false;
 
             if (ShouldReuseCliCache(hwnd, foregroundPid, sessionRootPid, terminalFocused, openCodeModelChanged, _cliCache, focusHwnd))
             {
