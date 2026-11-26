@@ -148,7 +148,7 @@ public sealed partial class FloatingUsageWindow : Window
         presenter.IsMinimizable = false;
 
         _appWindow = GetAppWindow();
-        _appWindow.IsShownInSwitchers = false;
+        try { _appWindow.IsShownInSwitchers = false; } catch { }
         _appWindow.SetPresenter(presenter);
         _appWindow.Title = "TaskbarQuota";
         InitializeAcrylicBackdrop();
