@@ -252,14 +252,14 @@ public sealed partial class QuotaWidgetContent : UserControl
         }
     }
 
-    public void SetActivitySnapshot(AgentActivitySnapshot snapshot)
+    public void SetActivitySnapshot(AgentActivitySnapshot snapshot, bool allowEmptyGrace = true)
     {
         if (!_built)
             BuildTiles();
 
         // Match TaskBarWidget: discovery can publish an empty intermediate scan. Keep the previous
         // non-empty activity visible for a short grace period so the strip does not blink out.
-        if (snapshot.Primary is null && _activitySnapshot.Primary is not null)
+        if (allowEmptyGrace && snapshot.Primary is null && _activitySnapshot.Primary is not null)
         {
             _pendingEmptyActivitySnapshot = snapshot;
             _activityEmptySnapshotTimer.Stop();

@@ -596,8 +596,8 @@ public sealed partial class FloatingUsageWindow : Window
     public void ApplyResult(UsageResult result, bool force = false)
         => ContentHost.ApplyResult(result, force);
 
-    public void SetActivitySnapshot(AgentActivitySnapshot snapshot)
-        => ContentHost.SetActivitySnapshot(snapshot);
+    public void SetActivitySnapshot(AgentActivitySnapshot snapshot, bool allowEmptyGrace = true)
+        => ContentHost.SetActivitySnapshot(snapshot, allowEmptyGrace);
 
     public void SetVisible(bool visible)
     {
