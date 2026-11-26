@@ -97,6 +97,10 @@ namespace TaskbarQuota.Controls
 
         private readonly List<RenderedRow> _renderedRows = new();
         private List<WidgetUsageRow> _rows = new();
+        private List<WidgetUsageRow>? _rowsWithoutCodexResetCredits;
+        private int? _alternateResetWidth;
+        internal bool HasCodexResetCredits => _rowsWithoutCodexResetCredits is not null;
+        internal bool HideCodexResetCredits { get; private set; }
         private bool _forcePercentagesOnly;
         private UsageResult? _lastResult;
         private ProviderId? _lastAppliedProvider;
@@ -129,10 +133,7 @@ namespace TaskbarQuota.Controls
                 _ => fullName,
             };
 
-        /// <summary>Rows this tile shows. A pinned provider always renders exactly what the user configured
-        /// (issue #25); keeping the row inside the bar is <see cref="PinBudgetService"/>'s job, not this
-        /// control's, so there is no reduced form to fall back to.</summary>
-        public int RowCount => Math.Max(1, _rows.Count);
+        public int RowCount => CurrentRows().Count;
 
         /// <summary>
         /// The width this tile WOULD take, without rendering it.
@@ -143,9 +144,21 @@ namespace TaskbarQuota.Controls
         /// rows and the display mode, are computed directly instead.
         /// </summary>
         public int MeasureDesiredWidth()
-            => CalculateDesiredWidth(
-                CurrentRows(),
+            => CalculateDesiredWidth(CurrentRows(),
                 _forcePercentagesOnly ? WidgetDisplayMode.PercentagesOnly : WidgetSettingsService.Current);
+
+        internal int MeasureDesiredWidth(bool hideCodexResetCredits)
+            => hideCodexResetCredits == HideCodexResetCredits ? DesiredLogicalWidth
+                : _alternateResetWidth ??= CalculateDesiredWidth(CurrentRows(hideCodexResetCredits),
+                    _forcePercentagesOnly ? WidgetDisplayMode.PercentagesOnly : WidgetSettingsService.Current);
+
+        internal void SetHideCodexResetCredits(bool hide)
+        {
+            if (HideCodexResetCredits == hide)
+                return;
+            HideCodexResetCredits = hide;
+            RenderRows();
+        }
 
         public HorizontalAlignment ElementsAlignment
         {
@@ -237,6 +250,9 @@ namespace TaskbarQuota.Controls
 
             var isFirstReveal = !_hasRevealed;
             var providerChanged = _lastAppliedProvider != result.Id;
+            _rowsWithoutCodexResetCredits = null;
+            if (providerChanged)
+                HideCodexResetCredits = false;
             _lastAppliedProvider = result.Id;
             UpdateActivityStatus();
             _lastRenderSignature = signature;
@@ -343,6 +359,7 @@ namespace TaskbarQuota.Controls
             }
 
             _rows = BuildRows(result, usage);
+            _rowsWithoutCodexResetCredits = WithoutCodexResetCredits(_rows);
             if (_rows.Count == 0)
             {
                 SetActiveToolVisible(false);
@@ -543,6 +560,9 @@ namespace TaskbarQuota.Controls
 
         private static List<WidgetUsageRow> BuildRows(UsageResult result, UsageSnapshot usage)
         {
+            if (result.Id == ProviderId.Antigravity)
+                return BuildAntigravityRows(usage);
+
             if (result.Id == ProviderId.Codex)
             {
                 var rows = BuildBaseRows(result, usage);
@@ -571,7 +591,7 @@ namespace TaskbarQuota.Controls
                         0,
                         resetCredits.AvailableCount.ToString("N0", CultureInfo.InvariantCulture),
                         expiresIn,
-                        HasBar: false));
+                        HasBar: false, IsCodexResetCredit: true));
                 }
 
                 if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
@@ -606,6 +626,9 @@ namespace TaskbarQuota.Controls
                 return rows;
             }
 
+            if (result.Id == ProviderId.Cursor)
+                return BuildCursorRows(result, usage);
+
             if (usage.ExtraRateWindows.Count > 0)
             {
                 if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
@@ -617,14 +640,21 @@ namespace TaskbarQuota.Controls
                 return new List<WidgetUsageRow>();
             }
 
-            if (result.Id == ProviderId.Cursor)
-                return BuildCursorRows(result, usage);
-
             return BuildBaseRows(result, usage);
         }
 
-        internal static IReadOnlyList<string> BuildRowLabelsForTesting(UsageResult result, UsageSnapshot usage)
-            => BuildRows(result, usage).Select(row => row.Label).ToList();
+        private static List<WidgetUsageRow>? WithoutCodexResetCredits(List<WidgetUsageRow> rows)
+            => rows.Exists(row => row.IsCodexResetCredit)
+                ? rows.FindAll(row => !row.IsCodexResetCredit)
+                : null;
+
+        internal static IReadOnlyList<string> BuildRowLabelsForTesting(UsageResult result, UsageSnapshot usage,
+            bool hideCodexResetCredits = false)
+        {
+            var rows = BuildRows(result, usage);
+            return ((hideCodexResetCredits ? WithoutCodexResetCredits(rows) : null) ?? rows)
+                .Select(row => row.Label).ToList();
+        }
 
         private static string? FormatResetGrantCountdown(DateTimeOffset? resetAt)
         {
@@ -697,10 +727,37 @@ namespace TaskbarQuota.Controls
         }
 
         private static int CountAntigravityRows(UsageSnapshot usage)
-            => (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowPrimary) ? 1 : 0)
-            + (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowModelSpecific) ? 1 : 0)
-            + (usage.Secondary != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowSecondary) ? 1 : 0)
-            + (usage.Monthly != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowMonthly) ? 1 : 0);
+            => BuildAntigravityRows(usage).Count;
+
+        private static List<WidgetUsageRow> BuildAntigravityRows(UsageSnapshot usage)
+        {
+            var rows = new List<WidgetUsageRow>();
+            // Icon already conveys the model family (Gemini vs Non-Gemini), so the widget row only needs the window.
+            if (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowPrimary))
+            {
+                rows.Add(WindowRow("Weekly", usage.Primary, ProviderGlyphs.Gemini));
+            }
+            if (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowModelSpecific))
+            {
+                rows.Add(WindowRow("5h", usage.ModelSpecific, ProviderGlyphs.Gemini));
+            }
+            if (usage.Secondary != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowSecondary))
+            {
+                rows.Add(WindowRow("Weekly", usage.Secondary, ProviderGlyphs.GeminiBarred));
+            }
+            if (usage.Monthly != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowMonthly))
+            {
+                rows.Add(WindowRow("5h", usage.Monthly, ProviderGlyphs.GeminiBarred));
+            }
+            if (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowExtra))
+            {
+                foreach (var extra in usage.ExtraRateWindows.Where(AntigravityProvider.IsSummaryExtraWindow))
+                {
+                    rows.Add(WindowRow(extra.Title, extra.Window, ProviderGlyphs.Gemini));
+                }
+            }
+            return rows;
+        }
 
         private static int CountCreditRows(ProviderId id, UsageSnapshot usage)
             => (WidgetSettingsService.IsRowVisible(id, WidgetSettingsService.RowCredits) ? 1 : 0)
@@ -770,6 +827,9 @@ namespace TaskbarQuota.Controls
             return rows;
         }
 
+        /// <summary>
+        /// Cursor widget rows: plan meters plus each named extra (e.g. Grok Bot) with per-row visibility.
+        /// </summary>
         private static List<WidgetUsageRow> BuildCursorRows(UsageResult result, UsageSnapshot usage)
         {
             var rows = new List<WidgetUsageRow>();
@@ -782,6 +842,13 @@ namespace TaskbarQuota.Controls
 
             if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowPrimary))
                 rows.Add(WindowRow(result.Provider?.SessionLabel ?? "Total usage", usage.Primary));
+
+            foreach (var extra in usage.ExtraRateWindows)
+            {
+                var rowId = WidgetSettingsService.RowIdForNamedExtra(result.Id, extra);
+                if (WidgetSettingsService.IsRowVisible(result.Id, rowId))
+                    rows.Add(WindowRow(extra.Title, extra.Window));
+            }
 
             return rows;
         }
@@ -997,25 +1064,7 @@ namespace TaskbarQuota.Controls
 
         private void ApplyAntigravityDisplay(UsageResult result, UsageSnapshot usage, bool providerChanged = false)
         {
-            var rows = new List<WidgetUsageRow>();
-            // Icon already conveys the model family (Gemini vs Non-Gemini), so the widget row only needs the window.
-            if (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowPrimary))
-            {
-                rows.Add(WindowRow("Weekly", usage.Primary, ProviderGlyphs.Gemini));
-            }
-            if (usage.ModelSpecific != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowModelSpecific))
-            {
-                rows.Add(WindowRow("5h", usage.ModelSpecific, ProviderGlyphs.Gemini));
-            }
-            if (usage.Secondary != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowSecondary))
-            {
-                rows.Add(WindowRow("Weekly", usage.Secondary, ProviderGlyphs.GeminiBarred));
-            }
-            if (usage.Monthly != null && WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowMonthly))
-            {
-                rows.Add(WindowRow("5h", usage.Monthly, ProviderGlyphs.GeminiBarred));
-            }
-            _rows = rows;
+            _rows = BuildAntigravityRows(usage);
             if (_rows.Count == 0)
             {
                 SetActiveToolVisible(false);
@@ -1034,6 +1083,14 @@ namespace TaskbarQuota.Controls
                 (usage.Primary.IsIncluded && usage.Primary.ResetDescription is { } r1 ? $" (resets {r1})" : "") + "\n" +
                 $"Non-Gemini: {(usage.Secondary is { } secondary ? WindowDisplayValue(secondary) : "Not included")}" +
                 (usage.Secondary is { IsIncluded: true, ResetDescription: { } r2 } ? $" (resets {r2})" : "");
+            if (WidgetSettingsService.IsRowVisible(ProviderId.Antigravity, WidgetSettingsService.RowExtra))
+            {
+                foreach (var extra in usage.ExtraRateWindows.Where(AntigravityProvider.IsSummaryExtraWindow))
+                {
+                    body += $"\n{extra.Title}: {WindowDisplayValue(extra.Window)}" +
+                        (extra.Window.IsIncluded && extra.Window.ResetDescription is { } rx ? $" (resets {rx})" : "");
+                }
+            }
             ToolTipService.SetToolTip(
                 this,
                 header + body + WidgetUsageHistoryTooltipLine(usage.UsageHistory) + StaleTooltipLine(result));
@@ -1296,6 +1353,7 @@ namespace TaskbarQuota.Controls
 
         private void RenderRows()
         {
+            _alternateResetWidth = null;
             var mode = _forcePercentagesOnly ? WidgetDisplayMode.PercentagesOnly : WidgetSettingsService.Current;
 
             ClearDynamicContent();
@@ -1391,7 +1449,11 @@ namespace TaskbarQuota.Controls
         /// <summary>The rows this tile draws — everything the user enabled, or the placeholder until the
         /// first result lands. Never copies: the measure and render paths both run on every usage publish.
         /// </summary>
-        private List<WidgetUsageRow> CurrentRows() => _rows.Count > 0 ? _rows : PlaceholderRows;
+        private List<WidgetUsageRow> CurrentRows() => CurrentRows(HideCodexResetCredits);
+
+        private List<WidgetUsageRow> CurrentRows(bool hideCodexResetCredits)
+            => hideCodexResetCredits && _rowsWithoutCodexResetCredits is { } compact ? compact
+                : _rows.Count > 0 ? _rows : PlaceholderRows;
 
         /// <summary>
         /// Total width of the tile for a given row set: the icon column, then per two-row group a label,
@@ -1977,7 +2039,8 @@ namespace TaskbarQuota.Controls
             Brush? ForegroundBrush = null,
             PaceSeverity? Pace = null,
             string? PaceTip = null,
-            double? PaceTickPercent = null);
+            double? PaceTickPercent = null,
+            bool IsCodexResetCredit = false);
 
         /// <summary>Pace verdict for a window, or nulls when it cannot be forecast. Colors the widget bar and, once
         /// the pace is no longer comfortable, marks even pace on the track; the detail text lives in the tooltip so

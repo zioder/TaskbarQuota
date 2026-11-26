@@ -135,6 +135,30 @@ public class SynaraPerformanceFixTests : IDisposable
             $"Debounce should be tight (≤2 ms) to collapse Chromium batched writes, was {debounce.TotalMilliseconds:0.##} ms");
     }
 
+    [Fact]
+    public void UsageCoordinator_synara_poll_runs_only_when_synara_foreground()
+    {
+        Assert.False(UsageCoordinator.ShouldArmSynaraPollTimer(synaraForeground: false));
+        Assert.True(UsageCoordinator.ShouldArmSynaraPollTimer(synaraForeground: true));
+    }
+
+    [Fact]
+    public void UsageCoordinator_relaxes_detect_tick_when_foreground_stable_and_light()
+    {
+        var relaxed = UsageCoordinator.ResolveDetectTickInterval(sameForeground: true, avoidedHeavyTerminalScan: true);
+        var fast = UsageCoordinator.ResolveDetectTickInterval(sameForeground: false, avoidedHeavyTerminalScan: true);
+        Assert.True(relaxed > fast);
+        Assert.InRange(relaxed.TotalMilliseconds, 900, 2500);
+        Assert.InRange(fast.TotalMilliseconds, 400, 600);
+    }
+
+    [Fact]
+    public void UsageCoordinator_keeps_fast_tick_when_terminal_stable()
+    {
+        var fast = UsageCoordinator.ResolveDetectTickInterval(sameForeground: true, avoidedHeavyTerminalScan: false);
+        Assert.InRange(fast.TotalMilliseconds, 400, 600);
+    }
+
     // Synara writes composer state through a 300 ms debounce. The filesystem watcher remains immediate;
     // the steady poll should be a light fallback, not a constantly reentering hot loop.
     [Fact]

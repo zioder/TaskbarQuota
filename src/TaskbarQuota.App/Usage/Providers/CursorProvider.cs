@@ -23,6 +23,10 @@ namespace TaskbarQuota.Usage.Providers
     {
         private const string BaseUrl = "https://cursor.com";
         private const string AppApiBaseUrl = "https://api2.cursor.sh";
+        private const string SandUsageAppPath = "/aiserver.v1.DashboardService/GetSandUsageStatus";
+        private const string SandUsageWebUrl = "https://cursor.com/api/dashboard/get-sand-usage-status";
+        internal const string GrokBotWindowId = "cursor-grok-bot";
+        private static readonly TimeSpan GrokBotUsageTimeout = TimeSpan.FromSeconds(2);
         private const string CursorAuthClientId = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
         private static readonly string[] CookieDomains = { "cursor.com", "cursor.sh" };
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
@@ -49,6 +53,14 @@ namespace TaskbarQuota.Usage.Providers
                 {
                     throw;
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (OperationCanceledException ex)
+                {
+                    Diagnostics.Log.Debug($"Cursor app-token usage timed out; falling back to web cookies: {ex.Message}");
+                }
                 catch (Exception ex)
                 {
                     Diagnostics.Log.Debug($"Cursor app-token usage failed; falling back to web cookies: {ex.Message}");
@@ -69,6 +81,7 @@ namespace TaskbarQuota.Usage.Providers
             using (me)
             {
                 var fetch = Build(summary.RootElement, me?.RootElement);
+                await TryAttachGrokBotUsageAsync(fetch.Usage, cookie, bearerToken: null, ct).ConfigureAwait(false);
                 await TryAttachDashboardHistoryAsync(fetch.Usage, new[] { cookie }, ct).ConfigureAwait(false);
                 return fetch;
             }
@@ -148,6 +161,9 @@ namespace TaskbarQuota.Usage.Providers
             }
         }
 
+        /// <summary>
+        /// Loads usage via the desktop app Connect API, then best-effort Grok Bot and profile enrichment.
+        /// </summary>
         private static async Task<ProviderFetchResult> FetchUsageWithAppTokenAsync(CursorAppAuth auth, CancellationToken ct)
         {
             var token = auth.AccessToken ?? throw new ProviderException(ProviderErrorKind.AuthRequired, "Cursor app token missing");
@@ -173,8 +189,133 @@ namespace TaskbarQuota.Usage.Providers
                 }
                 catch { }
 
+                await TryAttachGrokBotUsageAsync(
+                    fetch.Usage,
+                    DashboardSessionCookie(token),
+                    bearerToken: token,
+                    ct).ConfigureAwait(false);
                 return fetch;
             }
+        }
+
+        /// <summary>
+        /// Grok Bot (Sand) weekly allowance — separate from plan auto/api meters; best-effort so
+        /// missing entitlements never break the main Cursor fetch.
+        /// </summary>
+        private static async Task TryAttachGrokBotUsageAsync(
+            UsageSnapshot usage,
+            string? cookieHeader,
+            string? bearerToken,
+            CancellationToken ct)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deadline.CancelAfter(GrokBotUsageTimeout);
+            try
+            {
+                JsonDocument? doc = null;
+                if (bearerToken is { Length: > 0 })
+                {
+                    try { doc = await PostAppJson(SandUsageAppPath, bearerToken, "{}", deadline.Token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (OperationCanceledException ex)
+                    {
+                        Diagnostics.Log.Debug($"Cursor Grok Bot app API timed out: {ex.Message}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Diagnostics.Log.Debug($"Cursor Grok Bot app API failed: {ex.Message}");
+                    }
+                }
+
+                if (doc is null && !deadline.IsCancellationRequested && !string.IsNullOrWhiteSpace(cookieHeader))
+                {
+                    try { doc = await PostWebJson(SandUsageWebUrl, cookieHeader, "{}", deadline.Token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (OperationCanceledException ex)
+                    {
+                        Diagnostics.Log.Debug($"Cursor Grok Bot web API timed out: {ex.Message}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Diagnostics.Log.Debug($"Cursor Grok Bot web API failed: {ex.Message}");
+                    }
+                }
+
+                if (doc is null)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    return;
+                }
+
+                using (doc)
+                {
+                    if (ParseGrokBotWindow(doc.RootElement) is not { } window)
+                        return;
+                    usage.ExtraRateWindows.RemoveAll(w => w.Id == GrokBotWindowId);
+                    usage.ExtraRateWindows.Add(window);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Diagnostics.Log.Debug($"Cursor Grok Bot usage unavailable: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Parses <c>GetSandUsageStatus</c> (REST or Connect JSON). Returns null when the account has
+        /// no Grok Bot grant or the payload is unusable.
+        /// </summary>
+        internal static NamedRateWindow? ParseGrokBotWindow(JsonElement root)
+        {
+            if (GetBool(root, "usesPooledEnterpriseAllowance", "uses_pooled_enterprise_allowance") == true)
+                return null;
+            if (GetBool(root, "includedLimitZero", "included_limit_zero") == true)
+                return null;
+            if (GetBool(root, "hasNonZeroIncludedLimit", "has_non_zero_included_limit") == false)
+                return null;
+
+            if (GetNumEither(root, "usagePercent", "usage_percent") is not double used)
+                return null;
+
+            var resetAt = ParseDateEither(root, "nextResetTimestampUtc", "next_reset_timestamp_utc");
+            var resetDescription = CodexProvider.FormatResetCountdown(resetAt);
+            var window = new RateWindow(
+                DisplayPercent(used),
+                QuotaWindowLength.Weekly,
+                resetAt,
+                resetDescription,
+                label: "Grok Bot");
+            return new NamedRateWindow(GrokBotWindowId, "Grok Bot", window);
+        }
+
+        /// <summary>POST JSON to a cursor.com dashboard route using a session cookie header.</summary>
+        private static async Task<JsonDocument> PostWebJson(string url, string cookie, string jsonBody, CancellationToken ct)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = new StringContent(jsonBody, Encoding.UTF8, "application/json"),
+            };
+            req.Headers.TryAddWithoutValidation("Cookie", cookie);
+            req.Headers.TryAddWithoutValidation("Origin", BaseUrl);
+            req.Headers.TryAddWithoutValidation("Referer", BaseUrl + "/bot");
+            req.Headers.Accept.ParseAdd("application/json");
+            using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
+            if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                throw new ProviderException(ProviderErrorKind.AuthRequired, "Cursor cookies expired. Sign in again.");
+            if (!resp.IsSuccessStatusCode)
+                throw new ProviderException(ProviderErrorKind.Other, $"Cursor API returned {(int)resp.StatusCode}");
+            var s = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            return await JsonDocument.ParseAsync(s, cancellationToken: ct).ConfigureAwait(false);
         }
 
         private static string ResolveCookieHeader()
@@ -347,20 +488,39 @@ namespace TaskbarQuota.Usage.Providers
             return new ProviderFetchResult(usage, "web");
         }
 
+        /// <summary>
+        /// Cursor/Electron user-data root: <c>%APPDATA%\Cursor</c> on Windows or
+        /// <c>$XDG_CONFIG_HOME/Cursor</c> (else <c>~/.config/Cursor</c>) elsewhere.
+        /// </summary>
+        private static string CursorConfigDirectory()
+        {
+            if (OperatingSystem.IsWindows())
+                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Cursor");
+            var xdg = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME");
+            return Path.Combine(
+                !string.IsNullOrEmpty(xdg)
+                    ? xdg
+                    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config"),
+                "Cursor");
+        }
+
+        /// <summary>
+        /// Reads Cursor desktop login from <c>state.vscdb</c>, decrypting safe-storage envelopes when present.
+        /// </summary>
         private static CursorAppAuth? LoadCursorAppAuth()
         {
-            var db = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "Cursor", "User", "globalStorage", "state.vscdb");
+            var appData = CursorConfigDirectory();
+            var db = Path.Combine(appData, "User", "globalStorage", "state.vscdb");
             if (!File.Exists(db)) return null;
 
             try
             {
                 using var conn = new SqliteConnection($"Data Source={db};Mode=ReadOnly;Cache=Private");
                 conn.Open();
+                var localState = Path.Combine(appData, "Local State");
                 return new CursorAppAuth(
-                    GetItem(conn, "cursorAuth/accessToken"),
-                    GetItem(conn, "cursorAuth/refreshToken"),
+                    DecodeStoredAuthSecret(GetItem(conn, "cursorAuth/accessToken"), localState),
+                    DecodeStoredAuthSecret(GetItem(conn, "cursorAuth/refreshToken"), localState, allowOpaque: true),
                     GetItem(conn, "cursorAuth/cachedEmail"),
                     GetItem(conn, "cursorAuth/stripeMembershipType"));
             }
@@ -372,17 +532,62 @@ namespace TaskbarQuota.Usage.Providers
         }
 
         /// <summary>
+        /// Cursor 3.27+ stores tokens as <c>cursor-safe-storage:v1:</c> plus a base64
+        /// Electron safeStorage blob (AES-GCM <c>v10</c> on Windows). Older builds kept a plain JWT.
+        /// </summary>
+        /// <param name="stored">Value from <c>state.vscdb</c> or <c>auth.json</c>.</param>
+        /// <param name="localStatePath">Cursor profile <c>Local State</c> used to unwrap the blob.</param>
+        /// <param name="allowOpaque">Whether to accept a legacy unwrapped refresh token.</param>
+        /// <returns>The plaintext token, or null when the value is missing or cannot be decoded.</returns>
+        internal static string? DecodeStoredAuthSecret(string? stored, string localStatePath, bool allowOpaque = false)
+        {
+            if (string.IsNullOrWhiteSpace(stored))
+                return null;
+            stored = stored.Trim();
+            const string prefix = "cursor-safe-storage:v1:";
+            if (!stored.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return allowOpaque || LooksLikeJwt(stored) ? stored : null;
+
+            byte[] encrypted;
+            try
+            {
+                encrypted = Convert.FromBase64String(stored[prefix.Length..]);
+            }
+            catch (FormatException)
+            {
+                return null;
+            }
+
+            return CookieExtractor.TryDecryptFromLocalState(localStatePath, encrypted);
+        }
+
+        /// <summary>Fast check for a legacy plain JWT (<c>eyJ…</c> with at least two dots).</summary>
+        private static bool LooksLikeJwt(string value)
+        {
+            int dots = 0;
+            foreach (var c in value)
+                if (c == '.') dots++;
+            if (dots < 2 || value.Length < 3)
+                return false;
+            return value[0] == 'e' && (value[1] == 'y' || value[1] == 'Y');
+        }
+
+        /// <summary>
         /// The cursor-agent CLI's saved login: <c>%APPDATA%\Cursor\auth.json</c> on Windows,
         /// <c>$XDG_CONFIG_HOME/cursor/auth.json</c> elsewhere. Unused when the CLI runs from
         /// <c>CURSOR_API_KEY</c>/<c>CURSOR_AUTH_TOKEN</c> instead of a saved login.
         /// </summary>
         private static CursorAppAuth? LoadCursorCliAuth()
         {
+            var root = CursorConfigDirectory();
             var path = OperatingSystem.IsWindows()
-                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Cursor", "auth.json")
-                : Path.Combine(Environment.GetEnvironmentVariable("XDG_CONFIG_HOME") is { Length: > 0 } xdg
-                    ? xdg
-                    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config"), "cursor", "auth.json");
+                ? Path.Combine(root, "auth.json")
+                : Path.Combine(
+                    !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("XDG_CONFIG_HOME"))
+                        ? Environment.GetEnvironmentVariable("XDG_CONFIG_HOME")!
+                        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config"),
+                    "cursor",
+                    "auth.json");
             try
             {
                 if (!File.Exists(path)) return null;
@@ -390,7 +595,11 @@ namespace TaskbarQuota.Usage.Providers
                 string? Read(string name) => document.RootElement.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
                     ? value.GetString()
                     : null;
-                return Read("accessToken") is { Length: > 0 } token ? new CursorAppAuth(token, Read("refreshToken"), null, null) : null;
+                var localState = Path.Combine(root, "Local State");
+                var access = DecodeStoredAuthSecret(Read("accessToken"), localState);
+                return access is { Length: > 0 }
+                    ? new CursorAppAuth(access, DecodeStoredAuthSecret(Read("refreshToken"), localState, allowOpaque: true), null, null)
+                    : null;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
             {
@@ -429,6 +638,42 @@ namespace TaskbarQuota.Usage.Providers
                 JsonValueKind.String when double.TryParse(v.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var d) => d,
                 _ => null,
             };
+        }
+
+        /// <summary>Reads a numeric field accepting camelCase or snake_case names.</summary>
+        private static double? GetNumEither(JsonElement e, string primary, string alternate)
+            => GetNum(e, primary) ?? GetNum(e, alternate);
+
+        /// <summary>Reads a boolean field accepting camelCase or snake_case names.</summary>
+        private static bool? GetBool(JsonElement e, string primary, string alternate)
+        {
+            if (!TryGetEitherProperty(e, primary, alternate, out var v))
+                return null;
+            return v.ValueKind switch
+            {
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                _ => null,
+            };
+        }
+
+        /// <summary>Reads an ISO date string accepting camelCase or snake_case property names.</summary>
+        private static DateTimeOffset? ParseDateEither(JsonElement e, string primary, string alternate)
+        {
+            if (TryGetEitherProperty(e, primary, alternate, out var v) && v.ValueKind == JsonValueKind.String)
+                return ParseDate(v.GetString());
+            return null;
+        }
+
+        /// <summary>Resolves a JSON property by primary or alternate name.</summary>
+        private static bool TryGetEitherProperty(JsonElement e, string primary, string alternate, out JsonElement value)
+        {
+            if (e.TryGetProperty(primary, out value))
+                return true;
+            if (e.TryGetProperty(alternate, out value))
+                return true;
+            value = default;
+            return false;
         }
 
         // Cursor displays any positive fractional usage as at least 1%.

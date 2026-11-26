@@ -82,7 +82,7 @@ namespace TaskbarQuota.ViewModels
         }
 
         public BarViewModel(ProviderId providerId, NamedRateWindow w)
-            : this(providerId, WidgetSettingsService.RowExtra, w.Title, w.Window) { }
+            : this(providerId, WidgetSettingsService.RowIdForNamedExtra(providerId, w), w.Title, w.Window) { }
 
         internal void RefreshVisibility()
         {
@@ -326,6 +326,11 @@ namespace TaskbarQuota.ViewModels
                     if (u.ModelSpecific != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowModelSpecific, "Gemini 5h", u.ModelSpecific));
                     if (u.Secondary != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowSecondary, "Non-Gemini Weekly", u.Secondary));
                     if (u.Monthly != null) bars.Add(new BarViewModel(r.Id, WidgetSettingsService.RowMonthly, "Non-Gemini 5h", u.Monthly));
+                    foreach (var extra in u.ExtraRateWindows)
+                    {
+                        if (TaskbarQuota.Usage.Providers.AntigravityProvider.IsSummaryExtraWindow(extra))
+                            bars.Add(new BarViewModel(r.Id, extra));
+                    }
                     CostText = u.Cost != null ? $"{u.Cost.Label}: {u.Cost.Display}" : string.Empty;
                 }
                 else

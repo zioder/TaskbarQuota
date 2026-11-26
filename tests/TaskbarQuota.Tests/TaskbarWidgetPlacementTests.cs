@@ -7,6 +7,69 @@ public sealed class TaskbarWidgetPlacementTests
     private static readonly IReadOnlyList<(int start, int end)> Gaps =
         new[] { (0, 1000) };
 
+    [Theory]
+    [InlineData(427, true, true)]   // 300 + 8 + 120
+    [InlineData(500, true, true)]   // Activity fits, but the compact tile gives it more room.
+    [InlineData(708, true, false)]  // 300 + 8 + 400
+    [InlineData(299, false, true)]
+    [InlineData(300, false, false)]
+    public void ResetCredits_UsesTheMeasuredLaneAndRequestedActivity(int width, bool activity, bool hidden)
+    {
+        Assert.Equal(hidden, TaskbarWidgetPlacement.ShouldHideCodexResetCredits(
+            300, 210, false, 1, 50, int.MinValue, activity, TaskbarWidgetOrder.QuotaFirst, [(50, 50 + width)]));
+    }
+
+    [Fact]
+    public void ResetCredits_RestoresOnlyAfterStableHeadroomAtFractionalDpi()
+    {
+        bool hidden = false;
+        foreach (var (width, expected) in new[] { (884, true), (885, true), (894, true), (895, false), (885, false) })
+        {
+            hidden = TaskbarWidgetPlacement.ShouldHideCodexResetCredits(
+                300, 210, hidden, 1.25, 0, int.MinValue, true, TaskbarWidgetOrder.QuotaFirst, [(0, width)]);
+            Assert.Equal(expected, hidden);
+        }
+    }
+
+    [Fact]
+    public void ResetCredits_LeavesManuallyDetachedActivityInItsOwnLane()
+    {
+        Assert.False(TaskbarWidgetPlacement.ShouldHideCodexResetCredits(
+            300, 210, false, 1, 0, 610, true, TaskbarWidgetOrder.QuotaFirst, [(0, 330), (600, 800)]));
+    }
+
+    [Theory]
+    [InlineData(320, false)]
+    [InlineData(280, true)]
+    [InlineData(200, false)]
+    public void ResetCredits_UsesQuotaOnlyFitWhenNeitherRowCanFitWithActivity(int gapWidth, bool hidden)
+    {
+        Assert.Equal(hidden, TaskbarWidgetPlacement.ShouldHideCodexResetCredits(
+            300, 210, false, 1, 0, int.MinValue, true, TaskbarWidgetOrder.QuotaFirst, [(0, gapWidth)]));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(100)]
+    public void CanFitQuotaRow_KeepsTilesWhenDetachedActivityFitsInAnotherLane(int quotaX)
+    {
+        (int start, int end)[] gaps = [(0, 450), (600, 780)];
+        Assert.True(TaskbarWidgetPlacement.CanFitQuotaRow(
+            400, 450, quotaX, 610, 1, true, TaskbarWidgetOrder.QuotaFirst, gaps));
+        Assert.False(TaskbarWidgetPlacement.CanFitQuotaRow(
+            400, 450, quotaX, int.MinValue, 1, true, TaskbarWidgetOrder.QuotaFirst, gaps));
+    }
+
+    [Theory]
+    [InlineData(false, 290)]
+    [InlineData(true, 400)]
+    public void ResetCredits_PreservesPreferredLaneEvenWithAWiderLaneAcrossTheDock(bool activity, int firstEnd)
+    {
+        Assert.True(TaskbarWidgetPlacement.ShouldHideCodexResetCredits(
+            300, 210, false, 1, 0, int.MinValue, activity, TaskbarWidgetOrder.QuotaFirst,
+            [(0, firstEnd), (700, 1600)]));
+    }
+
     [Fact]
     public void PlacePair_QuotaFirst_UsesRequestedAnchor()
     {
