@@ -233,9 +233,9 @@ namespace TaskbarQuota
         public void NotifyForegroundChanged()
         {
             SignalForegroundChanged();
-            // Run detect immediately when the tick gate is free; a tick blocked in Phase 2 fetch must not
-            // defer provider selection until the next timer fire (issue: terminal switch during slow fetch).
-            _ = TickAsync();
+            // The foreground hook runs on the UI thread. TickAsync can enter the WMI/UIA
+            // detector synchronously when the tick gate is free.
+            _ = Task.Run(() => TickAsync());
             _ = Task.Run(() =>
             {
                 try

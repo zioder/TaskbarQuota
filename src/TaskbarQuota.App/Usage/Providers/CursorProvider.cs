@@ -26,6 +26,7 @@ namespace TaskbarQuota.Usage.Providers
         private const string SandUsageAppPath = "/aiserver.v1.DashboardService/GetSandUsageStatus";
         private const string SandUsageWebUrl = "https://cursor.com/api/dashboard/get-sand-usage-status";
         internal const string GrokBotWindowId = "cursor-grok-bot";
+        private static readonly TimeSpan GrokBotUsageTimeout = TimeSpan.FromSeconds(2);
         private const string CursorAuthClientId = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
         private static readonly string[] CookieDomains = { "cursor.com", "cursor.sh" };
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
@@ -207,12 +208,14 @@ namespace TaskbarQuota.Usage.Providers
             string? bearerToken,
             CancellationToken ct)
         {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deadline.CancelAfter(GrokBotUsageTimeout);
             try
             {
                 JsonDocument? doc = null;
                 if (bearerToken is { Length: > 0 })
                 {
-                    try { doc = await PostAppJson(SandUsageAppPath, bearerToken, "{}", ct).ConfigureAwait(false); }
+                    try { doc = await PostAppJson(SandUsageAppPath, bearerToken, "{}", deadline.Token).ConfigureAwait(false); }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested)
                     {
                         throw;
@@ -227,9 +230,9 @@ namespace TaskbarQuota.Usage.Providers
                     }
                 }
 
-                if (doc is null && !string.IsNullOrWhiteSpace(cookieHeader))
+                if (doc is null && !deadline.IsCancellationRequested && !string.IsNullOrWhiteSpace(cookieHeader))
                 {
-                    try { doc = await PostWebJson(SandUsageWebUrl, cookieHeader, "{}", ct).ConfigureAwait(false); }
+                    try { doc = await PostWebJson(SandUsageWebUrl, cookieHeader, "{}", deadline.Token).ConfigureAwait(false); }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested)
                     {
                         throw;
@@ -245,7 +248,10 @@ namespace TaskbarQuota.Usage.Providers
                 }
 
                 if (doc is null)
+                {
+                    ct.ThrowIfCancellationRequested();
                     return;
+                }
 
                 using (doc)
                 {
@@ -514,7 +520,7 @@ namespace TaskbarQuota.Usage.Providers
                 var localState = Path.Combine(appData, "Local State");
                 return new CursorAppAuth(
                     DecodeStoredAuthSecret(GetItem(conn, "cursorAuth/accessToken"), localState),
-                    DecodeStoredAuthSecret(GetItem(conn, "cursorAuth/refreshToken"), localState),
+                    DecodeStoredAuthSecret(GetItem(conn, "cursorAuth/refreshToken"), localState, allowOpaque: true),
                     GetItem(conn, "cursorAuth/cachedEmail"),
                     GetItem(conn, "cursorAuth/stripeMembershipType"));
             }
@@ -531,18 +537,16 @@ namespace TaskbarQuota.Usage.Providers
         /// </summary>
         /// <param name="stored">Value from <c>state.vscdb</c> or <c>auth.json</c>.</param>
         /// <param name="localStatePath">Cursor profile <c>Local State</c> used to unwrap the blob.</param>
-        /// <returns>JWT plaintext, or null when the value is missing or cannot be decoded.</returns>
-        internal static string? DecodeStoredAuthSecret(string? stored, string localStatePath)
+        /// <param name="allowOpaque">Whether to accept a legacy unwrapped refresh token.</param>
+        /// <returns>The plaintext token, or null when the value is missing or cannot be decoded.</returns>
+        internal static string? DecodeStoredAuthSecret(string? stored, string localStatePath, bool allowOpaque = false)
         {
             if (string.IsNullOrWhiteSpace(stored))
                 return null;
             stored = stored.Trim();
-            if (LooksLikeJwt(stored))
-                return stored;
-
             const string prefix = "cursor-safe-storage:v1:";
             if (!stored.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                return null;
+                return allowOpaque || LooksLikeJwt(stored) ? stored : null;
 
             byte[] encrypted;
             try
@@ -594,7 +598,7 @@ namespace TaskbarQuota.Usage.Providers
                 var localState = Path.Combine(root, "Local State");
                 var access = DecodeStoredAuthSecret(Read("accessToken"), localState);
                 return access is { Length: > 0 }
-                    ? new CursorAppAuth(access, DecodeStoredAuthSecret(Read("refreshToken"), localState), null, null)
+                    ? new CursorAppAuth(access, DecodeStoredAuthSecret(Read("refreshToken"), localState, allowOpaque: true), null, null)
                     : null;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)

@@ -39,6 +39,28 @@ public sealed class TaskbarWidgetPlacementTests
     }
 
     [Theory]
+    [InlineData(320, false)]
+    [InlineData(280, true)]
+    [InlineData(200, false)]
+    public void ResetCredits_UsesQuotaOnlyFitWhenNeitherRowCanFitWithActivity(int gapWidth, bool hidden)
+    {
+        Assert.Equal(hidden, TaskbarWidgetPlacement.ShouldHideCodexResetCredits(
+            300, 210, false, 1, 0, int.MinValue, true, TaskbarWidgetOrder.QuotaFirst, [(0, gapWidth)]));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(100)]
+    public void CanFitQuotaRow_KeepsTilesWhenDetachedActivityFitsInAnotherLane(int quotaX)
+    {
+        (int start, int end)[] gaps = [(0, 450), (600, 780)];
+        Assert.True(TaskbarWidgetPlacement.CanFitQuotaRow(
+            400, 450, quotaX, 610, 1, true, TaskbarWidgetOrder.QuotaFirst, gaps));
+        Assert.False(TaskbarWidgetPlacement.CanFitQuotaRow(
+            400, 450, quotaX, int.MinValue, 1, true, TaskbarWidgetOrder.QuotaFirst, gaps));
+    }
+
+    [Theory]
     [InlineData(false, 290)]
     [InlineData(true, 400)]
     public void ResetCredits_PreservesPreferredLaneEvenWithAWiderLaneAcrossTheDock(bool activity, int firstEnd)

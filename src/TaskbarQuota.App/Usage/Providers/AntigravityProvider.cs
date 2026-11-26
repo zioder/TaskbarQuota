@@ -215,11 +215,13 @@ namespace TaskbarQuota.Usage.Providers
                     if (b.TryGetProperty("disabled", out var disabled) && disabled.ValueKind == JsonValueKind.True)
                         continue;
                     string bucketId = b.TryGetProperty("bucketId", out var bi) ? bi.GetString() ?? "" : "";
-                    var bucketKind = IsArgon(bucketId)
-                        ? SummaryGroupKind.Extra
-                        : IsMainGeminiBucket(bucketId) ? SummaryGroupKind.Gemini
-                        : IsThirdPartyBucket(bucketId) ? SummaryGroupKind.Other
-                        : groupKind;
+                    var bucketKind = groupKind;
+                    if (IsArgon(bucketId))
+                        bucketKind = SummaryGroupKind.Extra;
+                    else if (IsMainGeminiBucket(bucketId))
+                        bucketKind = SummaryGroupKind.Gemini;
+                    else if (IsThirdPartyBucket(bucketId))
+                        bucketKind = SummaryGroupKind.Other;
                     bool fiveHour = IsFiveHourBucket(b);
                     var window = RateWindowFromQuota(b, fiveHour ? QuotaWindowLength.FiveHours : QuotaWindowLength.Weekly); // buckets carry remainingFraction + resetTime like quotaInfo
                     any = true;

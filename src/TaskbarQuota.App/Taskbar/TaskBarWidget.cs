@@ -1036,10 +1036,7 @@ namespace TaskbarQuota.Taskbar
                         layoutSlots[count++] = i;
                 }
 
-                int minimumActivityWidth = showActivity
-                    ? AgentActivitySummary.MinimumLogicalWidth + ActivitySummaryMarginLogicalPx
-                    : 0;
-                count = HoldBackTilesThatDoNotFit(layoutSlots, count, minimumActivityWidth);
+                count = HoldBackTilesThatDoNotFit(layoutSlots, count, showActivity);
                 FitCodexResetCredits(count, showActivity);
 
                 // Widths are measured, never rendered — MeasureDesiredWidth is a pure calculation.
@@ -1202,7 +1199,7 @@ namespace TaskbarQuota.Taskbar
         /// no longer needs the space.
         /// </summary>
         /// <param name="slots">Occupied slot indices; compacted in place. Returns how many survive.</param>
-        private int HoldBackTilesThatDoNotFit(int[] slots, int count, int reservedWidth)
+        private int HoldBackTilesThatDoNotFit(int[] slots, int count, bool showActivity)
         {
             if (count <= 1)
                 return count;
@@ -1213,8 +1210,13 @@ namespace TaskbarQuota.Taskbar
             // a linear scan rather than an ordered projection: at most three tiles, and this runs on every
             // usage publish, so the LINQ pipeline it replaces was allocating a dictionary, a lambda closure
             // and two lists per pass to sort three items.
-            while (count > 1 && reservedWidth + MeasureRow(slots, count, allowCompact: measuredGaps is not null) > availableLogicalWidth)
+            while (count > 1)
             {
+                int rowWidth = MeasureRow(slots, count, allowCompact: measuredGaps is not null);
+                if (TaskbarWidgetPlacement.CanFitQuotaRow(rowWidth, availableLogicalWidth, measuredQuotaAnchor,
+                    hasManualActivityPosition ? activityOffsetX : int.MinValue, dpiScale, showActivity, widgetOrder, measuredGaps))
+                    break;
+
                 int worstAt = -1;
                 int worstRecency = int.MinValue;
                 for (int n = 0; n < count; n++)

@@ -67,6 +67,15 @@ public sealed class CursorSafeStorageTests
   }
 
   [Fact]
+  public void DecodeStoredAuthSecret_PreservesLegacyOpaqueRefreshToken()
+  {
+    const string refreshToken = "legacy-opaque-refresh-token";
+    Assert.Equal(refreshToken, CursorProvider.DecodeStoredAuthSecret(refreshToken, "missing", allowOpaque: true));
+    Assert.Null(CursorProvider.DecodeStoredAuthSecret(refreshToken, "missing"));
+    Assert.Null(CursorProvider.DecodeStoredAuthSecret("cursor-safe-storage:v1:!", "missing", allowOpaque: true));
+  }
+
+  [Fact]
   public void DecodeStoredAuthSecret_ReturnsNullForOpaqueEnvelopeWithoutLocalState()
     => Assert.Null(CursorProvider.DecodeStoredAuthSecret("cursor-safe-storage:v1:YQ==", "missing"));
 

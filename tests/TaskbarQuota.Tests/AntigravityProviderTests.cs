@@ -94,6 +94,42 @@ public class AntigravityProviderTests
         Assert.Equal(QuotaWindowLength.Weekly, argon.Window.WindowMinutes);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TryParseQuotaSummary_ArgonBucketNeverReplacesGeminiInRestResponse(bool sameGroup)
+    {
+        const string gemini = """{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.8}""";
+        const string argon = """{"bucketId":"gemini-argon-wtu-weekly","window":"weekly","remainingFraction":0.3}""";
+        const string disabled = """{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.1,"disabled":true}""";
+        string groups = sameGroup
+            ? $$"""{"displayName":"Localized","buckets":[{{gemini}},{{argon}},{{disabled}}]}"""
+            : $$"""{"displayName":"Localized","buckets":[{{gemini}},{{disabled}}]},{"displayName":"Gemini 4 Argon","buckets":[{{argon}}]}""";
+
+        Assert.True(AntigravityProvider.TryParseQuotaSummary($$"""{"groups":[{{groups}}]}""", out var snapshot));
+        Assert.Equal(20, snapshot.Primary.UsedPercent, 3);
+        Assert.Null(snapshot.ModelSpecific);
+        var extra = Assert.Single(snapshot.ExtraRateWindows);
+        Assert.Equal("Argon Weekly", extra.Title);
+        Assert.Equal(70, extra.Window.UsedPercent, 3);
+    }
+
+    [Fact]
+    public void ParseUserStatus_WithOnlyArgon_LeavesGeminiUnavailable()
+    {
+        const string json = """
+            {"userStatus":{"cascadeModelConfigData":{"clientModelConfigs":[
+                {"label":"Gemini 4 Argon","quotaInfo":{"remainingFraction":0.3}}
+            ]}}}
+            """;
+
+        var snapshot = AntigravityProvider.ParseUserStatusForTesting(json);
+
+        Assert.False(snapshot.Primary.IsIncluded);
+        var argon = Assert.Single(snapshot.ExtraRateWindows, AntigravityProvider.IsSummaryExtraWindow);
+        Assert.Equal(70, argon.Window.UsedPercent, 3);
+    }
+
     [Fact]
     public void ParseUserStatus_SeparatesArgonAndOrchestratorArgonFromGeminiAndNonGemini()
     {
@@ -201,6 +237,18 @@ public class AntigravityProviderTests
     {
         Assert.Null(AntigravityProvider.ParseKeyringOAuthCreds(Encoding.UTF8.GetBytes("go-keyring-base64:invalid")));
         Assert.Null(AntigravityProvider.ParseKeyringOAuthCreds(Encoding.UTF8.GetBytes("[]")));
+    }
+
+    [Fact]
+    public void CachedGoogleAccessToken_RequiresTheCurrentCredentialAndAUsableExpiry()
+    {
+        var now = new DateTimeOffset(2026, 11, 26, 12, 0, 0, TimeSpan.Zero);
+        var credential = new AntigravityProvider.KeyringOAuthCreds("access-a", "refresh-a", null, null, now);
+        var cache = new AntigravityProvider.CachedGoogleAccessToken(credential, "refreshed-a", now.AddHours(1));
+
+        Assert.Equal("refreshed-a", cache.GetFor(credential with { }, now));
+        Assert.Null(cache.GetFor(credential with { AccessToken = "access-b", RefreshToken = "refresh-b" }, now));
+        Assert.Null(cache.GetFor(credential, now.AddMinutes(59)));
     }
 
     [Fact]

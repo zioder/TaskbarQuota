@@ -32,17 +32,34 @@ internal static class TaskbarWidgetPlacement
         int minimumActivityWidth = (int)Math.Ceiling(Controls.AgentActivitySummary.MinimumLogicalWidth * scale);
         int maximumActivityWidth = (int)Math.Ceiling(Controls.AgentActivitySummary.DesiredLogicalWidth * scale);
         int separation = (int)Math.Ceiling(TaskBarWidget.ActivitySummaryMarginLogicalPx * scale);
-        if (manualActivityX != int.MinValue && OccupyDifferentGaps(
-                quotaX, quotaWidth, manualActivityX, minimumActivityWidth, gaps))
+        if (manualActivityX != int.MinValue
+            && TaskBarWidget.PlaceInFittingGap(quotaX, gaps, quotaWidth) is { } detachedQuotaX)
         {
             var activity = PlaceAdaptive(manualActivityX, minimumActivityWidth, minimumActivityWidth,
                 maximumActivityWidth, anchorRight: false, gaps);
-            if (activity is { } detached)
-                return new(quotaX, detached.X, detached.Width, quotaWidth + detached.Width);
+            if (activity is { } detached && OccupyDifferentGaps(
+                detachedQuotaX, quotaWidth, detached.X, detached.Width, gaps))
+                return new(detachedQuotaX, detached.X, detached.Width, quotaWidth + detached.Width);
         }
 
         return PlaceAdaptivePair(quotaX, quotaWidth, minimumActivityWidth, maximumActivityWidth,
             separation, order, gaps, manualActivityX);
+    }
+
+    internal static bool CanFitQuotaRow(int rowWidth, int availableLogicalWidth,
+        int quotaX, int manualActivityX, double scale, bool showActivity, TaskbarWidgetOrder order,
+        IReadOnlyList<(int start, int end)>? gaps)
+    {
+        if (showActivity && gaps is not null)
+        {
+            int physicalWidth = (int)Math.Ceiling(rowWidth * scale);
+            return PlaceActivityBesideQuota(quotaX, physicalWidth, manualActivityX, scale, order, gaps) is not null;
+        }
+
+        int reservedWidth = showActivity
+            ? Controls.AgentActivitySummary.MinimumLogicalWidth + TaskBarWidget.ActivitySummaryMarginLogicalPx
+            : 0;
+        return rowWidth + reservedWidth <= availableLogicalWidth;
     }
 
     internal static bool ShouldHideCodexResetCredits(int fullRow, int compactRow, bool wasHidden,
@@ -58,22 +75,20 @@ internal static class TaskbarWidgetPlacement
         bool CompactKeepsCloserLane(int fullX, int compactX) =>
             Math.Abs((long)compactX - quotaX) < Math.Abs((long)fullX - quotaX)
             && OccupyDifferentGaps(fullX, fullWidth, compactX, compactWidth, gaps);
-        if (!showActivity)
+        if (showActivity)
         {
-            int? fullX = TaskBarWidget.PlaceInFittingGap(quotaX, gaps, fullWidth);
-            return fullX is null || (TaskBarWidget.PlaceInFittingGap(quotaX, gaps, compactWidth) is { } x
-                && CompactKeepsCloserLane(fullX.Value, x));
+            var full = PlaceActivityBesideQuota(quotaX, fullWidth, manualActivityX, scale, order, gaps);
+            var compact = PlaceActivityBesideQuota(quotaX, compactWidth, manualActivityX, scale, order, gaps);
+            if (compact is { } fit)
+                return full is null || fit.ActivityWidth > full.Value.ActivityWidth
+                    || CompactKeepsCloserLane(full.Value.QuotaX, fit.QuotaX);
+            if (full is not null)
+                return false;
         }
 
-        AdaptiveWidgetPairPlacement? Place(int width) => PlaceActivityBesideQuota(quotaX, width,
-            manualActivityX, scale, order, gaps);
-        var full = Place(fullWidth);
-        if (full is null)
-            return true;
-
-        var compact = Place(compactWidth);
-        return compact is { } fit && (fit.ActivityWidth > full.Value.ActivityWidth
-            || CompactKeepsCloserLane(full.Value.QuotaX, fit.QuotaX));
+        int? fullX = TaskBarWidget.PlaceInFittingGap(quotaX, gaps, fullWidth);
+        return TaskBarWidget.PlaceInFittingGap(quotaX, gaps, compactWidth) is { } compactX
+            && (fullX is null || CompactKeepsCloserLane(fullX.Value, compactX));
     }
 
     internal static WidgetPairPlacement? PlacePair(
