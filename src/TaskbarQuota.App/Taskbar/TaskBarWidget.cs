@@ -45,7 +45,8 @@ namespace TaskbarQuota.Taskbar
         // fit math stays exact and doesn't depend on a layout pass having run.
         private const int TileSeparatorLogicalPx = 7;
         // The activity summary is separated from the quota row by its own left margin.
-        private const int ActivitySummaryMarginLogicalPx = 8;
+        internal const int ActivitySummaryMarginLogicalPx = 8;
+        private const int DockClearanceLogicalPx = 16;
         // Keep enough text visible to recognize the activity while dragging, while still fitting beside a
         // wide two-column quota tile in the normal left taskbar lane.
         private const int ActivityDragLogicalWidth = 240;
@@ -138,6 +139,8 @@ namespace TaskbarQuota.Taskbar
         private bool? separatorBrushIsLight;
         private Microsoft.UI.Xaml.Controls.StackPanel? summaryPanel;
         private int availableLogicalWidth = DefaultAvailableLogicalWidth;
+        private List<(int start, int end)>? measuredGaps;
+        private int measuredQuotaAnchor;
         // Display set handed over before Initialize() built the panel, replayed once it has.
         private IReadOnlyList<ProviderId>? pendingProviders;
         private ProviderId? pendingActiveProvider;
@@ -533,7 +536,8 @@ namespace TaskbarQuota.Taskbar
             }
 
             lastWidgetsButtonClientRect = null;
-            lastTaskButtonClientRects.Clear();
+            lastTaskButtonClientRects = new();
+            measuredGaps = null;
             availableLogicalWidth = DefaultAvailableLogicalWidth;
             TaskbarSpace.ReportAvailableWidth(displayKey, TaskbarSpace.UnknownWidth, isPrimaryTaskbar);
             Log.Information(
@@ -978,17 +982,12 @@ namespace TaskbarQuota.Taskbar
         }
 
         /// <summary>Re-runs the fit math against the currently measured taskbar gap.</summary>
-        public void RefreshLayout() => RecomputeLayout();
+        public void RefreshLayout() => RecomputeLayout(forceReposition: isVisible || isActivityVisible);
 
         /// <summary>
         /// Lays the tiles out and resizes the host to the result.
         ///
-        /// Every tile renders exactly what the user configured — all of its rows, with their reset
-        /// countdowns. There is deliberately no reduced form: trimming a pinned provider is worse than
-        /// refusing the pin (issue #25), so keeping the row inside the bar is
-        /// <see cref="Services.PinBudgetService"/>'s job. The only concession made here is holding back the
-        /// unpinned active tile when it arrives beside a full pinned set and the row still overflows the
-        /// measured gap.
+        /// Ưu tiên chỗ cho Agent Activity trước khi quyết định giữ lại các ô chưa ghim.
         ///
         /// Widths are measured, never rendered: <see cref="WidgetSummary.MeasureDesiredWidth"/> is a pure
         /// calculation over the columns, whereas rendering to read a width restarted the tile's refresh
@@ -1041,6 +1040,7 @@ namespace TaskbarQuota.Taskbar
                     ? AgentActivitySummary.MinimumLogicalWidth + ActivitySummaryMarginLogicalPx
                     : 0;
                 count = HoldBackTilesThatDoNotFit(layoutSlots, count, minimumActivityWidth);
+                FitCodexResetCredits(count, showActivity);
 
                 // Widths are measured, never rendered — MeasureDesiredWidth is a pure calculation.
                 // Rendering to measure made the tile restart its refresh animation on every usage publish,
@@ -1063,7 +1063,11 @@ namespace TaskbarQuota.Taskbar
                 int activityWidth = 0;
                 if (showActivity && activitySummary is not null)
                 {
-                    if (availableLogicalWidth < AgentActivitySummary.MinimumLogicalWidth)
+                    int quotaWidth = (int)Math.Ceiling((total == 0 ? DefaultWidgetHostWidth : total) * dpiScale);
+                    if (availableLogicalWidth < AgentActivitySummary.MinimumLogicalWidth
+                        || (measuredGaps is not null && TaskbarWidgetPlacement.PlaceActivityBesideQuota(
+                            measuredQuotaAnchor, quotaWidth, hasManualActivityPosition ? activityOffsetX : int.MinValue,
+                            dpiScale, widgetOrder, measuredGaps) is null))
                         showActivity = false;
                     else
                     {
@@ -1136,6 +1140,33 @@ namespace TaskbarQuota.Taskbar
         private bool IsPinnedTile(int slot)
             => tileProviders[slot] is { } provider && WidgetSettingsService.IsProviderPinned(provider);
 
+        private void FitCodexResetCredits(int count, bool showActivity)
+        {
+            if (measuredGaps is null)
+                return;
+            for (int n = 0; n < count; n++)
+            {
+                int slot = layoutSlots[n];
+                var tile = tiles[slot];
+                if (tileProviders[slot] != ProviderId.Codex || !tile.HasCodexResetCredits)
+                    continue;
+
+                int rest = MeasureRow(layoutSlots, count) - tile.MeasureDesiredWidth();
+                int full = rest + tile.MeasureDesiredWidth(hideCodexResetCredits: false);
+                int compact = rest + tile.MeasureDesiredWidth(hideCodexResetCredits: true);
+                bool hide = TaskbarWidgetPlacement.ShouldHideCodexResetCredits(full, compact,
+                    tile.HideCodexResetCredits, dpiScale, measuredQuotaAnchor,
+                    hasManualActivityPosition ? activityOffsetX : int.MinValue,
+                    showActivity, widgetOrder, measuredGaps);
+                if (hide != tile.HideCodexResetCredits)
+                {
+                    Log.Debug($"[widget] Codex ResetCredits hidden={hide} full={full} compact={compact} budget={availableLogicalWidth} activity={showActivity}");
+                    tile.SetHideCodexResetCredits(hide);
+                }
+                break;
+            }
+        }
+
         private int LayoutHash(int count, int total)
         {
             var hash = new HashCode();
@@ -1182,7 +1213,7 @@ namespace TaskbarQuota.Taskbar
             // a linear scan rather than an ordered projection: at most three tiles, and this runs on every
             // usage publish, so the LINQ pipeline it replaces was allocating a dictionary, a lambda closure
             // and two lists per pass to sort three items.
-            while (count > 1 && reservedWidth + MeasureRow(slots, count) > availableLogicalWidth)
+            while (count > 1 && reservedWidth + MeasureRow(slots, count, allowCompact: measuredGaps is not null) > availableLogicalWidth)
             {
                 int worstAt = -1;
                 int worstRecency = int.MinValue;
@@ -1226,12 +1257,16 @@ namespace TaskbarQuota.Taskbar
             return int.MaxValue;
         }
 
-        private int MeasureRow(int[] slots, int count)
+        private int MeasureRow(int[] slots, int count, bool allowCompact = false)
         {
             int total = 0;
             for (int n = 0; n < count; n++)
             {
-                total += tiles[slots[n]].MeasureDesiredWidth()
+                var tile = tiles[slots[n]];
+                int width = tile.MeasureDesiredWidth();
+                if (allowCompact && tile.HasCodexResetCredits)
+                    width = Math.Min(width, tile.MeasureDesiredWidth(hideCodexResetCredits: true));
+                total += width
                     + TileHorizontalMarginLogicalPx
                     + (n > 0 ? TileSeparatorLogicalPx : 0);
             }
@@ -1318,11 +1353,12 @@ namespace TaskbarQuota.Taskbar
             return separatorBrush;
         }
 
-        // Records the widest free gap (logical px) as the budget for how many tiles may render. Called from
-        // the background position pass, so it only writes the field — the UI-thread entry points
-        // (SetDisplayProviders / a tile re-render / the manager's health tick) re-run the fit math.
-        private void UpdateAvailableWidth(List<(int start, int end)> gaps)
+        private void UpdateAvailableWidth(List<(int start, int end)> gaps, int quotaAnchor)
         {
+            if (measuredQuotaAnchor == quotaAnchor && measuredGaps is not null && measuredGaps.SequenceEqual(gaps))
+                return;
+            measuredGaps = gaps;
+            measuredQuotaAnchor = quotaAnchor;
             int widest = 0;
             foreach (var (start, end) in gaps)
                 widest = Math.Max(widest, end - start);
@@ -1333,6 +1369,7 @@ namespace TaskbarQuota.Taskbar
             // Published with the widget's display identity so another monitor cannot overwrite this
             // taskbar's measurement. Zero is retained as an unknown marker during transient shell rebuilds.
             TaskbarSpace.ReportAvailableWidth(displayKey, availableLogicalWidth, isPrimaryTaskbar);
+            RecomputeLayout();
         }
 
         private bool ResizeWidgetHost(int logicalWidth)
@@ -1649,73 +1686,30 @@ namespace TaskbarQuota.Taskbar
 
                 // Every taskbar button (app icons + system buttons) is an obstacle, so the widget can never rest
                 // on top of the app cluster — same set for resting and dragging (issue #17).
-                var obstacles = CollectObstacleClientRects(taskbarScreenRect, wbClient, lastTaskButtonClientRects);
+                double measuredScale = dpiScale;
+                var obstacles = CollectObstacleClientRects(taskbarScreenRect, wbClient, lastTaskButtonClientRects,
+                    isCentered, hasNotificationArea ? trayNotifyRect : null);
 
                 // Only ever rest inside a gap that FULLY fits the widget; if none does, don't move it into an
                 // overlap — keep the last valid spot (issue #17). First run with no fit hugs the tray.
                 var gaps = ComputeFreeGaps(leftBound, rightBound, obstacles);
                 // The widget is not one of its own obstacles, so the gap it sits in measures the full space
                 // it may occupy. That is the budget the tile-fit math trims against.
-                UpdateAvailableWidth(gaps);
+                await RunOnWidgetDispatcherAsync(() =>
+                {
+                    if (!disposedValue && !IsUserRepositioning && measuredScale == dpiScale)
+                        UpdateAvailableWidth(gaps, preferredX);
+                }, cancellationToken);
+                if (disposedValue || IsUserRepositioning || measuredScale != dpiScale)
+                    return;
 
                 // Solve the two native windows together. Using the activity window's previous rectangle as
                 // an obstacle made a wider quota tile chase stale bounds; the quota would jump first, then
                 // the activity solver could no longer find a lane and hid its window. Only the activity
                 // width is flexible, so the quota anchor and the user's chosen left/right order stay stable.
-                int activityGap = (int)Math.Ceiling(ActivitySummaryMarginLogicalPx * dpiScale);
-                int minimumActivityWidth = (int)Math.Ceiling(
-                    AgentActivitySummary.MinimumLogicalWidth * dpiScale);
-                int maximumActivityWidth = (int)Math.Ceiling(
-                    AgentActivitySummary.DesiredLogicalWidth * dpiScale);
-                bool activityUsesDifferentTaskbarLane = isActivityVisible
-                    && hasManualActivityPosition
-                    && activityOffsetX != int.MinValue
-                    && TaskbarWidgetPlacement.OccupyDifferentGaps(
-                        preferredX,
-                        WidgetHostWidth,
-                        activityOffsetX,
-                        ActivityHostWidth,
-                        gaps);
-
-                AdaptiveWidgetPairPlacement? pairPlacement = null;
-                if (activityUsesDifferentTaskbarLane)
-                {
-                    int? detachedQuotaX = PlaceInFittingGap(preferredX, gaps, WidgetHostWidth);
-                    AdaptiveWidgetPlacement? detachedActivity = TaskbarWidgetPlacement.PlaceAdaptive(
-                        activityOffsetX,
-                        ActivityHostWidth,
-                        minimumActivityWidth,
-                        maximumActivityWidth,
-                        anchorRight: false,
-                        gaps);
-                    if (detachedQuotaX is { } quotaX
-                        && detachedActivity is { } activity
-                        && TaskbarWidgetPlacement.OccupyDifferentGaps(
-                            quotaX,
-                            WidgetHostWidth,
-                            activity.X,
-                            activity.Width,
-                            gaps))
-                    {
-                        pairPlacement = new AdaptiveWidgetPairPlacement(
-                            quotaX,
-                            activity.X,
-                            activity.Width,
-                            WidgetHostWidth + activity.Width);
-                    }
-                }
-
-                pairPlacement ??= isActivityVisible
-                    ? TaskbarWidgetPlacement.PlaceAdaptivePair(
-                        preferredX,
-                        WidgetHostWidth,
-                        minimumActivityWidth,
-                        maximumActivityWidth,
-                        activityGap,
-                        widgetOrder,
-                        gaps,
-                        hasManualActivityPosition ? activityOffsetX : int.MinValue,
-                        ActivityHostWidth)
+                var pairPlacement = isActivityVisible
+                    ? TaskbarWidgetPlacement.PlaceActivityBesideQuota(preferredX, WidgetHostWidth,
+                        hasManualActivityPosition ? activityOffsetX : int.MinValue, dpiScale, widgetOrder, gaps)
                     : null;
 
                 int? placed = pairPlacement is { } pair
@@ -2244,7 +2238,8 @@ namespace TaskbarQuota.Taskbar
                 hasNotificationArea ? trayNotifyClientRect : null,
                 TrayClearancePx,
                 IsRtlUI);
-            var obstacles = CollectObstacleClientRects(taskbarRect, lastWidgetsButtonClientRect, lastTaskButtonClientRects);
+            var obstacles = CollectObstacleClientRects(taskbarRect, lastWidgetsButtonClientRect, lastTaskButtonClientRects,
+                pendingTaskbarCentered, hasNotificationArea ? trayNotifyClientRect : null);
             var gaps = ComputeFreeGaps(leftBound, rightBound, obstacles);
 
             int cursorClientX = cursorX - taskbarRect.left;
@@ -2624,7 +2619,8 @@ namespace TaskbarQuota.Taskbar
                 if (disposedValue || appWindow is null || !IsAlive || isDragging || isPointerTracking)
                     return;
 
-                var obstacles = CollectObstacleClientRects(taskbarScreenRect, lastWidgetsButtonClientRect, lastTaskButtonClientRects);
+                var obstacles = CollectObstacleClientRects(taskbarScreenRect, lastWidgetsButtonClientRect, lastTaskButtonClientRects,
+                    pendingTaskbarCentered, hasNotificationArea ? trayNotifyRect : null);
                 var (leftBound, rightBound) = ComputeUsableHorizontalBounds(
                     taskbarRect,
                     hasNotificationArea ? trayNotifyRect : null,
@@ -2802,7 +2798,8 @@ namespace TaskbarQuota.Taskbar
         // ReBarWindow32 container is excluded — it spans the whole item area and would leave no gaps.
         // taskButtonClientRects is the cached UIA set so both the resting and drag paths use identical
         // obstacles (issue #17).
-        private List<RECT> CollectObstacleClientRects(RECT taskbarScreenRect, RECT? widgetsPillClient, List<RECT> taskButtonClientRects)
+        private List<RECT> CollectObstacleClientRects(RECT taskbarScreenRect, RECT? widgetsPillClient,
+            List<RECT> taskButtonClientRects, bool isCentered, RECT? tray)
         {
             var result = new List<RECT>();
 
@@ -2820,8 +2817,12 @@ namespace TaskbarQuota.Taskbar
                 result.Add(ToTaskbarClientRect(bounds, taskbarScreenRect));
 
             result.AddRange(taskButtonClientRects);
+            int taskbarWidth = taskbarScreenRect.right - taskbarScreenRect.left;
+            result = FilterContainerRects(result, taskbarWidth);
+            if (isCentered)
+                ApplyDockClearance(result, dpiScale, widgetsPillClient, tray);
 
-            if (widgetsPillClient is { } pill && pill.right > pill.left)
+            if (widgetsPillClient is { } pill && pill.right > pill.left && FitsObstacleWidth(pill, taskbarWidth))
                 result.Add(pill);
 
             try
@@ -2833,14 +2834,29 @@ namespace TaskbarQuota.Taskbar
                     // user can see is empty, so the widget refuses to be dragged into it.
                     if (!User32.IsWindowVisible(wnd))
                         continue;
-                    if (User32.GetWindowRect(wnd, out var injectedBounds) && injectedBounds.right > injectedBounds.left)
+                    if (User32.GetWindowRect(wnd, out var injectedBounds) && injectedBounds.right > injectedBounds.left
+                        && FitsObstacleWidth(injectedBounds, taskbarWidth))
                         result.Add(ToTaskbarClientRect(injectedBounds, taskbarScreenRect));
                 }
             }
             catch (Exception ex) { Log.Warning(ex, "overlap scan failed"); }
 
-            result = FilterOffBandRects(result, taskbarScreenRect.bottom - taskbarScreenRect.top);
-            return FilterContainerRects(result, taskbarScreenRect.right - taskbarScreenRect.left);
+            return FilterOffBandRects(result, taskbarScreenRect.bottom - taskbarScreenRect.top);
+        }
+
+        internal static void ApplyDockClearance(List<RECT> buttons, double scale, RECT? pill, RECT? tray)
+        {
+            int clearance = (int)Math.Ceiling(DockClearanceLogicalPx * scale);
+            for (int i = 0; i < buttons.Count; i++)
+            {
+                var button = buttons[i];
+                if (button.right <= button.left
+                    || (pill is { } p && button.left < p.right && button.right > p.left)
+                    || (tray is { } t && button.left < t.right && button.right > t.left))
+                    continue;
+                button.left -= clearance;
+                buttons[i] = button;
+            }
         }
 
         /// <summary>
@@ -2888,15 +2904,17 @@ namespace TaskbarQuota.Taskbar
             if (taskbarWidth <= 0)
                 return rects;
 
-            int maxObstacleWidth = taskbarWidth / 2;
             var kept = new List<RECT>(rects.Count);
             foreach (var r in rects)
             {
-                if (r.right - r.left <= maxObstacleWidth)
+                if (FitsObstacleWidth(r, taskbarWidth))
                     kept.Add(r);
             }
             return kept;
         }
+
+        private static bool FitsObstacleWidth(RECT rect, int taskbarWidth)
+            => taskbarWidth <= 0 || rect.right - rect.left <= taskbarWidth / 2;
 
         // Merges the obstacle rects (clipped to [leftBound, rightBound]) and returns the free horizontal
         // gaps between them. Each gap is a [start, end) span the widget could occupy.
@@ -2932,7 +2950,7 @@ namespace TaskbarQuota.Taskbar
         // Picks the position closest to preferredX that fully fits a widget of the given width inside one of
         // the free gaps. Returns null when no gap is wide enough — the caller then declines to move rather
         // than force an overlap (issue #17).
-        internal static int? PlaceInFittingGap(int preferredX, List<(int start, int end)> gaps, int width)
+        internal static int? PlaceInFittingGap(int preferredX, IReadOnlyList<(int start, int end)> gaps, int width)
         {
             int? best = null;
             long bestDist = long.MaxValue;

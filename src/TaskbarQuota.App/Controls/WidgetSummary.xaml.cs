@@ -97,6 +97,10 @@ namespace TaskbarQuota.Controls
 
         private readonly List<RenderedRow> _renderedRows = new();
         private List<WidgetUsageRow> _rows = new();
+        private List<WidgetUsageRow>? _rowsWithoutCodexResetCredits;
+        private int? _alternateResetWidth;
+        internal bool HasCodexResetCredits => _rowsWithoutCodexResetCredits is not null;
+        internal bool HideCodexResetCredits { get; private set; }
         private bool _forcePercentagesOnly;
         private UsageResult? _lastResult;
         private ProviderId? _lastAppliedProvider;
@@ -129,10 +133,7 @@ namespace TaskbarQuota.Controls
                 _ => fullName,
             };
 
-        /// <summary>Rows this tile shows. A pinned provider always renders exactly what the user configured
-        /// (issue #25); keeping the row inside the bar is <see cref="PinBudgetService"/>'s job, not this
-        /// control's, so there is no reduced form to fall back to.</summary>
-        public int RowCount => Math.Max(1, _rows.Count);
+        public int RowCount => CurrentRows().Count;
 
         /// <summary>
         /// The width this tile WOULD take, without rendering it.
@@ -143,9 +144,21 @@ namespace TaskbarQuota.Controls
         /// rows and the display mode, are computed directly instead.
         /// </summary>
         public int MeasureDesiredWidth()
-            => CalculateDesiredWidth(
-                CurrentRows(),
+            => CalculateDesiredWidth(CurrentRows(),
                 _forcePercentagesOnly ? WidgetDisplayMode.PercentagesOnly : WidgetSettingsService.Current);
+
+        internal int MeasureDesiredWidth(bool hideCodexResetCredits)
+            => hideCodexResetCredits == HideCodexResetCredits ? DesiredLogicalWidth
+                : _alternateResetWidth ??= CalculateDesiredWidth(CurrentRows(hideCodexResetCredits),
+                    _forcePercentagesOnly ? WidgetDisplayMode.PercentagesOnly : WidgetSettingsService.Current);
+
+        internal void SetHideCodexResetCredits(bool hide)
+        {
+            if (HideCodexResetCredits == hide)
+                return;
+            HideCodexResetCredits = hide;
+            RenderRows();
+        }
 
         public HorizontalAlignment ElementsAlignment
         {
@@ -237,6 +250,9 @@ namespace TaskbarQuota.Controls
 
             var isFirstReveal = !_hasRevealed;
             var providerChanged = _lastAppliedProvider != result.Id;
+            _rowsWithoutCodexResetCredits = null;
+            if (providerChanged)
+                HideCodexResetCredits = false;
             _lastAppliedProvider = result.Id;
             UpdateActivityStatus();
             _lastRenderSignature = signature;
@@ -343,6 +359,7 @@ namespace TaskbarQuota.Controls
             }
 
             _rows = BuildRows(result, usage);
+            _rowsWithoutCodexResetCredits = WithoutCodexResetCredits(_rows);
             if (_rows.Count == 0)
             {
                 SetActiveToolVisible(false);
@@ -574,7 +591,7 @@ namespace TaskbarQuota.Controls
                         0,
                         resetCredits.AvailableCount.ToString("N0", CultureInfo.InvariantCulture),
                         expiresIn,
-                        HasBar: false));
+                        HasBar: false, IsCodexResetCredit: true));
                 }
 
                 if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
@@ -626,8 +643,18 @@ namespace TaskbarQuota.Controls
             return BuildBaseRows(result, usage);
         }
 
-        internal static IReadOnlyList<string> BuildRowLabelsForTesting(UsageResult result, UsageSnapshot usage)
-            => BuildRows(result, usage).Select(row => row.Label).ToList();
+        private static List<WidgetUsageRow>? WithoutCodexResetCredits(List<WidgetUsageRow> rows)
+            => rows.Exists(row => row.IsCodexResetCredit)
+                ? rows.FindAll(row => !row.IsCodexResetCredit)
+                : null;
+
+        internal static IReadOnlyList<string> BuildRowLabelsForTesting(UsageResult result, UsageSnapshot usage,
+            bool hideCodexResetCredits = false)
+        {
+            var rows = BuildRows(result, usage);
+            return ((hideCodexResetCredits ? WithoutCodexResetCredits(rows) : null) ?? rows)
+                .Select(row => row.Label).ToList();
+        }
 
         private static string? FormatResetGrantCountdown(DateTimeOffset? resetAt)
         {
@@ -1326,6 +1353,7 @@ namespace TaskbarQuota.Controls
 
         private void RenderRows()
         {
+            _alternateResetWidth = null;
             var mode = _forcePercentagesOnly ? WidgetDisplayMode.PercentagesOnly : WidgetSettingsService.Current;
 
             ClearDynamicContent();
@@ -1421,7 +1449,11 @@ namespace TaskbarQuota.Controls
         /// <summary>The rows this tile draws — everything the user enabled, or the placeholder until the
         /// first result lands. Never copies: the measure and render paths both run on every usage publish.
         /// </summary>
-        private List<WidgetUsageRow> CurrentRows() => _rows.Count > 0 ? _rows : PlaceholderRows;
+        private List<WidgetUsageRow> CurrentRows() => CurrentRows(HideCodexResetCredits);
+
+        private List<WidgetUsageRow> CurrentRows(bool hideCodexResetCredits)
+            => hideCodexResetCredits && _rowsWithoutCodexResetCredits is { } compact ? compact
+                : _rows.Count > 0 ? _rows : PlaceholderRows;
 
         /// <summary>
         /// Total width of the tile for a given row set: the icon column, then per two-row group a label,
@@ -2007,7 +2039,8 @@ namespace TaskbarQuota.Controls
             Brush? ForegroundBrush = null,
             PaceSeverity? Pace = null,
             string? PaceTip = null,
-            double? PaceTickPercent = null);
+            double? PaceTickPercent = null,
+            bool IsCodexResetCredit = false);
 
         /// <summary>Pace verdict for a window, or nulls when it cannot be forecast. Colors the widget bar and, once
         /// the pace is no longer comfortable, marks even pace on the track; the detail text lives in the tooltip so

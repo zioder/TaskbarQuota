@@ -411,6 +411,9 @@ public class CodexProviderTests
             var labels = WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch!.Usage);
 
             Assert.Equal(new[] { "Session", "Weekly", "Resets" }, labels);
+            Assert.Equal(new[] { "Session", "Weekly" },
+                WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch.Usage, hideCodexResetCredits: true));
+            Assert.Equal(labels, WidgetSummary.BuildRowLabelsForTesting(result, result.Fetch.Usage));
         }
         finally
         {
