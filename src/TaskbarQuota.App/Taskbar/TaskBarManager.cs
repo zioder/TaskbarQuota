@@ -285,7 +285,7 @@ namespace TaskbarQuota.Taskbar
             OnActiveToolPresenceChanged(UsageCoordinator.Instance.IsActiveToolPresent);
         }
 
-        private static void ApplySurfaceFromSettings()
+        private static void ApplySurfaceFromSettings(bool allowEmptyActivityGrace = true)
         {
             var desired = WidgetSettingsService.CurrentSurface;
             if (desired == WidgetSurfaceMode.Floating)
@@ -293,7 +293,7 @@ namespace TaskbarQuota.Taskbar
                 DisposeAllTaskbarWidgets();
                 EnsureFloatingWindow();
                 _activeSurface = WidgetSurfaceMode.Floating;
-                SyncFloatingState();
+                SyncFloatingState(allowEmptyActivityGrace);
             }
             else
             {
@@ -308,7 +308,7 @@ namespace TaskbarQuota.Taskbar
                 {
                     EnsureWidgets();
                 }
-                SyncWidgetState();
+                SyncWidgetState(allowEmptyActivityGrace);
                 ScheduleFloatingPrewarm();
             }
         }
@@ -364,7 +364,7 @@ namespace TaskbarQuota.Taskbar
         /// Pushes providers, activity, and visibility into the floating window.
         /// Returns false when the surface is unavailable or has nothing to show.
         /// </summary>
-        private static bool SyncFloatingSurface()
+        private static bool SyncFloatingSurface(bool allowEmptyActivityGrace = true)
         {
             if (_floatingWindow is not { IsAlive: true })
                 return false;
@@ -372,9 +372,7 @@ namespace TaskbarQuota.Taskbar
             var coordinator = UsageCoordinator.Instance;
             var providers = ProviderDisplayOrderService.Sort(coordinator.WidgetDisplayProviders
                 .Take(UsageCoordinator.MaxDisplayedWidgetTiles));
-            var activity = AgentActivityService.Instance.Snapshot;
-
-            _floatingWindow.SetActivitySnapshot(activity);
+            SyncFloatingActivity(allowEmptyActivityGrace);
             _floatingWindow.SetDisplayProviders(providers, coordinator.ActiveProvider);
 
             // Consult the content actually applied by the floating host. A transient empty scan may be
@@ -390,9 +388,16 @@ namespace TaskbarQuota.Taskbar
             return true;
         }
 
-        private static void SyncFloatingState()
+        private static void SyncFloatingActivity(bool allowEmptyActivityGrace = true)
         {
-            if (!SyncFloatingSurface())
+            var sourceActivity = AgentActivityService.Instance.Snapshot;
+            _floatingWindow?.SetActivitySnapshot(VisibleWidgetActivity(sourceActivity),
+                allowEmptyGrace: allowEmptyActivityGrace && sourceActivity.Primary is null);
+        }
+
+        private static void SyncFloatingState(bool allowEmptyActivityGrace = true)
+        {
+            if (!SyncFloatingSurface(allowEmptyActivityGrace))
                 return;
 
             var coordinator = UsageCoordinator.Instance;
@@ -568,8 +573,8 @@ namespace TaskbarQuota.Taskbar
                     // leave the HUD gone until the next process restart.
                     if (recreated || NeedsFloatingResync())
                         SyncFloatingState();
-
-                    _floatingWindow?.SetActivitySnapshot(AgentActivityService.Instance.Snapshot);
+                    else
+                        SyncFloatingActivity();
 
                     RefreshPinnedTiles();
                     Services.PinBudgetService.EnforceBudget();
@@ -955,6 +960,7 @@ namespace TaskbarQuota.Taskbar
             TaskBarWidget widget,
             AgentActivitySnapshot snapshot)
         {
+            snapshot = VisibleWidgetActivity(snapshot);
             var available = Widgets.Values
                 .Where(candidate => candidate.IsAlive)
                 .Select(candidate => candidate.DisplayKey)
@@ -972,19 +978,35 @@ namespace TaskbarQuota.Taskbar
                 provider => ResolveDisplayKey(WidgetSettingsService.GetPinnedProviderDisplay(provider)));
         }
 
+        internal static AgentActivitySnapshot VisibleWidgetActivity(AgentActivitySnapshot snapshot)
+        {
+            bool IsVisible(AgentActivityItem item)
+                => WidgetSettingsService.IsProviderVisible(item.Provider)
+                    && !ProviderDiscoveryService.IsExplicitlyDisabled(item.Provider);
+
+            // Widget visibility covers both quota tiles and activity. Keep the shared history intact
+            // so hiding a provider on this surface doesn't discard its dashboard sessions.
+            return new AgentActivitySnapshot(
+                snapshot.Items.Where(IsVisible).ToArray(),
+                snapshot.RunItems?.Where(IsVisible).ToArray());
+        }
+
         private static void SyncWidgetState()
+            => SyncWidgetState(allowEmptyActivityGrace: true);
+
+        private static void SyncWidgetState(bool allowEmptyActivityGrace)
         {
             if (IsFloatingSurface)
             {
-                SyncFloatingState();
+                SyncFloatingState(allowEmptyActivityGrace);
                 return;
             }
 
             foreach (var widget in Widgets.Values.ToArray())
-                SyncWidgetState(widget);
+                SyncWidgetState(widget, allowEmptyActivityGrace);
         }
 
-        private static void SyncWidgetState(TaskBarWidget widget)
+        private static void SyncWidgetState(TaskBarWidget widget, bool allowEmptyActivityGrace = true)
         {
             if (!widget.IsAlive)
                 return;
@@ -996,7 +1018,8 @@ namespace TaskbarQuota.Taskbar
 
             // A non-empty source filtered to empty by the selected-screen policy is intentional and must
             // hide immediately. Reserve the empty grace period for genuinely empty scanner snapshots.
-            widget.SetActivitySnapshot(activity, allowEmptyGrace: sourceActivity.Primary is null);
+            widget.SetActivitySnapshot(activity,
+                allowEmptyGrace: allowEmptyActivityGrace && sourceActivity.Primary is null);
             // Keep outgoing tiles bound until the host fade completes. Clearing them first makes the
             // animation run over an empty window and turns a cross-screen handoff into a visible blink.
             if (providers.Count == 0)
@@ -1367,10 +1390,11 @@ namespace TaskbarQuota.Taskbar
                 if (_clickThroughMenuItem is not null)
                     _clickThroughMenuItem.Checked = WidgetSettingsService.FloatingClickThrough;
                 ConfigureActivityTimer();
+                // A policy change must clear activity held by a pending empty-scan grace period.
                 if (WidgetSettingsService.CurrentSurface != _activeSurface)
-                    ApplySurfaceFromSettings();
+                    ApplySurfaceFromSettings(allowEmptyActivityGrace: false);
                 else
-                    SyncWidgetState();
+                    SyncWidgetState(allowEmptyActivityGrace: false);
             });
         }
 
