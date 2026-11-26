@@ -55,8 +55,8 @@ namespace TaskbarQuota.ViewModels
             Percent = included ? displayPercent : 0;
             PercentText = included ? WidgetSettingsService.FormatDisplayPercent(w.UsedPercent) : "Not included";
             BarVisibility = included ? Visibility.Visible : Visibility.Collapsed;
-            ResetText = included && w.ResetDescription is { } r ? $"resets in {r}" : string.Empty;
-            ResetVisibility = included && w.ResetDescription is not null ? Visibility.Visible : Visibility.Collapsed;
+            ResetText = QuotaResetDisplay.WindowCaption(providerId, w);
+            ResetVisibility = ResetText.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
             BarBrush = Ui.UsageBrush(displayPercent);
 
             var now = DateTimeOffset.UtcNow;
@@ -153,16 +153,7 @@ namespace TaskbarQuota.ViewModels
         public ResetCreditViewModel(int index, ResetCreditGrant credit)
         {
             TokenTitle = $"Reset {index}";
-            ExpiresText = FormatNullableLocalDateTime(credit.ExpiresAt);
-        }
-
-        private static string FormatNullableLocalDateTime(DateTimeOffset? timestamp)
-            => timestamp is { } value ? FormatLocalDateTime(value) : "Unknown";
-
-        private static string FormatLocalDateTime(DateTimeOffset timestamp)
-        {
-            var local = timestamp.ToLocalTime();
-            return $"{local:MMM d, yyyy h:mm tt}";
+            ExpiresText = credit.ExpiresAt is { } date ? QuotaResetDisplay.FormatLocalDateTime(date) : "Unknown";
         }
     }
 

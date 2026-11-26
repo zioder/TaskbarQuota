@@ -4,7 +4,9 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
+using TaskbarQuota.Controls;
 using TaskbarQuota.Diagnostics;
 using TaskbarQuota.Helpers;
 using TaskbarQuota.Services;
@@ -139,7 +141,6 @@ namespace TaskbarQuota.Views
                 {
                     Margin = new Thickness(0, 0, 0, 4),
                 };
-
                 var header = new StackPanel { Spacing = 2 };
                 header.Children.Add(new TextBlock
                 {
@@ -153,7 +154,7 @@ namespace TaskbarQuota.Views
                     Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"],
                 };
                 header.Children.Add(statusText);
-                card.Header = header;
+                card.Header = CreateProviderLabel(item, header);
 
                 var toggles = new ProviderToggleRow { Status = statusText };
                 _providerRows[item.Id] = toggles;
@@ -168,6 +169,34 @@ namespace TaskbarQuota.Views
             }
         }
 
+        private static FrameworkElement CreateProviderLabel(ProviderSettingItemViewModel item, FrameworkElement? text = null)
+        {
+            var avatar = new ProviderAvatar
+            {
+                ProviderId = item.Id,
+                Initial = string.IsNullOrEmpty(item.DisplayName) ? "?" : item.DisplayName[..1],
+                Width = 20,
+                Height = 20,
+                IsHitTestVisible = false,
+            };
+            avatar.SetBinding(ProviderAvatar.ForegroundBrushProperty, new Binding
+            {
+                Source = avatar,
+                Path = new PropertyPath(nameof(Control.Foreground)),
+            });
+            return new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 12,
+                VerticalAlignment = VerticalAlignment.Center,
+                Children =
+                {
+                    avatar,
+                    text ?? new TextBlock { Text = item.DisplayName, VerticalAlignment = VerticalAlignment.Center },
+                },
+            };
+        }
+
         private void RebuildMutedProviderSettings()
         {
             MutedProvidersPanel.Children.Clear();
@@ -177,7 +206,7 @@ namespace TaskbarQuota.Views
             {
                 var checkBox = new CheckBox
                 {
-                    Content = item.DisplayName,
+                    Content = CreateProviderLabel(item),
                     IsChecked = settings.IsProviderMuted(item.Id),
                     Tag = item,
                 };
@@ -420,7 +449,7 @@ namespace TaskbarQuota.Views
 
             return new CommunityToolkit.WinUI.Controls.SettingsCard
             {
-                Header = item.DisplayName,
+                Header = CreateProviderLabel(item),
                 Content = swatchButton,
             };
         }
