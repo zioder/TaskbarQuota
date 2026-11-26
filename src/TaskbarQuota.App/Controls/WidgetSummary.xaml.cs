@@ -676,7 +676,7 @@ namespace TaskbarQuota.Controls
         private static WidgetUsageRow WindowRow(string label, RateWindow window, string? glyphData = null)
         {
             bool included = window.IsIncluded;
-            var (pace, paceTip, paceTick) = PaceFor(window);
+            var (pace, paceTip, paceTick) = PaceFor(window, DateTimeOffset.UtcNow);
             return new WidgetUsageRow(
                 CompactLabel(label),
                 included ? WidgetSettingsService.DisplayPercent(window.UsedPercent) : 0,
@@ -799,7 +799,7 @@ namespace TaskbarQuota.Controls
                     string primaryValue = usage.Primary.ShowCostValue && usage.Cost is { } spend
                         ? FormatSpendValue(spend)
                         : WidgetSettingsService.FormatDisplayPercent(usage.Primary.UsedPercent);
-                    var (primaryPace, primaryPaceTip, primaryPaceTick) = PaceFor(usage.Primary);
+                    var (primaryPace, primaryPaceTip, primaryPaceTick) = PaceFor(usage.Primary, DateTimeOffset.UtcNow);
                     rows.Add(new WidgetUsageRow(
                         CompactLabel(primaryLabel),
                         WidgetSettingsService.DisplayPercent(usage.Primary.UsedPercent),
@@ -1786,7 +1786,8 @@ namespace TaskbarQuota.Controls
                 ? percent <= 25
                 : percent >= 75;
             border.Background = UsageBarBrush(percent, pace);
-            border.Opacity = emphasized || pace is PaceSeverity.RunningOut or PaceSeverity.Spent ? 0.95 : 0.78;
+            border.Opacity = emphasized || (WidgetSettingsService.CurrentUsageBarColorMode == UsageBarColorMode.UsageForecast
+                && pace is PaceSeverity.RunningOut or PaceSeverity.Spent) ? 0.95 : 0.78;
         }
 
         private Brush UsageBarBrush(double displayPercent, PaceSeverity? pace = null)
@@ -1794,25 +1795,10 @@ namespace TaskbarQuota.Controls
             bool light = UseApplicationChromeColors
                 ? ThemeService.IsLightChrome(this)
                 : Interop.SystemInfos.IsSystemLightThemeUsed() == true;
-            // Pace verdict wins over the raw level: blue on course, amber near the limit, red when it
-            // will run out before reset. Windows that cannot be forecast fall through to level colors.
-            if (pace is { } verdict)
-            {
-                return verdict switch
-                {
-                    PaceSeverity.Close => new SolidColorBrush(light ? Color.FromArgb(255, 157, 93, 0) : Color.FromArgb(255, 255, 185, 0)),
-                    PaceSeverity.RunningOut or PaceSeverity.Spent => new SolidColorBrush(light ? Color.FromArgb(255, 196, 43, 28) : Color.FromArgb(255, 255, 99, 71)),
-                    _ => new SolidColorBrush(light ? Color.FromArgb(255, 0, 103, 192) : Color.FromArgb(255, 96, 205, 255)),
-                };
-            }
-            // Thresholds match WidgetSettingsService usage colors (critical / caution / normal).
-            displayPercent = Math.Clamp(displayPercent, 0, 100);
-            bool remaining = WidgetSettingsService.CurrentPercentageMode == PercentageDisplayMode.Remaining;
-            bool critical = remaining ? displayPercent <= 10 : displayPercent >= 90;
-            bool caution = remaining ? displayPercent <= 25 : displayPercent >= 75;
-            if (critical)
+            string key = WidgetSettingsService.GetUsageBarBrushResourceKey(displayPercent, pace);
+            if (key == "SystemFillColorCriticalBrush")
                 return new SolidColorBrush(light ? Color.FromArgb(255, 196, 43, 28) : Color.FromArgb(255, 255, 99, 71));
-            if (caution)
+            if (key == "SystemFillColorCautionBrush")
                 return new SolidColorBrush(light ? Color.FromArgb(255, 157, 93, 0) : Color.FromArgb(255, 255, 185, 0));
             return new SolidColorBrush(light ? Color.FromArgb(255, 0, 103, 192) : Color.FromArgb(255, 96, 205, 255));
         }
@@ -2039,18 +2025,17 @@ namespace TaskbarQuota.Controls
             double? PaceTickPercent = null,
             bool IsCodexResetCredit = false);
 
-        /// <summary>Pace verdict for a window, or nulls when it cannot be forecast. Colors the widget bar and, once
-        /// the pace is no longer comfortable, marks even pace on the track; the detail text lives in the tooltip so
-        /// the tile never grows.</summary>
-        private static (PaceSeverity? Severity, string? Tip, double? Tick) PaceFor(RateWindow window)
+        /// <summary>Pace verdict for a window. Forecast mode marks even pace on the track whenever it can be
+        /// calculated; the detail text lives in the tooltip so the tile never grows.</summary>
+        internal static (PaceSeverity? Severity, string? Tip, double? Tick) PaceFor(RateWindow window, DateTimeOffset now)
         {
             if (!window.IsIncluded)
                 return (null, null, null);
-            var now = DateTimeOffset.UtcNow;
             var pace = QuotaPacing.Evaluate(window, now, isSessionWindow: window.WindowMinutes is <= 360);
             if (pace.Severity == PaceSeverity.Untracked)
                 return (null, null, null);
-            double? tick = pace.Severity is PaceSeverity.Close or PaceSeverity.RunningOut && pace.IdealPacePercent is { } ideal
+            double? tick = WidgetSettingsService.CurrentUsageBarColorMode == UsageBarColorMode.UsageForecast
+                && pace.IdealPacePercent is { } ideal
                 ? WidgetSettingsService.DisplayPercent(ideal)
                 : null;
             return (pace.Severity, QuotaPacing.Tooltip(pace, now), tick);
