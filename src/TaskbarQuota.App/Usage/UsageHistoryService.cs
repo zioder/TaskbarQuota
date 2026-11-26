@@ -35,6 +35,8 @@ namespace TaskbarQuota.Usage
         private static readonly Dictionary<ProviderId, object> ProviderLocks =
             Enum.GetValues<ProviderId>().ToDictionary(id => id, _ => new object());
 
+        internal static Func<ProviderId, IEnumerable<string>>? DiscoverFilesOverrideForTesting { get; set; }
+
         private readonly record struct UsageEvent(
             DateTimeOffset Timestamp,
             string Model,
@@ -51,7 +53,7 @@ namespace TaskbarQuota.Usage
 
         private static bool TryLoadCore(ProviderId providerId, out UsageHistory history)
         {
-            var files = DiscoverFiles(providerId).ToArray();
+            var files = (DiscoverFilesOverrideForTesting?.Invoke(providerId) ?? DiscoverFiles(providerId)).ToArray();
             if (files.Length == 0)
             {
                 PruneFileEvents(providerId, files);
