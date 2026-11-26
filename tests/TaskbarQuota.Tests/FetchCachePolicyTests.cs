@@ -1,7 +1,9 @@
+using TaskbarQuota.Controls;
 using TaskbarQuota.Usage;
 
 namespace TaskbarQuota.Tests;
 
+[Collection(WidgetRowSettingsCollection.Name)]
 public class FetchCachePolicyTests
 {
     [Fact]
@@ -57,6 +59,104 @@ public class FetchCachePolicyTests
         Assert.Equal(73, second.Fetch.Usage.Secondary!.UsedPercent);
         Assert.NotEqual(0, second.Fetch.Usage.Primary.UsedPercent);
         Assert.NotEqual(0, second.Fetch.Usage.Secondary.UsedPercent);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(ProviderErrorKind.Other)]
+    [InlineData(ProviderErrorKind.RateLimited)]
+    public async Task FetchAsync_CodexNetworkFailureKeepsLastKnownQuotaUntilReset(ProviderErrorKind? errorKind)
+    {
+        var service = new UsageService();
+        var provider = new FlakyProvider
+        {
+            Id = ProviderId.Codex,
+            NextResetAt = DateTimeOffset.Now.AddHours(2),
+        };
+        service.Register(provider);
+
+        var live = await service.FetchAsync(provider.Id, force: true);
+        provider.NextException = errorKind is { } kind
+            ? new ProviderException(kind, "Synthetic API failure")
+            : new HttpRequestException("Synthetic network failure");
+
+        var fallback = await service.FetchAsync(provider.Id, force: true);
+
+        Assert.Same(live.Fetch, fallback.Fetch);
+        Assert.True(fallback.IsStale);
+        Assert.Equal(UsageObservationOrigin.FailureFallback, fallback.ObservationOrigin);
+        Assert.Equal(live.LastConfirmedAt, fallback.LastConfirmedAt);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(ProviderErrorKind.Other)]
+    [InlineData(ProviderErrorKind.RateLimited)]
+    public async Task FetchAsync_CodexNetworkFailureDoesNotKeepAQuotaPastReset(ProviderErrorKind? errorKind)
+    {
+        var service = new UsageService();
+        var provider = new FlakyProvider
+        {
+            Id = ProviderId.Codex,
+            NextResetAt = DateTimeOffset.Now.AddMinutes(-1),
+        };
+        service.Register(provider);
+        Assert.True((await service.FetchAsync(provider.Id, force: true)).Ok);
+        Assert.True(service.TryGetCached(provider.Id, out _));
+        Assert.False(service.TryGetLastSuccessfulLiveResult(provider.Id, out _));
+        provider.NextException = errorKind is { } kind
+            ? new ProviderException(kind, "Synthetic API failure")
+            : new HttpRequestException("Synthetic network failure");
+
+        Assert.False((await service.FetchAsync(provider.Id, force: true)).Ok);
+    }
+
+    [Fact]
+    public void CodexFallbackExpiresAfterTheLastConfirmationAgesOut()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var confirmedAt = now - UsageSnapshotStore.MaxRestoreAge;
+        var provider = new FlakyProvider { Id = ProviderId.Codex };
+        var result = UsageResult.Success(provider.Id, provider,
+            new ProviderFetchResult(new UsageSnapshot(new RateWindow(42)), "test"), confirmedAt)
+            .AsFailureFallback(1, now, isStale: true);
+
+        Assert.True(UsageService.CanReuseQuota(result, now));
+        Assert.False(UsageService.CanReuseQuota(result, now.AddMinutes(1)));
+    }
+
+    [Fact]
+    public async Task FetchAsync_CodexLocalHistoryDoesNotRenderAnInventedQuota()
+    {
+        var path = Path.Combine(TestEnvironment.AppDataDirectory, $"quota-history-{Guid.NewGuid():N}.jsonl");
+        await File.WriteAllTextAsync(path, "{\"timestamp\":\"" + DateTimeOffset.UtcNow.ToString("O") + """
+            ","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"total_tokens":100}}}}
+            """);
+        var previousDiscovery = UsageHistoryService.DiscoverFilesOverrideForTesting;
+        try
+        {
+            UsageHistoryService.DiscoverFilesOverrideForTesting = id => id == ProviderId.Codex ? [path] : [];
+            var service = new UsageService();
+            var provider = new FlakyProvider
+            {
+                Id = ProviderId.Codex,
+                NextException = new HttpRequestException("Synthetic network failure"),
+            };
+            service.Register(provider);
+
+            var fallback = await service.FetchAsync(provider.Id, force: true);
+
+            Assert.Equal(UsageObservationOrigin.FailureFallback, fallback.ObservationOrigin);
+            Assert.NotNull(fallback.Fetch);
+            Assert.NotNull(fallback.Fetch.Usage.UsageHistory);
+            Assert.False(fallback.Fetch.Usage.HasPrimaryWindow);
+            Assert.Empty(WidgetSummary.BuildRowLabelsForTesting(fallback, fallback.Fetch.Usage));
+        }
+        finally
+        {
+            UsageHistoryService.DiscoverFilesOverrideForTesting = previousDiscovery;
+            File.Delete(path);
+        }
     }
 
     [Fact]
@@ -177,13 +277,13 @@ public class FetchCachePolicyTests
 
     private sealed class FlakyProvider : IUsageProvider
     {
-        public ProviderException? NextException { get; set; }
+        public Exception? NextException { get; set; }
         public double? NextPrimaryPercent { get; set; }
         public double? NextSecondaryPercent { get; set; }
         public DateTimeOffset? NextResetAt { get; set; }
         public int FetchCount { get; private set; }
 
-        public ProviderId Id => ProviderId.Claude;
+        public ProviderId Id { get; init; } = ProviderId.Claude;
         public string DisplayName => "Claude Code";
         public string SessionLabel => "Session";
         public string WeeklyLabel => "Weekly";

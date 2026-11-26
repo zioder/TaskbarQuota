@@ -131,7 +131,7 @@ internal sealed class QuotaReplenishmentTracker
             return Array.Empty<QuotaReplenishmentEvent>();
         }
 
-        var identity = NormalizeIdentity(usage.Email);
+        var identity = result.Fetch.CacheIdentity ?? NormalizeIdentity(usage.Email);
         var hadKnownIdentity = _providerIdentities.TryGetValue(result.Id, out var previousIdentity);
         if (hasPreviousLiveObservation && !hadKnownIdentity && identity is not null)
         {

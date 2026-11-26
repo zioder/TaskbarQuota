@@ -1043,7 +1043,9 @@ namespace TaskbarQuota.Taskbar
             // A failed refresh is cached deliberately. Prefer that current failure over LastState,
             // which may still contain the previous successful snapshot and would resurrect stale quota
             // values when the widget is recreated (especially after cookie/auth failures).
-            if (coordinator.LastState is { } last && last.Id == provider)
+            if (coordinator.LastState is { } last && last.Id == provider
+                && UsageService.CanReuseQuota(last, DateTimeOffset.Now)
+                && (provider != ProviderId.Codex || UsageCacheIdentity.IsCurrent(last.Provider, last.Fetch, last.CacheIdentity)))
                 return last;
             if (coordinator.Service.TryGetLastSuccessfulLiveResult(provider, out var lastSuccess))
                 return lastSuccess;
