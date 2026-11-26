@@ -847,6 +847,9 @@ namespace TaskbarQuota.ActiveApp
                     return ProviderId.Cursor;
                 case "grok":
                     return ProviderId.Grok;
+                case "devin":
+                case "acpregistry_devin":
+                    return ProviderId.Devin;
                 case "antigravity":
                     // T3 Code's Antigravity driver (ACP over the Antigravity IDE/CLI); Gemini models.
                     return ProviderId.Antigravity;
