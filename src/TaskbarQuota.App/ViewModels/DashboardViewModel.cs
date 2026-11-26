@@ -570,7 +570,7 @@ namespace TaskbarQuota.ViewModels
 
             if (usage.ResetCredits is { } resetCredits)
             {
-                sb.Append('|').Append(resetCredits.AvailableCount);
+                sb.Append('|').Append(resetCredits.AvailableCount).Append('|').Append(resetCredits.CachedAt);
                 foreach (var credit in resetCredits.Credits)
                 {
                     sb.Append('|').Append(credit.Status)

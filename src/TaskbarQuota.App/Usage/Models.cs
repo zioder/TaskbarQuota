@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace TaskbarQuota.Usage
 {
@@ -139,13 +140,30 @@ namespace TaskbarQuota.Usage
     /// <summary>Codex rate-limit reset credits granted by the Codex backend.</summary>
     public sealed class ResetCreditsSnapshot
     {
+        internal static readonly TimeSpan MaxCacheAge = TimeSpan.FromMinutes(10);
         public int AvailableCount { get; }
         public IReadOnlyList<ResetCreditGrant> Credits { get; }
+        /// <summary>Last confirmed fetch time when a partial failure requires cached data.</summary>
+        public DateTimeOffset? CachedAt { get; }
+        public bool IsCached => CachedAt.HasValue;
 
-        public ResetCreditsSnapshot(int availableCount, IReadOnlyList<ResetCreditGrant> credits)
+        public ResetCreditsSnapshot(int availableCount, IReadOnlyList<ResetCreditGrant> credits, DateTimeOffset? cachedAt = null)
         {
             AvailableCount = Math.Max(0, availableCount);
             Credits = credits;
+            CachedAt = cachedAt;
+        }
+
+        internal ResetCreditsSnapshot? CurrentAt(DateTimeOffset now)
+        {
+            if (CachedAt is not { } cachedAt)
+                return this;
+            if (now < cachedAt || now - cachedAt >= MaxCacheAge)
+                return null;
+
+            var unexpired = Credits.Where(c => c.ExpiresAt is null || c.ExpiresAt > now).ToArray();
+            return unexpired.Length == Credits.Count ? this : new ResetCreditsSnapshot(
+                Math.Max(0, AvailableCount - (Credits.Count - unexpired.Length)), unexpired, cachedAt);
         }
 
         public DateTimeOffset? EarliestExpiresAt
@@ -204,6 +222,14 @@ namespace TaskbarQuota.Usage
         public UsageHistory? UsageHistory { get; set; }
 
         public UsageSnapshot(RateWindow primary) => Primary = primary;
+
+        // Only this reference is replaced. Keep the original published observation unchanged.
+        internal UsageSnapshot CopyWithResetCredits(ResetCreditsSnapshot? resetCredits)
+        {
+            var copy = (UsageSnapshot)MemberwiseClone();
+            copy.ResetCredits = resetCredits;
+            return copy;
+        }
 
         public UsageSnapshot WithSecondary(RateWindow w) { Secondary = w; return this; }
         public UsageSnapshot WithModelSpecific(RateWindow w) { ModelSpecific = w; return this; }
