@@ -342,8 +342,8 @@ namespace TaskbarQuota.Usage.Providers
 
             if (!Regex.IsMatch(text, "(?:\\\"customerID\\\"|customerID)\\s*:\\s*(?:\\$R\\[\\d+\\]\\s*=\\s*)?\\\"[^\\\"]+\\\""))
                 return null;
-            var match = Regex.Match(text, "(?:\\\"balance\\\"|balance)\\s*:\\s*(?:\\$R\\[\\d+\\]\\s*=\\s*)?(-?[0-9]+(?:\\.[0-9]+)?)");
-            return match.Success && double.TryParse(match.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out raw)
+            var match = Regex.Match(text, "(?:\\\"balance\\\"|balance)\\s*:\\s*(?:\\$R\\[\\d+\\]\\s*=\\s*)?(-?[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)");
+            return match.Success && double.TryParse(match.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out raw) && double.IsFinite(raw)
                 ? raw / 100_000_000d
                 : null;
         }
@@ -370,9 +370,9 @@ namespace TaskbarQuota.Usage.Providers
 
         private static bool TryJsonDouble(JsonElement value, out double result)
         {
-            if (value.ValueKind == JsonValueKind.Number) return value.TryGetDouble(out result);
+            if (value.ValueKind == JsonValueKind.Number) return value.TryGetDouble(out result) && double.IsFinite(result);
             if (value.ValueKind == JsonValueKind.String)
-                return double.TryParse(value.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out result);
+                return double.TryParse(value.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out result) && double.IsFinite(result);
             result = 0;
             return false;
         }
@@ -456,13 +456,13 @@ namespace TaskbarQuota.Usage.Providers
             foreach (var key in keys)
             {
                 var keyPattern = Regex.Escape(key).Replace("_", "[_-]?");
-                var jsonMatch = Regex.Match(text, $@"(?i)""?{keyPattern}""?\s*[:=]\s*""?(-?[0-9][0-9,]*(?:\.[0-9]+)?)""?");
-                if (jsonMatch.Success && double.TryParse(jsonMatch.Groups[1].Value.Replace(",", ""), out var raw))
+                var jsonMatch = Regex.Match(text, $@"(?i)""?{keyPattern}""?\s*[:=]\s*""?(-?[0-9][0-9,]*(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)""?");
+                if (jsonMatch.Success && double.TryParse(jsonMatch.Groups[1].Value.Replace(",", ""), NumberStyles.Float, CultureInfo.InvariantCulture, out var raw) && double.IsFinite(raw))
                     return NormalizeMoney(raw);
 
                 var label = key.Replace("_", " ");
-                var dollarMatch = Regex.Match(text, $@"(?i){Regex.Escape(label)}[\s\S]{{0,120}}?\$\s*(-?[0-9][0-9,]*(?:\.[0-9]+)?)");
-                if (dollarMatch.Success && double.TryParse(dollarMatch.Groups[1].Value.Replace(",", ""), out var dollars))
+                var dollarMatch = Regex.Match(text, $@"(?i){Regex.Escape(label)}[\s\S]{{0,120}}?\$\s*(-?[0-9][0-9,]*(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)");
+                if (dollarMatch.Success && double.TryParse(dollarMatch.Groups[1].Value.Replace(",", ""), NumberStyles.Float, CultureInfo.InvariantCulture, out var dollars) && double.IsFinite(dollars))
                     return dollars;
             }
             return null;
@@ -482,9 +482,9 @@ namespace TaskbarQuota.Usage.Providers
                 {
                     if (string.Equals(prop.Name, key, StringComparison.OrdinalIgnoreCase))
                     {
-                        if (prop.Value.ValueKind == JsonValueKind.Number) return NormalizeMoney(prop.Value.GetDouble());
-                        if (prop.Value.ValueKind == JsonValueKind.String && double.TryParse(prop.Value.GetString()?.Replace(",", ""), out var parsed))
-                            return NormalizeMoney(parsed);
+                        if (prop.Value.ValueKind == JsonValueKind.Number && TryJsonDouble(prop.Value, out var number)) return NormalizeMoney(number);
+                        if (prop.Value.ValueKind == JsonValueKind.String && double.TryParse(prop.Value.GetString()?.Replace(",", ""), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
+                            return double.IsFinite(parsed) ? NormalizeMoney(parsed) : null;
                     }
                     if (FindMoneyValue(prop.Value, key) is { } nested) return nested;
                 }
@@ -538,14 +538,14 @@ namespace TaskbarQuota.Usage.Providers
             string[] pctKeys = { "usagePercent", "usedPercent", "percentUsed", "percent", "usage_percent", "used_percent", "utilization", "utilizationPercent", "utilization_percent", "usage" };
             double? pct = null;
             foreach (var k in pctKeys)
-                if (obj.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number) { pct = v.GetDouble(); break; }
+                if (Num(obj, k) is { } value) { pct = value; break; }
             if (pct is null)
             {
                 double? used = Num(obj, "used") ?? Num(obj, "usage");
                 double? limit = Num(obj, "limit") ?? Num(obj, "max");
                 if (used is { } u && limit is { } l && l > 0) pct = u / l * 100.0;
             }
-            if (pct is null) return null;
+            if (pct is null || !double.IsFinite(pct.Value)) return null;
             // OpenCode's usagePercent values are already percentages in the 0-100 range.
             // Treating values <= 1 as fractions turns a legitimate 1% reading into 100%.
             double p = pct.Value;
@@ -554,19 +554,19 @@ namespace TaskbarQuota.Usage.Providers
         }
 
         private static double? Num(JsonElement e, string n)
-            => e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : null;
+            => e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Number && TryJsonDouble(v, out var number) ? number : null;
 
         internal static RateWindow? ExtractWindow(string text, int windowMinutes, params string[] names)
         {
             foreach (var name in names)
             {
-                string percentPattern = $@"{Regex.Escape(name)}[^}}]*?(?:usagePercent|usedPercent|percentUsed|percent|usage_percent|used_percent|utilization|utilizationPercent|utilization_percent|usage)\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)";
+                string percentPattern = $@"{Regex.Escape(name)}[^}}]*?(?:usagePercent|usedPercent|percentUsed|percent|usage_percent|used_percent|utilization|utilizationPercent|utilization_percent|usage)\s*[:=]\s*([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)";
                 var pct = ExtractNumber(percentPattern, text);
                 if (pct is null) continue;
 
-                string resetPattern = $@"{Regex.Escape(name)}[^}}]*?(?:resetInSec|resetInSeconds|resetSeconds|reset_sec|reset_in_sec|resetsInSec|resetsInSeconds|resetIn|resetSec)\s*[:=]\s*([0-9]+)";
+                string resetPattern = $@"{Regex.Escape(name)}[^}}]*?(?:resetInSec|resetInSeconds|resetSeconds|reset_sec|reset_in_sec|resetsInSec|resetsInSeconds|resetIn|resetSec)\s*[:=]\s*([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)";
                 var resetSeconds = ExtractNumber(resetPattern, text);
-                DateTimeOffset? resetAt = resetSeconds is null ? null : DateTimeOffset.Now.AddSeconds(Math.Max(0, resetSeconds.Value));
+                DateTimeOffset? resetAt = resetSeconds is null ? null : DateFromResetSeconds(resetSeconds.Value);
                 // OpenCode's usagePercent values are already percentages in the 0-100 range.
                 // Treating values <= 1 as fractions turns a legitimate 1% reading into 100%.
                 var p = pct.Value;
@@ -578,7 +578,7 @@ namespace TaskbarQuota.Usage.Providers
         internal static double? ExtractNumber(string pattern, string text)
         {
             var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            return match.Success && double.TryParse(match.Groups[1].Value, out var value) ? value : null;
+            return match.Success && double.TryParse(match.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) && double.IsFinite(value) ? value : null;
         }
 
         internal static DateTimeOffset? ExtractRenewal(string text)
@@ -592,7 +592,7 @@ namespace TaskbarQuota.Usage.Providers
             string[] resetInKeys = { "resetInSec", "resetInSeconds", "resetSeconds", "reset_sec", "reset_in_sec", "resetsInSec", "resetsInSeconds", "resetIn", "resetSec" };
             foreach (var key in resetInKeys)
                 if (obj.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number)
-                    return DateTimeOffset.Now.AddSeconds(Math.Max(0, v.GetDouble()));
+                    return DateFromResetSeconds(v.GetDouble());
 
             return FindDate(obj, "resetAt", "resetsAt", "reset_at", "resets_at", "nextReset", "next_reset", "renewAt", "renew_at");
         }
@@ -628,7 +628,7 @@ namespace TaskbarQuota.Usage.Providers
         {
             var text = raw.Trim();
             if (text.Length == 0) return null;
-            if (double.TryParse(text, out var number)) return DateFromTimestamp(number);
+            if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)) return DateFromTimestamp(number);
             return DateTimeOffset.TryParse(text, out var parsed) ? parsed : null;
         }
 
@@ -636,7 +636,19 @@ namespace TaskbarQuota.Usage.Providers
         {
             if (double.IsNaN(number) || double.IsInfinity(number) || number <= 0) return null;
             var seconds = number > 10_000_000_000d ? number / 1000d : number;
+            if (seconds > DateTimeOffset.MaxValue.ToUnixTimeSeconds()) return null;
             return DateTimeOffset.FromUnixTimeSeconds((long)seconds);
+        }
+
+        private static DateTimeOffset? DateFromResetSeconds(double seconds)
+        {
+            if (!double.IsFinite(seconds)) return null;
+            var now = DateTimeOffset.Now;
+            seconds = Math.Max(0, seconds);
+            var maxSeconds = Math.Min((DateTimeOffset.MaxValue - now).TotalSeconds, (DateTime.MaxValue - now.DateTime).TotalSeconds);
+            if (seconds >= maxSeconds) return null;
+            try { return now.AddSeconds(seconds); }
+            catch (ArgumentOutOfRangeException) { return null; }
         }
 
         internal static string FormatTimeUntil(DateTimeOffset at)
@@ -719,7 +731,8 @@ namespace TaskbarQuota.Usage.Providers
         {
             if (!usage.TryGetProperty(key, out var window) || window.ValueKind != JsonValueKind.Object)
                 return null;
-            if (!window.TryGetProperty("percent", out var percent) || percent.ValueKind != JsonValueKind.Number)
+            if (!window.TryGetProperty("percent", out var percent) || percent.ValueKind != JsonValueKind.Number
+                || !percent.TryGetDouble(out var usedPercent) || !double.IsFinite(usedPercent))
                 return null;
 
             DateTimeOffset? resetAt = window.TryGetProperty("resetsAt", out var resetsAt)
@@ -728,7 +741,7 @@ namespace TaskbarQuota.Usage.Providers
                     : null;
 
             return new RateWindow(
-                Math.Clamp(percent.GetDouble(), 0, 100),
+                Math.Clamp(usedPercent, 0, 100),
                 windowMinutes,
                 resetAt,
                 resetAt is null ? null : OpenCodeProvider.FormatTimeUntil(resetAt.Value));

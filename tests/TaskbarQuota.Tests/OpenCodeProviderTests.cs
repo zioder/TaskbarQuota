@@ -7,6 +7,117 @@ namespace TaskbarQuota.Tests;
 public class OpenCodeProviderTests
 {
     [Theory]
+    [InlineData("NaN")]
+    [InlineData("Infinity")]
+    [InlineData("-Infinity")]
+    [InlineData("1e999")]
+    public void Money_NonFiniteJsonStrings_AreIgnored(string value)
+    {
+        Assert.Null(OpenCodeProvider.FindMoneyValue("{\"balance\":\"" + value + "\"}", "balance"));
+        Assert.Null(OpenCodeProvider.ParseBillingBalance("{\"customerID\":\"cus_test\",\"balance\":\"" + value + "\"}"));
+    }
+
+    [Fact]
+    public void Money_NonFiniteNumbersAndText_AreIgnored()
+    {
+        Assert.Null(OpenCodeProvider.FindMoneyValue("{\"balance\":1e999}", "balance"));
+        Assert.Null(OpenCodeProvider.FindMoneyValue("balance:1e999", "balance"));
+        Assert.Null(OpenCodeProvider.FindMoneyValue("balance: $1e999", "balance"));
+        Assert.Null(OpenCodeProvider.ParseBillingBalance("{\"customerID\":\"cus_test\",\"balance\":1e999}"));
+        Assert.Null(OpenCodeProvider.ParseBillingBalance("customerID:\"cus_test\",balance:1e999"));
+    }
+
+    [Theory]
+    [InlineData("{\"rollingUsage\":{\"usagePercent\":1e999}}")]
+    [InlineData("{\"rollingUsage\":{\"used\":1e999,\"limit\":100}}")]
+    [InlineData("{\"rollingUsage\":{\"used\":100,\"limit\":1e999}}")]
+    [InlineData("{\"rollingUsage\":{\"used\":1e308,\"limit\":1e-308}}")]
+    [InlineData("{\"rollingUsage\":{\"used\":100,\"limit\":0}}")]
+    public void ParseUsage_InvalidPercentageOrRatio_IsIgnored(string json)
+        => Assert.Null(OpenCodeProvider.ParseUsage(json).rolling);
+
+    [Fact]
+    public void ExtractWindow_NonFinitePercentage_IsIgnored()
+        => Assert.Null(OpenCodeProvider.ExtractWindow("rollingUsage,usagePercent:1e999", 300, "rollingUsage"));
+
+    [Theory]
+    [InlineData("monthly_usage")]
+    [InlineData("monthly-usage")]
+    [InlineData("monthlyusage")]
+    public void FindMoneyValue_JsonKeyAliases_ArePreserved(string key)
+        => Assert.Equal(33.33, OpenCodeProvider.FindMoneyValue("{\"" + key + "\":33.33}", "monthly_usage"));
+
+    [Theory]
+    [InlineData("en-US")]
+    [InlineData("ru-RU")]
+    [InlineData("de-DE")]
+    public void NumericContracts_UseInvariantCulture(string culture)
+    {
+        using var scope = new CultureScope(culture);
+
+        Assert.Equal(125.75, OpenCodeProvider.FindMoneyValue("{\"balance\":\"125.75\"}", "balance"));
+        Assert.Equal(1234.50, OpenCodeProvider.FindMoneyValue("{\"balance\":\"1,234.50\"}", "balance"));
+        Assert.Equal(125.75, OpenCodeProvider.FindMoneyValue("balance=125.75", "balance"));
+        Assert.Equal(57.30, OpenCodeProvider.FindMoneyValue("current balance: $57.30 remaining", "balance"));
+        Assert.Equal(75.5, OpenCodeProvider.ExtractNumber(@"usagePercent:([0-9.]+)", "usagePercent:75.5"));
+        Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1_735_689_600), OpenCodeProvider.ExtractRenewal("renewAt:1735689600.5"));
+        Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1_735_689_600), OpenCodeProvider.ParseUsage("{\"renewAt\":\"1735689600.5\"}").renewsAt);
+    }
+
+    [Theory]
+    [InlineData("NaN")]
+    [InlineData("Infinity")]
+    [InlineData("-Infinity")]
+    [InlineData("1e300")]
+    [InlineData("1e999")]
+    [InlineData("-1")]
+    [InlineData("0")]
+    public void Renewal_InvalidTimestampText_IsIgnored(string timestamp)
+    {
+        Assert.Null(OpenCodeProvider.ExtractRenewal("renewAt:" + timestamp));
+        Assert.Null(OpenCodeProvider.ParseUsage("{\"renewAt\":\"" + timestamp + "\"}").renewsAt);
+    }
+
+    [Theory]
+    [InlineData("1e300")]
+    [InlineData("1e999")]
+    [InlineData("-1")]
+    [InlineData("0")]
+    public void Renewal_InvalidNumericTimestamp_IsIgnored(string timestamp)
+        => Assert.Null(OpenCodeProvider.ParseUsage("{\"renewAt\":" + timestamp + "}").renewsAt);
+
+    [Theory]
+    [InlineData("1735689600", 1_735_689_600L)]
+    [InlineData("1735689600000", 1_735_689_600L)]
+    [InlineData("253402300799000", 253_402_300_799L)]
+    public void Renewal_ValidTimestampSecondsOrMilliseconds_IsPreserved(string timestamp, long expectedSeconds)
+        => Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(expectedSeconds), OpenCodeProvider.ExtractRenewal("renewAt:" + timestamp));
+
+    [Theory]
+    [InlineData("1e300")]
+    [InlineData("1e999")]
+    public void ParseUsage_UnrepresentableResetDelay_PreservesUsageWithoutReset(string seconds)
+    {
+        var usage = OpenCodeProvider.ParseUsage("{\"rollingUsage\":{\"usagePercent\":42.5,\"resetInSec\":" + seconds + "}}");
+
+        Assert.NotNull(usage.rolling);
+        Assert.Equal(42.5, usage.rolling.UsedPercent);
+        Assert.Null(usage.rolling.ResetAt);
+        Assert.Null(usage.rolling.ResetDescription);
+    }
+
+    [Fact]
+    public void ExtractWindow_UnrepresentableResetDelay_PreservesUsageWithoutReset()
+    {
+        var window = OpenCodeProvider.ExtractWindow("rollingUsage,usagePercent:42.5,resetInSec:" + new string('9', 400), 300, "rollingUsage");
+
+        Assert.NotNull(window);
+        Assert.Equal(42.5, window.UsedPercent);
+        Assert.Null(window.ResetAt);
+        Assert.Null(window.ResetDescription);
+    }
+
+    [Theory]
     [InlineData("auth=abc; other=value", "auth=abc; other=value")]
     [InlineData("Cookie: auth=abc; other=value", "auth=abc; other=value")]
     [InlineData("curl 'https://opencode.ai/workspace/wrk_abc' -H 'accept: text/html' -H 'cookie: auth=abc; other=value'", "auth=abc; other=value")]

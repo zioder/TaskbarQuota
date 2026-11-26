@@ -11,6 +11,15 @@ namespace TaskbarQuota.Tests;
 public class OpenCodeGoProviderTests
 {
     [Fact]
+    public void BuildResult_NonFiniteRollingPercentage_ThrowsParse()
+    {
+        using var document = JsonDocument.Parse("{\"usage\":{\"rolling\":{\"percent\":1e999},\"weekly\":{\"percent\":10},\"monthly\":{\"percent\":20}}}");
+
+        var error = Assert.Throws<ProviderException>(() => OpenCodeGoProvider.BuildResult(document.RootElement));
+        Assert.Equal(ProviderErrorKind.Parse, error.Kind);
+    }
+
+    [Fact]
     public void Provider_HasCorrectId()
     {
         var provider = new OpenCodeGoProvider();
@@ -45,9 +54,13 @@ public class OpenCodeGoProviderTests
         Assert.Equal(BillingKind.Subscription, provider.Billing);
     }
 
-    [Fact]
-    public void ExtractAllThreeWindows_FromFlatText()
+    [Theory]
+    [InlineData("en-US")]
+    [InlineData("ru-RU")]
+    [InlineData("de-DE")]
+    public void ExtractAllThreeWindows_FromFlatText(string culture)
     {
+        using var scope = new CultureScope(culture);
         var text = "rollingUsage,usagePercent:42.5,resetInSec:14400 weeklyUsage,usedPercent:67.8,resetInSec:259200 monthlyUsage,percentUsed:23.1,resetInSec:2592000";
 
         var rolling = OpenCodeProvider.ExtractWindow(text, 300, "rollingUsage", "rolling_usage", "rolling");
@@ -67,9 +80,13 @@ public class OpenCodeGoProviderTests
         Assert.Equal(43200, monthly.WindowMinutes);
     }
 
-    [Fact]
-    public void ExtractWindows_FromServerFunctionResponse()
+    [Theory]
+    [InlineData("en-US")]
+    [InlineData("ru-RU")]
+    [InlineData("de-DE")]
+    public void ExtractWindows_FromServerFunctionResponse(string culture)
     {
+        using var scope = new CultureScope(culture);
         var text = "data:rollingUsage,usagePercent:55.2,resetInSec:10800|weeklyUsage,usedPercent:78.9,resetInSec:172800|monthlyUsage,percentUsed:34.5,resetInSec:1296000";
 
         var rolling = OpenCodeProvider.ExtractWindow(text, 300, "rollingUsage", "rolling_usage", "rolling");
@@ -141,9 +158,13 @@ public class OpenCodeGoProviderTests
     public void LooksSignedOut_WithOpenAuthPage_ReturnsTrue(string html)
         => Assert.True(OpenCodeProvider.LooksSignedOut(html));
 
-    [Fact]
-    public void GoPagePayload_ParsesCurrentCodexBarStyleEmbeddedUsage()
+    [Theory]
+    [InlineData("en-US")]
+    [InlineData("ru-RU")]
+    [InlineData("de-DE")]
+    public void GoPagePayload_ParsesCurrentCodexBarStyleEmbeddedUsage(string culture)
     {
+        using var scope = new CultureScope(culture);
         var html = "<script>window.__data={rollingUsage:{usagePercent:37.5,resetInSec:7200}," +
                    "weeklyUsage:{usagePercent:51,resetInSec:172800}," +
                    "monthlyUsage:{usagePercent:12,resetInSec:1209600}}</script>";
