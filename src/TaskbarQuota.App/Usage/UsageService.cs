@@ -18,10 +18,15 @@ namespace TaskbarQuota.Usage
         private readonly Dictionary<ProviderId, IUsageProvider> _providers = new();
         private readonly Dictionary<ProviderId, CacheEntry> _cache = new();
         private readonly Dictionary<ProviderId, UsageResult> _lastSuccessfulLiveResults = new();
+        private readonly Dictionary<(ProviderId, string?), CacheEntry> _completedResults = new();
+        private readonly Dictionary<ProviderId, SortedSet<long>> _inFlightSequences = new();
+        private readonly Dictionary<ProviderId, UsagePublicationOrder> _publicationFrontiers = new();
         private readonly object _lock = new();
         private readonly string? _snapshotDirectory;
         private readonly Action<UsageResult>? _fetchObserver;
         private long _nextObservationSequence;
+        private Task _snapshotWriteTask = Task.CompletedTask;
+        private readonly Dictionary<ProviderId, DateTimeOffset> _lastSnapshotQueuedAt = new();
 
         // How long a persisted snapshot may keep its original timestamp while the usage values are
         // unchanged. Well inside UsageSnapshotStore.MaxRestoreAge, so a still-live entry can never age out
@@ -77,13 +82,17 @@ namespace TaskbarQuota.Usage
 
         public bool TryGetCached(ProviderId id, out UsageResult result)
         {
+            UsageResult? candidate = null;
             lock (_lock)
             {
                 if (TryGetValidEntry(id, out var cached))
-                {
-                    result = cached.Result.AsMemoryCache();
-                    return true;
-                }
+                    candidate = cached.Result;
+            }
+            // Credential files are read outside the state lock, including UI cache lookups.
+            if (candidate is not null && UsageCacheIdentity.IsCurrent(candidate.Provider, candidate.Fetch, candidate.CacheIdentity))
+            {
+                result = candidate.AsMemoryCache();
+                return true;
             }
 
             result = UsageResult.Failure(id, "No cached result.");
@@ -106,10 +115,53 @@ namespace TaskbarQuota.Usage
                     cachedResult = cached.Result.AsMemoryCache();
             }
             // History parsing reads every session log, so it runs outside _lock to keep UI-thread cache reads unblocked.
-            if (cachedResult is not null)
-                return AttachLocalHistory(id, cachedResult);
+            if (cachedResult is not null && UsageCacheIdentity.IsCurrent(provider, cachedResult.Fetch, cachedResult.CacheIdentity))
+                return PublishResult(id, AttachLocalHistory(id, cachedResult));
 
-            var observationSequence = Interlocked.Increment(ref _nextObservationSequence);
+            long observationSequence;
+            lock (_lock)
+            {
+                observationSequence = ++_nextObservationSequence;
+                if (!_inFlightSequences.TryGetValue(id, out var pending))
+                    _inFlightSequences[id] = pending = new SortedSet<long>();
+                pending.Add(observationSequence);
+            }
+            try
+            {
+                var result = await FetchAttemptAsync(id, provider, observationSequence, ct).ConfigureAwait(false);
+                return PublishResult(id, result);
+            }
+            finally
+            {
+                lock (_lock)
+                {
+                    var pending = _inFlightSequences[id];
+                    pending.Remove(observationSequence);
+                    foreach (var key in _completedResults.Keys.Where(key => key.Item1 == id).ToArray())
+                    {
+                        bool isCurrentCache = _cache.TryGetValue(id, out var current) && current.Result.CacheIdentity == key.Item2;
+                        if (!isCurrentCache && (pending.Count == 0 || _completedResults[key].Result.ObservationSequence < pending.Min))
+                            _completedResults.Remove(key);
+                    }
+                    if (pending.Count == 0)
+                        _inFlightSequences.Remove(id);
+                }
+            }
+        }
+
+        private UsageResult PublishResult(ProviderId id, UsageResult result)
+        {
+            bool eligible = UsageCacheIdentity.IsCurrent(result.Provider, result.Fetch, result.CacheIdentity);
+            bool accountChanged = result.Provider is IUsageCacheIdentityProvider && !eligible
+                && (result.Ok || result.CacheIdentity is not null || UsageCacheIdentity.CurrentFor(result.Provider) is not null);
+            if (accountChanged)
+                result = IdentityChangedResult(result);
+            return Store(id, result, TimeSpan.Zero, result.ObservationSequence, publicationOnly: true);
+        }
+
+        private async Task<UsageResult> FetchAttemptAsync(ProviderId id, IUsageProvider provider, long observationSequence, CancellationToken ct)
+        {
+            var attemptIdentity = UsageCacheIdentity.CurrentFor(provider);
             try
             {
                 var fetch = await FetchProviderAsync(provider, ct).ConfigureAwait(false);
@@ -118,6 +170,8 @@ namespace TaskbarQuota.Usage
                 var observedAt = DateTimeOffset.Now;
                 var result = UsageResult.Success(id, provider, fetch)
                     .AsLiveObservation(observationSequence, observedAt);
+                if (!UsageCacheIdentity.IsCurrent(provider, fetch))
+                    return IdentityChangedResult(result);
                 if (TryGetLastSuccessfulLiveResult(id, out var lastSuccess) && IsSuspiciousClaudeZeroResult(result, lastSuccess))
                 {
                     Diagnostics.Log.Warning("Claude returned a sudden 0%/0% usage snapshot before the previous window reset; keeping the last good Claude usage values.");
@@ -125,21 +179,28 @@ namespace TaskbarQuota.Usage
                     // carried over from a snapshot restored at startup.
                     lastSuccess = lastSuccess.AsFresh()
                         .AsLiveObservation(observationSequence, observedAt);
-                    Store(id, lastSuccess, FetchCachePolicy.TtlForSuccess());
+                    lastSuccess = Store(id, lastSuccess, FetchCachePolicy.TtlForSuccess(), observationSequence);
                     StoreLastSuccessfulLiveResult(id, lastSuccess);
                     return lastSuccess;
                 }
 
                 if (TryGetLastSuccessfulLiveResult(id, out lastSuccess) && SameUsage(lastSuccess, result))
                 {
-                    lastSuccess = lastSuccess.AsFresh()
+                    // Preserve the value-change timestamp, but keep the new endpoint confirmation
+                    // metadata. Reusing the previous object would leave reset credits ageing forever.
+                    var previousFetch = lastSuccess.Fetch!;
+                    var confirmedFetch = ReferenceEquals(previousFetch.Usage.ResetCredits, fetch.Usage.ResetCredits)
+                        ? previousFetch
+                        : new ProviderFetchResult(previousFetch.Usage.CopyWithResetCredits(fetch.Usage.ResetCredits),
+                            previousFetch.SourceLabel, previousFetch.FetchedAt, previousFetch.CacheIdentity);
+                    lastSuccess = UsageResult.Success(id, provider, confirmedFetch)
                         .AsLiveObservation(observationSequence, observedAt);
-                    Store(id, lastSuccess, FetchCachePolicy.TtlForSuccess());
+                    lastSuccess = Store(id, lastSuccess, FetchCachePolicy.TtlForSuccess(), observationSequence);
                     StoreLastSuccessfulLiveResult(id, lastSuccess);
                     return lastSuccess;
                 }
 
-                Store(id, result, FetchCachePolicy.TtlForSuccess());
+                result = Store(id, result, FetchCachePolicy.TtlForSuccess(), observationSequence);
                 StoreLastSuccessfulLiveResult(id, result);
                 return result;
             }
@@ -148,20 +209,19 @@ namespace TaskbarQuota.Usage
                 if (ShouldReuseLastSuccessfulResult(pe.Kind) && TryGetLastSuccessfulLiveResult(id, out var lastSuccess))
                 {
                     var fallback = lastSuccess.AsFailureFallback(observationSequence, DateTimeOffset.Now);
-                    Store(id, fallback, FetchCachePolicy.TtlForFailure(pe.Kind));
-                    return fallback;
+                    return Store(id, fallback, FetchCachePolicy.TtlForFailure(pe.Kind), observationSequence);
                 }
 
                 if (pe.Kind is not ProviderErrorKind.AuthRequired and not ProviderErrorKind.NotInstalled
                     && TryCreateLocalHistoryResult(id, provider, out var localResult))
                 {
-                    Store(id, localResult, FetchCachePolicy.TtlForFailure(pe.Kind));
-                    return localResult;
+                    localResult = localResult.AsFailureFallback(observationSequence, DateTimeOffset.Now);
+                    return Store(id, localResult, FetchCachePolicy.TtlForFailure(pe.Kind), observationSequence);
                 }
 
-                var result = UsageResult.Failure(id, pe.Message, provider, pe.Kind);
-                Store(id, result, FetchCachePolicy.TtlForFailure(pe.Kind));
-                return result;
+                var result = UsageResult.Failure(id, pe.Message, provider, pe.Kind, attemptIdentity)
+                    .AsFailureFallback(observationSequence, DateTimeOffset.Now);
+                return Store(id, result, FetchCachePolicy.TtlForFailure(pe.Kind), observationSequence);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -171,13 +231,13 @@ namespace TaskbarQuota.Usage
             {
                 if (TryCreateLocalHistoryResult(id, provider, out var localResult))
                 {
-                    Store(id, localResult, FetchCachePolicy.TtlForFailure(null));
-                    return localResult;
+                    localResult = localResult.AsFailureFallback(observationSequence, DateTimeOffset.Now);
+                    return Store(id, localResult, FetchCachePolicy.TtlForFailure(null), observationSequence);
                 }
 
-                var result = UsageResult.Failure(id, ex.Message, provider);
-                Store(id, result, FetchCachePolicy.TtlForFailure(null));
-                return result;
+                var result = UsageResult.Failure(id, ex.Message, provider, cacheIdentity: attemptIdentity)
+                    .AsFailureFallback(observationSequence, DateTimeOffset.Now);
+                return Store(id, result, FetchCachePolicy.TtlForFailure(null), observationSequence);
             }
         }
 
@@ -219,48 +279,85 @@ namespace TaskbarQuota.Usage
             }
         }
 
-        private void Store(ProviderId id, UsageResult result, TimeSpan ttl)
+        private UsageResult Store(ProviderId id, UsageResult result, TimeSpan ttl, long sequence, bool publicationOnly = false)
         {
+            bool eligible = UsageCacheIdentity.IsCurrent(result.Provider, result.Fetch, result.CacheIdentity);
+            if (!eligible && !publicationOnly)
+                return result;
+            bool cacheRead = publicationOnly && result.ObservationOrigin is UsageObservationOrigin.MemoryCache or UsageObservationOrigin.RestoredSnapshot;
             lock (_lock)
             {
-                _cache[id] = new CacheEntry(DateTimeOffset.Now, result, ttl);
+                var key = (id, result.CacheIdentity);
+                var entry = new CacheEntry(DateTimeOffset.Now, result, ttl);
+                if (eligible && _completedResults.TryGetValue(key, out var completed))
+                {
+                    // Delivery revisions never change which actual request is newest for an account.
+                    if (result.ObservationOrigin == UsageObservationOrigin.AccountTransition
+                        || completed.Result.ObservationSequence > sequence
+                        || (publicationOnly && completed.Result.ObservationSequence == sequence))
+                    {
+                        cacheRead |= completed.Result.ObservationSequence > sequence;
+                        entry = completed;
+                    }
+                }
+                result = entry.Result;
+                if (_publicationFrontiers.TryGetValue(id, out var frontier) && result.PublicationOrder < frontier)
+                    result = result.WithPublicationOrder(frontier.NextRevision());
+                _publicationFrontiers[id] = result.PublicationOrder;
+                entry = entry with { Result = result };
+                if (eligible)
+                {
+                    // A detected account transition is a delivery event, not an actual attempt
+                    // by the new account. It mustn't outrank that account's in-flight requests.
+                    if (result.ObservationOrigin != UsageObservationOrigin.AccountTransition)
+                        _completedResults[key] = entry;
+                    _cache[id] = entry;
+                }
+                return cacheRead ? result.AsMemoryCache() : result;
             }
         }
 
         private void StoreLastSuccessfulLiveResult(ProviderId id, UsageResult result)
         {
-            Dictionary<ProviderId, UsageResult> toPersist;
+            if (!result.Ok || result.ObservationOrigin != UsageObservationOrigin.Live
+                || !UsageCacheIdentity.IsCurrent(result.Provider, result.Fetch, result.CacheIdentity))
+                return;
             lock (_lock)
             {
+                if (_lastSuccessfulLiveResults.TryGetValue(id, out var latestSuccess)
+                    && latestSuccess.PublicationOrder > result.PublicationOrder)
+                    return;
+                if (_completedResults.TryGetValue((id, result.CacheIdentity), out var completed)
+                    && result.ObservationSequence < completed.Result.ObservationSequence)
+                    return;
                 if (_snapshotDirectory is null)
                 {
                     _lastSuccessfulLiveResults[id] = result;
                     return;
                 }
 
-                // Unchanged usage re-stores an equivalent value every poll, so skip the disk write for
-                // those — but re-persist periodically anyway, because each write refreshes the SavedAt
-                // stamp that UsageSnapshotStore expiry reads. Skipping forever would let a continuously
-                // confirmed entry age past MaxRestoreAge and be discarded on the next boot. The older
-                // instance stays as the comparison baseline: its age is what triggers the next rewrite.
+                // Persist unchanged live confirmations periodically, without treating another
+                // provider's write as a confirmation or using the value-change time as a write clock.
+                var refreshInterval = result.Fetch?.Usage.ResetCredits is null
+                    ? SnapshotRefreshInterval
+                    : TimeSpan.FromTicks(Math.Min(SnapshotRefreshInterval.Ticks, ResetCreditsSnapshot.MaxCacheAge.Ticks / 2));
                 if (_lastSuccessfulLiveResults.TryGetValue(id, out var existing)
                     && SameUsage(existing, result)
-                    && existing.Fetch is { } existingFetch
-                    && DateTimeOffset.Now - existingFetch.FetchedAt < SnapshotRefreshInterval)
+                    && _lastSnapshotQueuedAt.TryGetValue(id, out var queuedAt)
+                    && DateTimeOffset.Now >= queuedAt
+                    && DateTimeOffset.Now - queuedAt < refreshInterval)
                 {
                     _lastSuccessfulLiveResults[id] = result;
                     return;
                 }
 
                 _lastSuccessfulLiveResults[id] = result;
-                toPersist = new Dictionary<ProviderId, UsageResult>(_lastSuccessfulLiveResults);
+                var toPersist = new Dictionary<ProviderId, UsageResult>(_lastSuccessfulLiveResults);
+                _lastSnapshotQueuedAt[id] = DateTimeOffset.Now;
+                // Create the task chain while holding the state lock. Merely serializing writes on
+                // background threads allows an older dictionary to be queued after a newer one.
+                _snapshotWriteTask = QueueSnapshotSave(_snapshotWriteTask, _snapshotDirectory, toPersist);
             }
-
-            // Off the fetch path: persistence is best-effort and must never delay a usage update. Writes
-            // are serialized because Save stages through a single shared temp path — two providers
-            // persisting concurrently would otherwise interleave the write/move and could leave a
-            // truncated file or let an older snapshot land on top of a newer one.
-            QueueSnapshotSave(_snapshotDirectory, toPersist);
         }
 
         /// <summary>
@@ -268,9 +365,10 @@ namespace TaskbarQuota.Usage
         /// return immediately; failures are logged rather than surfaced, since losing a snapshot only
         /// costs the next boot its restored values.
         /// </summary>
-        private static void QueueSnapshotSave(string directory, IReadOnlyDictionary<ProviderId, UsageResult> toPersist)
-            => _ = Task.Run(async () =>
+        private static Task QueueSnapshotSave(Task previous, string directory, IReadOnlyDictionary<ProviderId, UsageResult> toPersist)
+            => Task.Run(async () =>
             {
+                await previous.ConfigureAwait(false);
                 await SnapshotWriteGate.WaitAsync().ConfigureAwait(false);
                 try
                 {
@@ -288,13 +386,16 @@ namespace TaskbarQuota.Usage
 
         public bool TryGetLastSuccessfulLiveResult(ProviderId id, out UsageResult result)
         {
+            UsageResult? candidate = null;
             lock (_lock)
             {
                 if (_lastSuccessfulLiveResults.TryGetValue(id, out var stored))
-                {
-                    result = stored.AsMemoryCache();
-                    return true;
-                }
+                    candidate = stored;
+            }
+            if (candidate is not null && UsageCacheIdentity.IsCurrent(candidate.Provider, candidate.Fetch, candidate.CacheIdentity))
+            {
+                result = candidate.AsMemoryCache();
+                return true;
             }
 
             result = UsageResult.Failure(id, "No successful live result.");
@@ -338,11 +439,13 @@ namespace TaskbarQuota.Usage
             => left.Fetch is { } lf
             && right.Fetch is { } rf
             && lf.SourceLabel == rf.SourceLabel
+            && lf.CacheIdentity == rf.CacheIdentity
             && SameSnapshot(lf.Usage, rf.Usage);
 
         private static bool SameSnapshot(UsageSnapshot left, UsageSnapshot right)
         {
-            if (!SameWindow(left.Primary, right.Primary)
+            if (left.HasPrimaryWindow != right.HasPrimaryWindow
+                || !SameWindow(left.Primary, right.Primary)
                 || !SameWindow(left.Secondary, right.Secondary)
                 || !SameWindow(left.ModelSpecific, right.ModelSpecific)
                 || !SameWindow(left.Monthly, right.Monthly)
@@ -350,6 +453,7 @@ namespace TaskbarQuota.Usage
                 || left.Email != right.Email
                 || !SameHistory(left.UsageHistory, right.UsageHistory)
                 || !SameCost(left.Cost, right.Cost)
+                || !SamePricing(left.Pricing, right.Pricing)
                 || !SameAdditional(left.AdditionalUsage, right.AdditionalUsage)
                 || !SameResetCredits(left.ResetCredits, right.ResetCredits)
                 || left.UsageDashboardUrl != right.UsageDashboardUrl
@@ -385,6 +489,12 @@ namespace TaskbarQuota.Usage
             IUsageProvider provider,
             out UsageResult result)
         {
+            var identity = UsageCacheIdentity.CurrentFor(provider);
+            if (provider is IUsageCacheIdentityProvider && identity is null)
+            {
+                result = UsageResult.Failure(id, "Current account identity is unavailable.", provider);
+                return false;
+            }
             if (!UsageHistoryService.TryLoad(id, out var history))
             {
                 result = UsageResult.Failure(id, "No local usage history found.", provider);
@@ -398,9 +508,16 @@ namespace TaskbarQuota.Usage
             result = UsageResult.Success(
                 id,
                 provider,
-                new ProviderFetchResult(usage, "Local usage history"));
+                new ProviderFetchResult(usage, "Local usage history", cacheIdentity: identity));
             return true;
         }
+
+        private static UsageResult IdentityChangedResult(UsageResult result)
+            => UsageResult.Failure(result.Id, "Account credentials changed while fetching usage. Refresh to retry.",
+                result.Provider, ProviderErrorKind.Other,
+                result.Provider is { } provider ? UsageCacheIdentity.CurrentFor(provider) : null)
+                .AsAccountTransition(result.ObservationSequence, result.ObservedAt ?? DateTimeOffset.Now)
+                .WithPublicationOrder(result.PublicationOrder);
 
         private static bool SameHistory(UsageHistory? left, UsageHistory? right)
         {
@@ -458,6 +575,8 @@ namespace TaskbarQuota.Usage
                     NearlyEqual(l.UsedPercent, r.UsedPercent)
                     && l.IsIncluded == r.IsIncluded
                     && l.WindowMinutes == r.WindowMinutes
+                    && l.Label == r.Label
+                    && l.ShowCostValue == r.ShowCostValue
                     && l.ResetAt == r.ResetAt
                     && l.ResetDescription == r.ResetDescription,
                 _ => false,
@@ -476,12 +595,21 @@ namespace TaskbarQuota.Usage
                 _ => false,
             };
 
+        private static bool SamePricing(UsagePricingSnapshot? left, UsagePricingSnapshot? right)
+            => (left, right) switch
+            {
+                (null, null) => true,
+                ({ } l, { } r) => l.Period == r.Period && NearlyEqual(l.Multiplier, r.Multiplier),
+                _ => false,
+            };
+
         private static bool SameAdditional(AdditionalUsageSnapshot? left, AdditionalUsageSnapshot? right)
             => (left, right) switch
             {
                 (null, null) => true,
                 ({ } l, { } r) =>
                     l.Enabled == r.Enabled
+                    && l.IsCredits == r.IsCredits
                     && NearlyEqual(l.SpentUsd, r.SpentUsd)
                     && NullableNearlyEqual(l.BudgetUsd, r.BudgetUsd),
                 _ => false,
@@ -491,7 +619,8 @@ namespace TaskbarQuota.Usage
         {
             if (left is null || right is null)
                 return left is null && right is null;
-            if (left.AvailableCount != right.AvailableCount || left.Credits.Count != right.Credits.Count)
+            if (left.AvailableCount != right.AvailableCount || left.Credits.Count != right.Credits.Count
+                || left.CachedAt != right.CachedAt)
                 return false;
 
             for (int i = 0; i < left.Credits.Count; i++)
@@ -540,6 +669,7 @@ namespace TaskbarQuota.Usage
         MemoryCache,
         RestoredSnapshot,
         FailureFallback,
+        AccountTransition,
     }
 
     public sealed class UsageResult
@@ -563,18 +693,27 @@ namespace TaskbarQuota.Usage
         public bool IsStale { get; private init; }
         internal UsageObservationOrigin ObservationOrigin { get; private init; }
         internal long ObservationSequence { get; private init; }
+        private UsagePublicationOrder? ExplicitPublicationOrder { get; init; }
+        internal UsagePublicationOrder PublicationOrder => ExplicitPublicationOrder ?? new(ObservationSequence);
         internal DateTimeOffset? ObservedAt { get; private init; }
+        /// <summary>Last successful live confirmation, preserved across fallback and restore.</summary>
+        internal DateTimeOffset? LastConfirmedAt { get; private init; }
+        internal string? CacheIdentity { get; private init; }
         public bool Ok => Fetch != null;
         public string DisplayName => Provider?.DisplayName ?? Id.ToString();
 
-        public static UsageResult Success(ProviderId id, IUsageProvider provider, ProviderFetchResult fetch)
-            => new() { Id = id, Provider = provider, Fetch = fetch };
+        public static UsageResult Success(ProviderId id, IUsageProvider provider, ProviderFetchResult fetch,
+            DateTimeOffset? lastConfirmedAt = null)
+            => new() { Id = id, Provider = provider, Fetch = fetch, LastConfirmedAt = lastConfirmedAt ?? DateTimeOffset.Now,
+                CacheIdentity = fetch.CacheIdentity };
 
-        public static UsageResult Failure(ProviderId id, string error, IUsageProvider? provider = null, ProviderErrorKind? kind = null)
-            => new() { Id = id, Provider = provider, Error = error, ErrorKind = kind };
+        public static UsageResult Failure(ProviderId id, string error, IUsageProvider? provider = null,
+            ProviderErrorKind? kind = null, string? cacheIdentity = null)
+            => new() { Id = id, Provider = provider, Error = error, ErrorKind = kind, CacheIdentity = cacheIdentity };
 
         public static UsageResult Pending(ProviderId id, IUsageProvider provider, string message)
-            => new() { Id = id, Provider = provider, Error = message, IsPending = true };
+            => new() { Id = id, Provider = provider, Error = message, IsPending = true,
+                CacheIdentity = UsageCacheIdentity.CurrentFor(provider) };
 
         public UsageResult WithSource(ProviderSource? source)
             => new()
@@ -588,7 +727,10 @@ namespace TaskbarQuota.Usage
                 IsStale = IsStale,
                 ObservationOrigin = ObservationOrigin,
                 ObservationSequence = ObservationSequence,
+                ExplicitPublicationOrder = ExplicitPublicationOrder,
                 ObservedAt = ObservedAt,
+                LastConfirmedAt = LastConfirmedAt,
+                CacheIdentity = CacheIdentity,
                 Source = source ?? ProviderSource.Unknown,
             };
 
@@ -600,12 +742,12 @@ namespace TaskbarQuota.Usage
         /// Clears the stale mark once a live fetch has confirmed the values. FetchedAt is deliberately
         /// left alone: it means "when these values last changed", which is what the widget's
         /// "Last updated" line reports. Snapshot expiry tracks confirmation separately, via the SavedAt
-        /// stamp UsageSnapshotStore writes on each persist.
+        /// stamp UsageSnapshotStore persists from LastConfirmedAt.
         /// </summary>
         public UsageResult AsFresh() => IsStale ? WithStale(false) : this;
 
         internal UsageResult AsLiveObservation(long sequence, DateTimeOffset observedAt)
-            => WithObservation(UsageObservationOrigin.Live, sequence, observedAt, isStale: false);
+            => WithObservation(UsageObservationOrigin.Live, sequence, observedAt, isStale: false, newAttempt: true);
 
         internal UsageResult AsMemoryCache()
             => WithObservation(
@@ -620,7 +762,13 @@ namespace TaskbarQuota.Usage
                 IsStale);
 
         internal UsageResult AsFailureFallback(long sequence, DateTimeOffset observedAt)
-            => WithObservation(UsageObservationOrigin.FailureFallback, sequence, observedAt, isStale: false);
+            => WithObservation(UsageObservationOrigin.FailureFallback, sequence, observedAt, isStale: false, newAttempt: true);
+
+        internal UsageResult AsAccountTransition(long sequence, DateTimeOffset observedAt)
+            => WithObservation(UsageObservationOrigin.AccountTransition, sequence, observedAt, isStale: false, newAttempt: true);
+
+        internal UsageResult WithPublicationOrder(UsagePublicationOrder order)
+            => WithObservation(ObservationOrigin, ObservationSequence, ObservedAt, IsStale, publicationOrder: order);
 
         private UsageResult WithStale(bool isStale)
             => WithObservation(ObservationOrigin, ObservationSequence, ObservedAt, isStale);
@@ -629,20 +777,35 @@ namespace TaskbarQuota.Usage
             UsageObservationOrigin origin,
             long sequence,
             DateTimeOffset? observedAt,
-            bool isStale)
+            bool isStale,
+            bool newAttempt = false,
+            UsagePublicationOrder? publicationOrder = null)
             => new()
             {
                 Id = Id,
                 Provider = Provider,
-                Fetch = Fetch,
+                Fetch = CurrentFetch(Fetch, origin is UsageObservationOrigin.FailureFallback or UsageObservationOrigin.RestoredSnapshot,
+                    origin == UsageObservationOrigin.Live ? observedAt ?? DateTimeOffset.UtcNow : DateTimeOffset.UtcNow),
                 Error = Error,
                 ErrorKind = ErrorKind,
                 IsPending = IsPending,
                 IsStale = isStale,
                 ObservationOrigin = origin,
                 ObservationSequence = sequence,
+                ExplicitPublicationOrder = newAttempt ? null : publicationOrder ?? ExplicitPublicationOrder,
                 ObservedAt = observedAt,
+                LastConfirmedAt = origin == UsageObservationOrigin.Live ? observedAt : LastConfirmedAt,
+                CacheIdentity = CacheIdentity,
                 Source = Source,
             };
+
+        private static ProviderFetchResult? CurrentFetch(ProviderFetchResult? fetch, bool asCached, DateTimeOffset now)
+        {
+            if (fetch?.Usage.ResetCredits is not { } cached)
+                return fetch;
+            var current = cached.CurrentAt(now, asCached);
+            return ReferenceEquals(current, cached) ? fetch : new ProviderFetchResult(
+                fetch.Usage.CopyWithResetCredits(current), fetch.SourceLabel, fetch.FetchedAt, fetch.CacheIdentity);
+        }
     }
 }
