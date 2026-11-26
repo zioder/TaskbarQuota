@@ -1,5 +1,6 @@
 using TaskbarQuota.Usage;
 using TaskbarQuota.Controls;
+using TaskbarQuota.ViewModels;
 
 namespace TaskbarQuota.Tests;
 
@@ -56,6 +57,22 @@ public class UsageSnapshotSemanticChangeTests
         Assert.NotEqual(WidgetSummary.BuildRenderSignature(before), WidgetSummary.BuildRenderSignature(after));
     }
 
+    [Theory]
+    [InlineData("primary-presence")]
+    [InlineData("window-label")]
+    [InlineData("pricing-period")]
+    [InlineData("pricing-multiplier")]
+    [InlineData("dashboard-url")]
+    [InlineData("cost-reset")]
+    public void SemanticChangesInvalidateTheDashboardCard(string change)
+    {
+        var provider = new TestProvider();
+        var before = UsageResult.Success(provider.Id, provider, new ProviderFetchResult(Snapshot(), "test"));
+        var after = UsageResult.Success(provider.Id, provider, new ProviderFetchResult(Snapshot(change), "test"));
+
+        Assert.NotEqual(DashboardViewModel.BuildCardSignature(before, false), DashboardViewModel.BuildCardSignature(after, false));
+    }
+
     private static UsageSnapshot Snapshot(string? change = null) => new(new RateWindow(34)
     {
         Label = change == "window-label" ? "Weekly" : "Session",
@@ -68,6 +85,9 @@ public class UsageSnapshotSemanticChangeTests
         Pricing = new UsagePricingSnapshot(change == "pricing-period" ? "Peak" : "Daily",
             change == "pricing-multiplier" ? 2 : 1),
         AdditionalUsage = new AdditionalUsageSnapshot { Enabled = true, SpentUsd = 3, BudgetUsd = 10, IsCredits = change == "additional-units" },
+        UsageDashboardUrl = change == "dashboard-url" ? "https://example.test/workspace-b/usage" : "https://example.test/workspace-a/usage",
+        Cost = new CostSnapshot(3, "USD", "Credits").WithLimit(10)
+            .WithResetsAt(new DateTimeOffset(2030, 1, change == "cost-reset" ? 2 : 1, 0, 0, 0, TimeSpan.Zero)),
     };
 
     private sealed class TestProvider(params ProviderFetchResult[] results) : IUsageProvider

@@ -712,7 +712,8 @@ namespace TaskbarQuota.Usage
             => new() { Id = id, Provider = provider, Error = error, ErrorKind = kind, CacheIdentity = cacheIdentity };
 
         public static UsageResult Pending(ProviderId id, IUsageProvider provider, string message)
-            => new() { Id = id, Provider = provider, Error = message, IsPending = true };
+            => new() { Id = id, Provider = provider, Error = message, IsPending = true,
+                CacheIdentity = UsageCacheIdentity.CurrentFor(provider) };
 
         public UsageResult WithSource(ProviderSource? source)
             => new()
