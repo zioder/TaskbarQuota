@@ -1,8 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.IO;
+using System.Security.Cryptography;
 using System.Management;
+using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -15,7 +19,8 @@ using TaskbarQuota;
 namespace TaskbarQuota.Usage.Providers
 {
     /// <summary>
-    /// Antigravity usage via its local language server (Connect/gRPC over self-signed TLS on 127.0.0.1).
+    /// Antigravity quota via Google OAuth from Windows keyring, with a local language-server fallback.
+    /// The local server uses Connect/gRPC over self-signed TLS on 127.0.0.1.
     /// Finds the running language_server_windows process, extracts the CSRF token + extension port from
     /// its command line, probes for the real API port, then calls GetUserStatus.
     /// Ported from Win-CodexBar rust/src/providers/antigravity/mod.rs.
@@ -34,6 +39,15 @@ namespace TaskbarQuota.Usage.Providers
         })
         { Timeout = TimeSpan.FromSeconds(8) };
 
+        private const string GoogleQuotaUrl = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+        private const string GoogleTokenUrl = "https://oauth2.googleapis.com/token";
+        private const string AntigravityHubUserAgent = "antigravity/hub/2.24.0";
+        private const string KeyringTargetName = "gemini:antigravity";
+        private const string GoKeyringBase64Prefix = "go-keyring-base64:";
+
+        private static readonly HttpClient Cloud = new() { Timeout = TimeSpan.FromSeconds(10) };
+        private static CachedGoogleAccessToken? _cachedAccessToken;
+
         public ProviderId Id => ProviderId.Antigravity;
         public string DisplayName => "Antigravity";
         public string SessionLabel => "Gemini";
@@ -42,6 +56,10 @@ namespace TaskbarQuota.Usage.Providers
 
         public async Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
         {
+            var oauthResult = await TryFetchViaGoogleOAuthAsync(ct).ConfigureAwait(false);
+            if (oauthResult != null)
+                return oauthResult;
+
             var info = DetectProcessInfo();
             var endpoint = await FindApiEndpoint(info, ct).ConfigureAwait(false);
 
@@ -135,7 +153,7 @@ namespace TaskbarQuota.Usage.Providers
                 }
             }
 
-            gemini ??= configs.Count > 0 ? configs[0].window : new RateWindow(0);
+            gemini ??= new RateWindow(0) { IsIncluded = false };
             nonGemini ??= new RateWindow(0);
 
             var snapshot = new UsageSnapshot(gemini) { Secondary = nonGemini };
@@ -166,9 +184,21 @@ namespace TaskbarQuota.Usage.Providers
         {
             snapshot = null!;
             using var doc = JsonDocument.Parse(json);
-            if (!doc.RootElement.TryGetProperty("response", out var resp) ||
-                !resp.TryGetProperty("groups", out var groups) || groups.ValueKind != JsonValueKind.Array)
+            JsonElement groups;
+            if (doc.RootElement.TryGetProperty("response", out var resp) &&
+                resp.ValueKind == JsonValueKind.Object &&
+                resp.TryGetProperty("groups", out groups) && groups.ValueKind == JsonValueKind.Array)
+            {
+                // Wrapped Connect/gRPC response format
+            }
+            else if (doc.RootElement.TryGetProperty("groups", out groups) && groups.ValueKind == JsonValueKind.Array)
+            {
+                // Direct Cloud Code REST response format
+            }
+            else
+            {
                 return false;
+            }
 
             RateWindow? geminiWeekly = null, geminiFiveHour = null, otherWeekly = null, otherFiveHour = null;
             var extraWindows = new List<NamedRateWindow>();
@@ -182,10 +212,18 @@ namespace TaskbarQuota.Usage.Providers
                 var groupKind = ClassifySummaryGroup(name, buckets);
                 foreach (var b in buckets.EnumerateArray())
                 {
+                    if (b.TryGetProperty("disabled", out var disabled) && disabled.ValueKind == JsonValueKind.True)
+                        continue;
+                    string bucketId = b.TryGetProperty("bucketId", out var bi) ? bi.GetString() ?? "" : "";
+                    var bucketKind = IsArgon(bucketId)
+                        ? SummaryGroupKind.Extra
+                        : IsMainGeminiBucket(bucketId) ? SummaryGroupKind.Gemini
+                        : IsThirdPartyBucket(bucketId) ? SummaryGroupKind.Other
+                        : groupKind;
                     bool fiveHour = IsFiveHourBucket(b);
                     var window = RateWindowFromQuota(b, fiveHour ? QuotaWindowLength.FiveHours : QuotaWindowLength.Weekly); // buckets carry remainingFraction + resetTime like quotaInfo
                     any = true;
-                    switch (groupKind)
+                    switch (bucketKind)
                     {
                         case SummaryGroupKind.Gemini:
                             if (fiveHour) geminiFiveHour ??= window;
@@ -196,10 +234,10 @@ namespace TaskbarQuota.Usage.Providers
                             else otherWeekly ??= window;
                             break;
                         case SummaryGroupKind.Extra:
-                            string bucketId = b.TryGetProperty("bucketId", out var bi) ? bi.GetString() ?? "" : "";
                             string bucketDisplay = b.TryGetProperty("displayName", out var bd) ? bd.GetString() ?? "" : "";
                             string id = !string.IsNullOrWhiteSpace(bucketId) ? bucketId : $"extra-{extraIdx}";
-                            string title = FormatExtraBucketTitle(name, bucketDisplay, fiveHour);
+                            string extraName = IsArgon(bucketId) && !IsArgon(name) ? "Argon" : name;
+                            string title = FormatExtraBucketTitle(extraName, bucketDisplay, fiveHour);
                             extraWindows.Add(new NamedRateWindow(id, title, window));
                             extraIdx++;
                             break;
@@ -209,7 +247,7 @@ namespace TaskbarQuota.Usage.Providers
 
             if (!any) return false;
 
-            snapshot = new UsageSnapshot(geminiWeekly ?? new RateWindow(0))
+            snapshot = new UsageSnapshot(geminiWeekly ?? new RateWindow(0) { IsIncluded = false })
             {
                 ModelSpecific = geminiFiveHour,
                 Secondary = otherWeekly,
@@ -231,12 +269,9 @@ namespace TaskbarQuota.Usage.Providers
             foreach (var b in buckets.EnumerateArray())
             {
                 string bucketId = b.TryGetProperty("bucketId", out var bi) ? bi.GetString() ?? "" : "";
-                if (IsArgon(bucketId))
-                    return SummaryGroupKind.Extra;
-                if (bucketId.Equals("gemini-weekly", StringComparison.OrdinalIgnoreCase) ||
-                    bucketId.Equals("gemini-5h", StringComparison.OrdinalIgnoreCase))
+                if (IsMainGeminiBucket(bucketId))
                     hasMainGeminiBucket = true;
-                else if (bucketId.StartsWith("3p-", StringComparison.OrdinalIgnoreCase))
+                else if (IsThirdPartyBucket(bucketId))
                     hasThirdPartyBucket = true;
             }
 
@@ -252,6 +287,13 @@ namespace TaskbarQuota.Usage.Providers
             // instead of overwriting the primary Gemini group.
             return SummaryGroupKind.Extra;
         }
+
+        private static bool IsMainGeminiBucket(string id)
+            => id.Equals("gemini-weekly", StringComparison.OrdinalIgnoreCase)
+                || id.Equals("gemini-5h", StringComparison.OrdinalIgnoreCase);
+
+        private static bool IsThirdPartyBucket(string id)
+            => id.StartsWith("3p-", StringComparison.OrdinalIgnoreCase);
 
         private static string FormatExtraBucketTitle(string groupName, string bucketDisplay, bool fiveHour)
         {
@@ -597,5 +639,279 @@ namespace TaskbarQuota.Usage.Providers
             catch { }
             return ports;
         }
+
+        internal sealed record KeyringOAuthCreds(
+            string? AccessToken,
+            string? RefreshToken,
+            string? ClientId,
+            string? ClientSecret,
+            DateTimeOffset? Expiry);
+
+        internal sealed record CachedGoogleAccessToken(
+            KeyringOAuthCreds Credential,
+            string AccessToken,
+            DateTimeOffset ExpiresAt)
+        {
+            internal string? GetFor(KeyringOAuthCreds credential, DateTimeOffset now)
+                => Credential == credential && ExpiresAt > now.AddMinutes(1) ? AccessToken : null;
+        }
+
+        private static async Task<ProviderFetchResult?> TryFetchViaGoogleOAuthAsync(CancellationToken ct)
+        {
+            var creds = ReadKeyringOAuthCreds();
+            if (creds == null) return null;
+
+            var now = DateTimeOffset.UtcNow;
+            var cachedToken = Volatile.Read(ref _cachedAccessToken)?.GetFor(creds, now);
+            string? token = cachedToken ?? creds.AccessToken;
+            if (cachedToken is null && (string.IsNullOrWhiteSpace(token) || creds.Expiry <= now.AddMinutes(1)))
+            {
+                token = await RefreshGoogleTokenAsync(creds, ct).ConfigureAwait(false) ?? token;
+            }
+
+            if (string.IsNullOrWhiteSpace(token)) return null;
+
+            var (status, json) = await PostGoogleQuotaSummaryAsync(token, ct).ConfigureAwait(false);
+            if (status == HttpStatusCode.Unauthorized && !string.IsNullOrWhiteSpace(creds.RefreshToken))
+            {
+                var refreshed = await RefreshGoogleTokenAsync(creds, ct).ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(refreshed))
+                    (status, json) = await PostGoogleQuotaSummaryAsync(refreshed, ct).ConfigureAwait(false);
+            }
+
+            if (status != HttpStatusCode.OK || string.IsNullOrWhiteSpace(json))
+                return null;
+
+            if (!TryParseQuotaSummary(json, out var snapshot))
+                return null;
+
+            return new ProviderFetchResult(snapshot, "oauth");
+        }
+
+        private static async Task<(HttpStatusCode Status, string? Body)> PostGoogleQuotaSummaryAsync(string accessToken, CancellationToken ct)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, GoogleQuotaUrl)
+            {
+                Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+            };
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            req.Headers.TryAddWithoutValidation("User-Agent", AntigravityHubUserAgent);
+            try
+            {
+                using var resp = await Cloud.SendAsync(req, ct).ConfigureAwait(false);
+                var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                return (resp.StatusCode, body);
+            }
+            catch
+            {
+                return (0, null);
+            }
+        }
+
+        // The Go token record omits its native OAuth client registration. Resolve the
+        // verified registration from the installed app, keeping its secret out of source.
+        // Fingerprints identify the registration, not a version-specific executable.
+        private static readonly Lazy<(string Id, string Secret)?> InstalledOAuthClient = new(ReadInstalledOAuthClient);
+
+        private static (string Id, string Secret)? ReadInstalledOAuthClient()
+        {
+            var roots = new[]
+            {
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "antigravity"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Antigravity"),
+            };
+            foreach (var root in roots)
+            {
+                var path = Path.Combine(root, "resources", "bin", "language_server.exe");
+                try
+                {
+                    if (!File.Exists(path)) continue;
+                    using var stream = File.OpenRead(path);
+                    var buffer = new byte[64 * 1024];
+                    string tail = "";
+                    string? id = null, secret = null;
+                    int count;
+                    while ((count = stream.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        var content = tail + Encoding.ASCII.GetString(buffer, 0, count);
+                        string? MatchFingerprint(string pattern, string fingerprint)
+                        {
+                            foreach (Match match in Regex.Matches(content, pattern, RegexOptions.CultureInvariant))
+                                if (Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(match.Value))) == fingerprint)
+                                    return match.Value;
+                            return null;
+                        }
+                        id ??= MatchFingerprint(@"\d{10,13}-[a-z0-9]{32}\.apps\.googleusercontent\.com", "BF00C418024BA6BF606CCDC37120976E41BC429DD1D46ECF16A729AA532626EA");
+                        secret ??= MatchFingerprint(@"GOCSPX-[A-Za-z0-9_-]{28}", "1D2F041093FD95AA8995A038C711D50A7960DA09A505381C09A745D6AD0ECC60");
+                        if (id != null && secret != null) return (id, secret);
+                        // Keep matches spanning chunk boundaries without retaining the binary.
+                        tail = content.Length > 128 ? content[^128..] : content;
+                    }
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            return null;
+        }
+
+        internal static KeyringOAuthCreds WithInstalledOAuthClient(
+            KeyringOAuthCreds creds, (string Id, string Secret)? client)
+        {
+            if (client == null) return creds;
+            if (!string.IsNullOrWhiteSpace(creds.ClientId) && creds.ClientId != client.Value.Id)
+                return creds;
+            return creds with
+            {
+                ClientId = string.IsNullOrWhiteSpace(creds.ClientId) ? client.Value.Id : creds.ClientId,
+                ClientSecret = string.IsNullOrWhiteSpace(creds.ClientSecret) ? client.Value.Secret : creds.ClientSecret,
+            };
+        }
+
+        private static async Task<string?> RefreshGoogleTokenAsync(KeyringOAuthCreds creds, CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(creds.RefreshToken)) return null;
+            var keyringCredential = creds;
+            if (string.IsNullOrWhiteSpace(creds.ClientId) || string.IsNullOrWhiteSpace(creds.ClientSecret))
+                creds = WithInstalledOAuthClient(creds, InstalledOAuthClient.Value);
+            if (string.IsNullOrWhiteSpace(creds.ClientId)) return null;
+
+            var fields = new Dictionary<string, string>
+            {
+                ["grant_type"] = "refresh_token",
+                ["refresh_token"] = creds.RefreshToken!,
+                ["client_id"] = creds.ClientId!,
+            };
+            if (!string.IsNullOrWhiteSpace(creds.ClientSecret))
+                fields["client_secret"] = creds.ClientSecret;
+
+            using var req = new HttpRequestMessage(HttpMethod.Post, GoogleTokenUrl)
+            {
+                Content = new FormUrlEncodedContent(fields),
+            };
+            try
+            {
+                using var resp = await Cloud.SendAsync(req, ct).ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode) return null;
+                var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("access_token", out var at) || at.ValueKind != JsonValueKind.String)
+                    return null;
+                var newToken = at.GetString();
+                if (string.IsNullOrWhiteSpace(newToken)) return null;
+                int expiresIn = root.TryGetProperty("expires_in", out var ei) && ei.ValueKind == JsonValueKind.Number ? ei.GetInt32() : 3600;
+                Volatile.Write(ref _cachedAccessToken,
+                    new CachedGoogleAccessToken(keyringCredential, newToken, DateTimeOffset.UtcNow.AddSeconds(expiresIn)));
+                return newToken;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static KeyringOAuthCreds? ReadKeyringOAuthCreds()
+        {
+            var bytes = ReadGenericCredential(KeyringTargetName);
+            return bytes == null ? null : ParseKeyringOAuthCreds(bytes);
+        }
+
+        internal static KeyringOAuthCreds? ParseKeyringOAuthCreds(byte[] bytes)
+        {
+            // Go keyring writes UTF-8; other Windows keyring writers use UTF-16LE.
+            string raw = bytes.Length >= 2 && (bytes[1] == 0 || (bytes[0] == 0xff && bytes[1] == 0xfe))
+                ? Encoding.Unicode.GetString(bytes)
+                : Encoding.UTF8.GetString(bytes);
+            string payload = raw.TrimEnd('\0').TrimStart('\uFEFF').Trim();
+            if (payload.StartsWith(GoKeyringBase64Prefix, StringComparison.Ordinal))
+            {
+                try
+                {
+                    var decoded = Convert.FromBase64String(payload[GoKeyringBase64Prefix.Length..]);
+                    payload = Encoding.UTF8.GetString(decoded);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            try
+            {
+                using var doc = JsonDocument.Parse(payload);
+                var root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object) return null;
+                var token = root.TryGetProperty("token", out var nested) && nested.ValueKind == JsonValueKind.Object
+                    ? nested : root;
+
+                static string? GetStr(JsonElement el, params string[] names)
+                {
+                    foreach (var n in names)
+                        if (el.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String)
+                            return v.GetString();
+                    return null;
+                }
+
+                DateTimeOffset? expiry = null;
+                var expiryStr = GetStr(token, "expiry", "expires_at", "expiry_date");
+                if (!string.IsNullOrWhiteSpace(expiryStr) && DateTimeOffset.TryParse(expiryStr, out var dt))
+                    expiry = dt;
+
+                return new KeyringOAuthCreds(
+                    GetStr(token, "access_token", "accessToken"),
+                    GetStr(token, "refresh_token", "refreshToken"),
+                    GetStr(token, "client_id", "clientId") ?? GetStr(root, "client_id", "clientId"),
+                    GetStr(token, "client_secret", "clientSecret") ?? GetStr(root, "client_secret", "clientSecret"),
+                    expiry);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static byte[]? ReadGenericCredential(string targetName)
+        {
+            if (!CredReadW(targetName, 1, 0, out var credPtr) || credPtr == IntPtr.Zero)
+                return null;
+
+            try
+            {
+                var cred = Marshal.PtrToStructure<NATIVE_CREDENTIAL>(credPtr);
+                if (cred.CredentialBlob == IntPtr.Zero || cred.CredentialBlobSize <= 0)
+                    return null;
+
+                var bytes = new byte[cred.CredentialBlobSize];
+                Marshal.Copy(cred.CredentialBlob, bytes, 0, bytes.Length);
+                return bytes;
+            }
+            finally
+            {
+                CredFree(credPtr);
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct NATIVE_CREDENTIAL
+        {
+            public uint Flags;
+            public uint Type;
+            public IntPtr TargetName;
+            public IntPtr Comment;
+            public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+            public uint CredentialBlobSize;
+            public IntPtr CredentialBlob;
+            public uint Persist;
+            public uint AttributeCount;
+            public IntPtr Attributes;
+            public IntPtr TargetAlias;
+            public IntPtr UserName;
+        }
+
+        [DllImport("advapi32.dll", EntryPoint = "CredReadW", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CredReadW(string target, uint type, uint reservedFlag, out IntPtr credentialPtr);
+
+        [DllImport("advapi32.dll", EntryPoint = "CredFree", SetLastError = true)]
+        private static extern void CredFree(IntPtr cred);
     }
 }
