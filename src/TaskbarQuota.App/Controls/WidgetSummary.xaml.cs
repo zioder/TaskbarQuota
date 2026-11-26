@@ -606,6 +606,9 @@ namespace TaskbarQuota.Controls
                 return rows;
             }
 
+            if (result.Id == ProviderId.Cursor)
+                return BuildCursorRows(result, usage);
+
             if (usage.ExtraRateWindows.Count > 0)
             {
                 if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowExtra))
@@ -616,9 +619,6 @@ namespace TaskbarQuota.Controls
                 }
                 return new List<WidgetUsageRow>();
             }
-
-            if (result.Id == ProviderId.Cursor)
-                return BuildCursorRows(result, usage);
 
             return BuildBaseRows(result, usage);
         }
@@ -770,6 +770,9 @@ namespace TaskbarQuota.Controls
             return rows;
         }
 
+        /// <summary>
+        /// Cursor widget rows: plan meters plus each named extra (e.g. Grok Bot) with per-row visibility.
+        /// </summary>
         private static List<WidgetUsageRow> BuildCursorRows(UsageResult result, UsageSnapshot usage)
         {
             var rows = new List<WidgetUsageRow>();
@@ -782,6 +785,13 @@ namespace TaskbarQuota.Controls
 
             if (WidgetSettingsService.IsRowVisible(result.Id, WidgetSettingsService.RowPrimary))
                 rows.Add(WindowRow(result.Provider?.SessionLabel ?? "Total usage", usage.Primary));
+
+            foreach (var extra in usage.ExtraRateWindows)
+            {
+                var rowId = WidgetSettingsService.RowIdForNamedExtra(result.Id, extra);
+                if (WidgetSettingsService.IsRowVisible(result.Id, rowId))
+                    rows.Add(WindowRow(extra.Title, extra.Window));
+            }
 
             return rows;
         }

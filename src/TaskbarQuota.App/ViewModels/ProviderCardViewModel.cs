@@ -82,7 +82,7 @@ namespace TaskbarQuota.ViewModels
         }
 
         public BarViewModel(ProviderId providerId, NamedRateWindow w)
-            : this(providerId, WidgetSettingsService.RowExtra, w.Title, w.Window) { }
+            : this(providerId, WidgetSettingsService.RowIdForNamedExtra(providerId, w), w.Title, w.Window) { }
 
         internal void RefreshVisibility()
         {
