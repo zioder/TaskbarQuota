@@ -177,7 +177,7 @@ public class CodexResetCreditsFallbackTests
         using var handler = new OverlappingHandler();
         using var http = new HttpClient(handler);
         var service = new UsageService();
-        service.Register(new TransportProvider(new CodexProvider(http)));
+        service.Register(CreateTransportProvider(http));
         var olderRequest = service.FetchAsync(ProviderId.Codex, force: true);
         UsageResult newer;
         UsageResult older;
@@ -299,13 +299,14 @@ public class CodexResetCreditsFallbackTests
         using var handler = new ResetHandler { FixedUsage = true };
         using var http = new HttpClient(handler);
         var service = new UsageService();
-        service.Register(new TransportProvider(new CodexProvider(http)));
+        service.Register(CreateTransportProvider(http));
         var live = await service.FetchAsync(ProviderId.Codex, force: true);
         handler.FailUsage = true;
 
         var failed = await service.FetchAsync(ProviderId.Codex, force: true);
 
         Assert.Equal(UsageObservationOrigin.FailureFallback, failed.ObservationOrigin);
+        Assert.True(failed.IsStale);
         Assert.Equal(2, failed.Fetch!.Usage.ResetCredits!.AvailableCount);
         Assert.True(failed.Fetch.Usage.ResetCredits.IsCached);
         Assert.Equal(live.Fetch!.Usage.ResetCredits!.ConfirmedAt, failed.Fetch.Usage.ResetCredits.CachedAt);
@@ -318,7 +319,7 @@ public class CodexResetCreditsFallbackTests
     {
         using var handler = new ResetHandler { FixedUsage = true };
         using var http = new HttpClient(handler);
-        var provider = new TransportProvider(new CodexProvider(http));
+        var provider = CreateTransportProvider(http);
         var service = new UsageService();
         service.Register(provider);
         var live = await service.FetchAsync(ProviderId.Codex, force: true);
@@ -366,16 +367,8 @@ public class CodexResetCreditsFallbackTests
             }, "test"));
     }
 
-    private sealed class TransportProvider(CodexProvider provider) : IUsageProvider
-    {
-        public ProviderId Id => ProviderId.Codex;
-        public string DisplayName => "Codex";
-        public string SessionLabel => "Session";
-        public string WeeklyLabel => "Weekly";
-        public BillingKind Billing => BillingKind.Subscription;
-        public Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
-            => provider.FetchUsageAsync(new("test-token", "test-account"), "https://example.test/backend-api", ct);
-    }
+    private static CodexProvider CreateTransportProvider(HttpClient http)
+        => new(http, () => new("test-token", "test-account"), () => "https://example.test/backend-api");
 
     [Theory]
     [InlineData(false)]
@@ -416,7 +409,7 @@ public class CodexResetCreditsFallbackTests
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             if (request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal))
-                return Interlocked.Increment(ref _mainRequests) == 3
+                return Interlocked.Increment(ref _mainRequests) is 3 or 4
                     ? new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
                     : Json("""{"rate_limit":{"primary_window":{"used_percent":34}}}""");
             switch (Interlocked.Increment(ref _resetRequests))

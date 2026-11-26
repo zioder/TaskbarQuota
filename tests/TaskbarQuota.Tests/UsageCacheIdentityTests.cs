@@ -37,7 +37,7 @@ public sealed class UsageCacheIdentityTests : IDisposable
         Assert.False(failed.Ok);
         Assert.Equal(ProviderErrorKind.Other, failed.ErrorKind);
         Assert.Contains("503", failed.Error);
-        Assert.Equal(2, context.Handler.MainRequests);
+        Assert.Equal(3, context.Handler.MainRequests);
     }
 
     [Fact]

@@ -206,9 +206,11 @@ namespace TaskbarQuota.Usage
             }
             catch (ProviderException pe)
             {
-                if (ShouldReuseLastSuccessfulResult(pe.Kind) && TryGetLastSuccessfulLiveResult(id, out var lastSuccess))
+                var now = DateTimeOffset.Now;
+                if (ShouldReuseLastSuccessfulResult(pe.Kind) && TryGetLastSuccessfulLiveResult(id, out var lastSuccess)
+                    && (id != ProviderId.Codex || lastSuccess.CacheIdentity == attemptIdentity))
                 {
-                    var fallback = lastSuccess.AsFailureFallback(observationSequence, DateTimeOffset.Now);
+                    var fallback = lastSuccess.AsFailureFallback(observationSequence, now, isStale: id == ProviderId.Codex);
                     return Store(id, fallback, FetchCachePolicy.TtlForFailure(pe.Kind), observationSequence);
                 }
 
@@ -229,6 +231,15 @@ namespace TaskbarQuota.Usage
             }
             catch (Exception ex)
             {
+                var now = DateTimeOffset.Now;
+                if (id == ProviderId.Codex
+                    && TryGetLastSuccessfulLiveResult(id, out var lastSuccess)
+                    && lastSuccess.CacheIdentity == attemptIdentity)
+                {
+                    var fallback = lastSuccess.AsFailureFallback(observationSequence, now, isStale: true);
+                    return Store(id, fallback, FetchCachePolicy.TtlForFailure(null), observationSequence);
+                }
+
                 if (TryCreateLocalHistoryResult(id, provider, out var localResult))
                 {
                     localResult = localResult.AsFailureFallback(observationSequence, DateTimeOffset.Now);
@@ -392,7 +403,8 @@ namespace TaskbarQuota.Usage
                 if (_lastSuccessfulLiveResults.TryGetValue(id, out var stored))
                     candidate = stored;
             }
-            if (candidate is not null && UsageCacheIdentity.IsCurrent(candidate.Provider, candidate.Fetch, candidate.CacheIdentity))
+            if (candidate is not null && CanReuseQuota(candidate, DateTimeOffset.Now)
+                && UsageCacheIdentity.IsCurrent(candidate.Provider, candidate.Fetch, candidate.CacheIdentity))
             {
                 result = candidate.AsMemoryCache();
                 return true;
@@ -405,7 +417,13 @@ namespace TaskbarQuota.Usage
         private bool TryGetValidEntry(ProviderId id, out CacheEntry entry)
         {
             if (_cache.TryGetValue(id, out entry!) && entry.IsValid)
-                return true;
+            {
+                // Only a fallback can expire ahead of its TTL. Keep successful HTTP responses
+                // cached even if the server includes an already-past reset in a quota window.
+                if (entry.Result is not { IsStale: true, ObservationOrigin: UsageObservationOrigin.FailureFallback }
+                    || CanReuseQuota(entry.Result, DateTimeOffset.Now))
+                    return true;
+            }
 
             entry = default;
             return false;
@@ -413,6 +431,13 @@ namespace TaskbarQuota.Usage
 
         private static bool ShouldReuseLastSuccessfulResult(ProviderErrorKind kind)
             => kind is not ProviderErrorKind.AuthRequired and not ProviderErrorKind.NotInstalled;
+
+        internal static bool CanReuseQuota(UsageResult result, DateTimeOffset now)
+            => result.Id != ProviderId.Codex
+            || result.Fetch is not { } fetch
+            || result.LastConfirmedAt is not { } confirmedAt
+            || (confirmedAt <= now && now - confirmedAt <= UsageSnapshotStore.MaxRestoreAge
+                && !UsageSnapshotStore.HasResetWindow(fetch.Usage, now));
 
         private static bool IsSuspiciousClaudeZeroResult(UsageResult result, UsageResult previous)
             => result.Id == ProviderId.Claude
@@ -503,6 +528,7 @@ namespace TaskbarQuota.Usage
 
             var usage = new UsageSnapshot(new RateWindow(0))
             {
+                HasPrimaryWindow = false,
                 UsageHistory = history,
             };
             result = UsageResult.Success(
@@ -761,8 +787,8 @@ namespace TaskbarQuota.Usage
                 ObservedAt,
                 IsStale);
 
-        internal UsageResult AsFailureFallback(long sequence, DateTimeOffset observedAt)
-            => WithObservation(UsageObservationOrigin.FailureFallback, sequence, observedAt, isStale: false, newAttempt: true);
+        internal UsageResult AsFailureFallback(long sequence, DateTimeOffset observedAt, bool isStale = false)
+            => WithObservation(UsageObservationOrigin.FailureFallback, sequence, observedAt, isStale, newAttempt: true);
 
         internal UsageResult AsAccountTransition(long sequence, DateTimeOffset observedAt)
             => WithObservation(UsageObservationOrigin.AccountTransition, sequence, observedAt, isStale: false, newAttempt: true);

@@ -24,6 +24,8 @@ namespace TaskbarQuota.Usage.Providers
         private const string DefaultBaseUrl = "https://chatgpt.com/backend-api";
         private const string UsagePath = "/wham/usage";
         private const string ResetCreditsPath = "/wham/rate-limit-reset-credits";
+        private static readonly TimeSpan UsageAttemptTimeout = TimeSpan.FromSeconds(12);
+        private static readonly TimeSpan UsageRetryDelay = TimeSpan.FromMilliseconds(500);
         private static readonly TimeSpan ResetCreditsTimeout = TimeSpan.FromSeconds(3);
         private readonly object _resetCreditsLock = new();
         private ResetCreditsSnapshot? _lastResetCredits;
@@ -83,11 +85,13 @@ namespace TaskbarQuota.Usage.Providers
                     }
                 }
             }
-            using var request = CreateRequest(creds, UsagePath, baseUrl);
-            using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
+            using var response = await SendUsageRequestAsync(creds, baseUrl, ct).ConfigureAwait(false);
 
             if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
                 throw new ProviderException(ProviderErrorKind.AuthRequired, "Codex token expired. Run `codex login`.");
+
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                throw new ProviderException(ProviderErrorKind.RateLimited, "Codex API rate limited.");
 
             if (!response.IsSuccessStatusCode)
                 throw new ProviderException(ProviderErrorKind.Other, $"Codex API returned {(int)response.StatusCode}");
@@ -107,6 +111,53 @@ namespace TaskbarQuota.Usage.Providers
                 result.Usage.ResetCredits, resetCreditsDoc is not null, identity, DateTimeOffset.UtcNow, sequence);
             return new ProviderFetchResult(result.Usage, result.SourceLabel, result.FetchedAt, identity);
         }
+
+        private async Task<HttpResponseMessage> SendUsageRequestAsync(Credentials creds, string baseUrl, CancellationToken ct)
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(UsageAttemptTimeout);
+                using var request = CreateRequest(creds, UsagePath, baseUrl);
+                try
+                {
+                    var response = await _http.SendAsync(request, timeout.Token).ConfigureAwait(false);
+                    if (response.IsSuccessStatusCode)
+                        return response;
+
+                    var retryAfter = response.Headers.RetryAfter;
+                    var wait = retryAfter?.Delta ?? retryAfter?.Date - DateTimeOffset.UtcNow;
+                    bool retry = attempt == 1 && IsRetryableStatus(response.StatusCode)
+                        && !(wait > UsageRetryDelay);
+                    Diagnostics.Log.Warning($"[codex] usage request {attempt} returned HTTP {(int)response.StatusCode}; retry={retry}");
+                    if (!retry)
+                        return response;
+                    response.Dispose();
+                }
+                catch (HttpRequestException ex) when (!ct.IsCancellationRequested)
+                {
+                    bool retry = attempt == 1 && ex.HttpRequestError is HttpRequestError.NameResolutionError
+                        or HttpRequestError.ConnectionError or HttpRequestError.ResponseEnded;
+                    Diagnostics.Log.Warning($"[codex] usage request {attempt} failed: {ex.HttpRequestError}; retry={retry}");
+                    if (!retry)
+                        throw;
+                }
+                catch (OperationCanceledException ex) when (!ct.IsCancellationRequested
+                    && (timeout.IsCancellationRequested || ex.InnerException is TimeoutException))
+                {
+                    bool retry = attempt == 1;
+                    Diagnostics.Log.Warning($"[codex] usage request {attempt} timed out; retry={retry}");
+                    if (!retry)
+                        throw new TimeoutException("Codex usage request timed out.", ex);
+                }
+
+                await Task.Delay(UsageRetryDelay, ct).ConfigureAwait(false);
+            }
+        }
+
+        private static bool IsRetryableStatus(HttpStatusCode status)
+            => status is HttpStatusCode.RequestTimeout or HttpStatusCode.InternalServerError
+                or HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout;
 
         internal ResetCreditsSnapshot? ResolveResetCredits(
             ResetCreditsSnapshot? fetched, bool requestSucceeded, string identity, DateTimeOffset now, long sequence = 0)

@@ -64,10 +64,11 @@ namespace TaskbarQuota.Usage
                         continue;
                     if (entry.Usage is not { } usage)
                         continue;
-                    if (HasResetWindow(usage, now))
+                    var snapshot = ToSnapshot(usage);
+                    if (HasResetWindow(snapshot, now))
                         continue;
 
-                    var fetch = new ProviderFetchResult(ToSnapshot(usage), entry.SourceLabel ?? string.Empty,
+                    var fetch = new ProviderFetchResult(snapshot, entry.SourceLabel ?? string.Empty,
                         entry.FetchedAt, entry.CacheIdentity);
                     if (!UsageCacheIdentity.IsCurrent(provider, fetch))
                         continue;
@@ -114,9 +115,9 @@ namespace TaskbarQuota.Usage
             }
         }
 
-        private static bool HasResetWindow(StoredUsage usage, DateTimeOffset now)
+        internal static bool HasResetWindow(UsageSnapshot usage, DateTimeOffset now)
             => new[] { usage.Primary, usage.Secondary, usage.ModelSpecific, usage.Monthly }
-                .Concat(usage.ExtraRateWindows?.Select(w => w.Window) ?? Enumerable.Empty<StoredWindow?>())
+                .Concat(usage.ExtraRateWindows.Select(w => w.Window))
                 .Any(w => w?.ResetAt is { } resetAt && now >= resetAt);
 
         private static UsageSnapshot ToSnapshot(StoredUsage stored)
