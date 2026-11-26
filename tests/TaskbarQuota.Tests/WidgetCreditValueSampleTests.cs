@@ -36,29 +36,35 @@ public class WidgetCreditValueSampleTests
         Assert.Equal("300/300".Length, WidgetSummary.CreditValueSample("7/300").Length);
     }
 
-    [Fact]
-    public void TaskbarTooltipAddsTodayCostWithoutAddingAVisibleRow()
+    [Theory]
+    [InlineData("en-US", "\nToday: $25.15 estimated · 35.4M tokens")]
+    [InlineData("ru-RU", "\nToday: $25,15 estimated · 35,4M tokens")]
+    public void TaskbarTooltipAddsTodayCostWithoutAddingAVisibleRow(string culture, string expectedTooltip)
     {
+        using var scope = new CultureScope(culture);
         var history = new UsageHistory
         {
             Today = new UsagePeriod(35_400_000, 25.15, estimateComplete: true),
         };
 
         Assert.Equal(
-            "\nToday: $25.15 estimated · 35.4M tokens",
+            expectedTooltip,
             WidgetSummary.WidgetUsageHistoryTooltipLine(history));
     }
 
-    [Fact]
-    public void TaskbarTooltipKeepsTokensWhenCostIsUnavailable()
+    [Theory]
+    [InlineData("en-US", "\nToday: 1.5M tokens · cost unavailable")]
+    [InlineData("ru-RU", "\nToday: 1,5M tokens · cost unavailable")]
+    public void TaskbarTooltipKeepsTokensWhenCostIsUnavailable(string culture, string expectedTooltip)
     {
+        using var scope = new CultureScope(culture);
         var history = new UsageHistory
         {
             Today = new UsagePeriod(1_500_000, null, estimateComplete: false),
         };
 
         Assert.Equal(
-            "\nToday: 1.5M tokens · cost unavailable",
+            expectedTooltip,
             WidgetSummary.WidgetUsageHistoryTooltipLine(history));
     }
 }
