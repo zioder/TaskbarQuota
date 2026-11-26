@@ -107,7 +107,8 @@ public static class PricingEngine
     /// <summary>Input-token boundary above which OpenAI bills a request at long-context rates (272K, not 200K).</summary>
     private const ulong OpenAiLongContextThreshold = 272_000;
 
-    private static readonly PricingCatalogStore Store = new();
+    private static bool _bundledOnlyForTesting;
+    private static readonly Lazy<PricingCatalogStore> Store = new(() => new(bundledOnly: _bundledOnlyForTesting));
     private static readonly Dictionary<string, ModelRates> CompatibilityRates = new(StringComparer.OrdinalIgnoreCase)
     {
         ["claude-3-7-sonnet"] = new(3, 15, 3.75, .3), ["claude-3-5-sonnet"] = new(3, 15, 3.75, .3),
@@ -123,10 +124,19 @@ public static class PricingEngine
         "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-4.1", "gpt-4o",
     };
 
-    private static readonly Dictionary<string, ModelRates> OverrideRates = LoadOverrides();
+    private static readonly Lazy<Dictionary<string, ModelRates>> OverrideRates = new(() => _bundledOnlyForTesting
+        ? new Dictionary<string, ModelRates>(StringComparer.OrdinalIgnoreCase)
+        : LoadOverrides());
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, ModelRates?> ResolveCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly DateTimeOffset GeminiFlashIntroEnds = new(2027, 1, 1, 0, 0, 0, TimeSpan.Zero);
     private static readonly ModelRates GeminiFlashStandardRates = new(1.5, 7.5, 1.5, .15);
+
+    internal static void UseBundledCatalogForTesting()
+    {
+        if (Store.IsValueCreated || OverrideRates.IsValueCreated || !ResolveCache.IsEmpty)
+            throw new InvalidOperationException("Test pricing must be configured before the first resolution.");
+        _bundledOnlyForTesting = true;
+    }
 
     public static ModelRates? Resolve(string modelName)
     {
@@ -145,7 +155,7 @@ public static class PricingEngine
     {
         var rates = Resolve(modelName);
         if (rates is null || pricingDate.ToUniversalTime() < GeminiFlashIntroEnds
-            || OverrideRates.ContainsKey(modelName))
+            || OverrideRates.Value.ContainsKey(modelName))
             return rates;
         var clean = modelName.Trim();
         return clean.Equals("gemini-3.6-flash", StringComparison.OrdinalIgnoreCase)
@@ -161,14 +171,14 @@ public static class PricingEngine
         if (modelName.Contains("claude-3-7-sonnet", StringComparison.OrdinalIgnoreCase)) return CompatibilityRates["claude-3-7-sonnet"];
         if (modelName.Contains("claude-haiku", StringComparison.OrdinalIgnoreCase)) return CompatibilityRates["claude-3-5-haiku"];
         if (modelName.Contains("xai-grok-3", StringComparison.OrdinalIgnoreCase)) return CompatibilityRates["grok-3"];
-        var storeRates = Store.Current().Resolve(modelName);
+        var storeRates = Store.Value.Current().Resolve(modelName);
         if (storeRates is null) return null;
         var withOverrides = ApplyOverrides(modelName, storeRates);
         return ApplyOpenAiThreshold(modelName, withOverrides);
     }
 
     private static ModelRates ApplyOverrides(string modelName, ModelRates rates)
-        => OverrideRates.TryGetValue(modelName, out var overrideRates) ? overrideRates : rates;
+        => OverrideRates.Value.TryGetValue(modelName, out var overrideRates) ? overrideRates : rates;
 
     private static ModelRates ApplyOpenAiThreshold(string modelName, ModelRates rates)
     {
