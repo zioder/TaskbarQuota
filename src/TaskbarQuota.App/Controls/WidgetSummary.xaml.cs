@@ -103,6 +103,7 @@ namespace TaskbarQuota.Controls
         internal bool HideCodexResetCredits { get; private set; }
         private bool _forcePercentagesOnly;
         private UsageResult? _lastResult;
+        private readonly UsageObservationSequenceGate _observationSequenceGate = new();
         private ProviderId? _lastAppliedProvider;
         private AgentActivityStatus? _agentStatus;
         private AgentActivitySnapshot _lastActivitySnapshot = new(Array.Empty<AgentActivityItem>());
@@ -243,10 +244,17 @@ namespace TaskbarQuota.Controls
                 SetActiveToolVisible(false);
                 return;
             }
+            if (!_observationSequenceGate.TryAccept(result))
+                return;
 
             var signature = BuildRenderSignature(result);
             if (!force && _lastRenderSignature == signature)
+            {
+                // Identical values can still be a newer confirmation. Keep metadata current even
+                // when no redraw is needed, so an older queued observation can't win afterward.
+                _lastResult = result;
                 return;
+            }
 
             var isFirstReveal = !_hasRevealed;
             var providerChanged = _lastAppliedProvider != result.Id;
@@ -1828,7 +1836,7 @@ namespace TaskbarQuota.Controls
                 ? $"\nLast updated {fetch.FetchedAt.ToLocalTime():t} — refreshing…"
                 : string.Empty;
 
-        private static string BuildRenderSignature(UsageResult result)
+        internal static string BuildRenderSignature(UsageResult result)
         {
             var parts = new List<string>
             {
@@ -1846,6 +1854,7 @@ namespace TaskbarQuota.Controls
 
             var usage = fetch.Usage;
             parts.Add(fetch.SourceLabel);
+            parts.Add(usage.HasPrimaryWindow ? "primary" : "no-primary");
             parts.Add(usage.LoginMethod ?? string.Empty);
             parts.Add(usage.Email ?? string.Empty);
             parts.Add(usage.Cost?.Display ?? string.Empty);
@@ -1891,6 +1900,10 @@ namespace TaskbarQuota.Controls
 
             parts.Add(window.UsedPercent.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture));
             parts.Add(window.IsIncluded ? "included" : "not-included");
+            parts.Add(window.Label ?? string.Empty);
+            parts.Add(window.ShowCostValue ? "cost" : "percent");
+            parts.Add(window.WindowMinutes?.ToString(CultureInfo.InvariantCulture) ?? string.Empty);
+            parts.Add(window.ResetAt?.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty);
             parts.Add(window.ResetDescription ?? string.Empty);
         }
 

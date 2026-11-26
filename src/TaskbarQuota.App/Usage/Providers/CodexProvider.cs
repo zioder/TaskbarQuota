@@ -19,7 +19,7 @@ namespace TaskbarQuota.Usage.Providers
     /// Codex (ChatGPT) usage via the OAuth token stored by the Codex CLI in ~/.codex/auth.json.
     /// Ported from Win-CodexBar rust/src/providers/codex/api.rs.
     /// </summary>
-    public sealed class CodexProvider : IUsageProvider
+    public sealed class CodexProvider : IUsageProvider, IUsageCacheIdentityProvider
     {
         private const string DefaultBaseUrl = "https://chatgpt.com/backend-api";
         private const string UsagePath = "/wham/usage";
@@ -32,6 +32,8 @@ namespace TaskbarQuota.Usage.Providers
         private long _nextRequestSequence;
         private long _completedResetCreditsSequence;
         private readonly HttpClient _http;
+        private readonly Func<Credentials> _credentialsSource;
+        private readonly Func<string> _baseUrlSource;
         private static readonly Regex CodexModelPrefix = new(@"^GPT-[\d.]+-Codex-", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         private static readonly HttpClient Http = new(new HttpClientHandler())
@@ -47,14 +49,39 @@ namespace TaskbarQuota.Usage.Providers
 
         public CodexProvider() : this(Http) { }
 
-        internal CodexProvider(HttpClient http) => _http = http;
+        internal CodexProvider(HttpClient http, Func<Credentials>? credentialsSource = null, Func<string>? baseUrlSource = null)
+        {
+            _http = http;
+            _credentialsSource = credentialsSource ?? LoadCredentials;
+            _baseUrlSource = baseUrlSource ?? ResolveBaseUrl;
+        }
 
         public Task<ProviderFetchResult> FetchUsageAsync(CancellationToken ct = default)
-            => FetchUsageAsync(LoadCredentials(), ResolveBaseUrl(), ct);
+            => FetchUsageAsync(_credentialsSource(), _baseUrlSource(), ct);
+
+        string IUsageCacheIdentityProvider.GetCurrentCacheIdentity()
+            => CacheIdentityFor(_credentialsSource(), _baseUrlSource());
+
+        private static string CacheIdentityFor(Credentials credentials, string baseUrl)
+            => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+                $"{baseUrl}\n{credentials.AccountId}\n{credentials.AccessToken}")));
 
         internal async Task<ProviderFetchResult> FetchUsageAsync(Credentials creds, string baseUrl, CancellationToken ct = default)
         {
             long sequence = Interlocked.Increment(ref _nextRequestSequence);
+            var identity = CacheIdentityFor(creds, baseUrl);
+            lock (_resetCreditsLock)
+            {
+                if (sequence >= _completedResetCreditsSequence)
+                {
+                    _completedResetCreditsSequence = sequence;
+                    if (!string.Equals(_resetCreditsIdentity, identity, StringComparison.Ordinal))
+                    {
+                        _lastResetCredits = null;
+                        _resetCreditsIdentity = identity;
+                    }
+                }
+            }
             using var request = CreateRequest(creds, UsagePath, baseUrl);
             using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
 
@@ -75,11 +102,9 @@ namespace TaskbarQuota.Usage.Providers
             var result = BuildResult(doc.RootElement, headerPrimary, headerSecondary, headerCredits, resetCreditsDoc?.RootElement);
             // Exact credential matching is deliberately conservative: a token rotation drops the fallback
             // rather than risk carrying another account's credits across an ambiguous identity change.
-            string identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-                $"{baseUrl}\n{creds.AccountId}\n{creds.AccessToken}")));
             result.Usage.ResetCredits = ResolveResetCredits(
                 result.Usage.ResetCredits, resetCreditsDoc is not null, identity, DateTimeOffset.UtcNow, sequence);
-            return result;
+            return new ProviderFetchResult(result.Usage, result.SourceLabel, result.FetchedAt, identity);
         }
 
         internal ResetCreditsSnapshot? ResolveResetCredits(
@@ -91,7 +116,7 @@ namespace TaskbarQuota.Usage.Providers
             {
                 // A delayed old response must never replace a newer explicit zero or account switch.
                 if (sequence < _completedResetCreditsSequence)
-                    return requestSucceeded ? fetched : null;
+                    return requestSucceeded ? fetched?.WithConfirmation(now).CurrentAt(now) : null;
                 _completedResetCreditsSequence = sequence;
                 if (!string.Equals(_resetCreditsIdentity, identity, StringComparison.Ordinal))
                 {
@@ -102,9 +127,9 @@ namespace TaskbarQuota.Usage.Providers
                 if (requestSucceeded)
                 {
                     // A successful zero or missing credit block is authoritative; don't resurrect it.
-                    _lastResetCredits = fetched;
+                    _lastResetCredits = fetched?.WithConfirmation(now).CurrentAt(now);
                     _lastResetCreditsAt = now;
-                    return fetched;
+                    return _lastResetCredits;
                 }
 
                 if (_lastResetCredits is not { } previous)
